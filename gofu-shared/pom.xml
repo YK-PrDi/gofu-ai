@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.gofu</groupId>
+        <artifactId>gofu-ai</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>gofu-shared</artifactId>
+    <name>gofu-shared</name>
+    <description>共享契约层：商品全局上下文、DTO、枚举。只放契约，严禁业务逻辑。</description>
+
+    <!-- 普通库 jar：不声明 spring-boot-maven-plugin，不被 repackage。
+         两端（cloud/local）唯一允许跨模块依赖的对象就是本模块。 -->
+    <dependencies>
+        <!-- 仅序列化注解，供 DTO/上下文使用，不引入任何运行容器 -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-annotations</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+    </dependencies>
+</project>

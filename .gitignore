@@ -1,0 +1,43 @@
+# Maven
+target/
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# 构建产物
+dist/
+dist-electron/
+out/
+
+# Electron / Node
+node_modules/
+electron/secret.js
+
+# 数据库（含隐私，不提交）
+*.db
+*.db-shm
+*.db-wal
+
+# 密钥与本地配置（绝不提交）
+application-local.yml
+application-prod.yml
+.env
+*-session.json
+user-prefs.json
+
+# 运行时临时目录
+.temp-output/
+.multipart-temp/
+.history-refs/
+.firecrawl/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# 日志
+*.log

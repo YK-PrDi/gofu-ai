@@ -1,0 +1,15 @@
+server:
+  port: 5020
+
+spring:
+  application:
+    name: gofu-server-cloud
+  # 上下文权威源：SQLite 本地文件库，沿用 ele 的零运维方案
+  datasource:
+    url: jdbc:sqlite:${user.dir}/gofu-cloud.db
+    driver-class-name: org.sqlite.JDBC
+  jpa:
+    database-platform: org.hibernate.community.dialect.SQLiteDialect
+    hibernate:
+      ddl-auto: update
+    show-sql: false

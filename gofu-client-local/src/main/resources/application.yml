@@ -1,0 +1,11 @@
+server:
+  port: 5021
+
+spring:
+  application:
+    name: gofu-client-local
+
+# 云端生图服务地址：cloudgw 通过此地址调用 gofu-server-cloud
+gofu:
+  cloud:
+    base-url: ${GOFU_CLOUD_URL:http://localhost:5020}
