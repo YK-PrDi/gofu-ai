@@ -12,6 +12,16 @@ out/
 node_modules/
 electron/secret.js
 
+# 本地运行时二进制（体积大，不入 git，由 provision 脚本/playwright install 获取）
+gofu-client-local/tools/node/
+gofu-client-local/tools/browsers/
+gofu-client-local/tools/*.exe
+
+# Playwright 运行时产物（截图/cookies/诊断）
+gofu-client-local/tools/*.png
+gofu-client-local/tools/pdd_cookies.json
+gofu-client-local/tools/sku_input_diag.json
+
 # 数据库（含隐私，不提交）
 *.db
 *.db-shm
@@ -41,3 +51,6 @@ Thumbs.db
 
 # 日志
 *.log
+
+# 验证证据（本地留存，不入库）
+.verify-evidence/

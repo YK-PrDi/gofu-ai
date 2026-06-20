@@ -53,6 +53,18 @@
 
 **验证（M2）**：POST/GET 往返三层嵌套（visual.sellingPoints → plans[].items[].accParts）完全一致；SQLite 实测建表含 `tenant_id varchar(64) not null` + 4 索引，context_json 存完整 803B JSON。
 
+### ADR-007 M4 范围调整：生图相关暂缓，先迁纯上新（2026-06-20）
+
+**背景**：LY 那边正在改"防比价生图质量"，且 M3（云端生图）暂停等其稳定。
+
+**决策**：M4 拆分，本期只迁**不依赖 AI/生图**的部分：
+- **M4a 完成**：Playwright 反风控工具链（pdd_listing.js + node/browsers/node_modules）原样迁入，运行时二进制 junction 链接、gitignore。
+- **M4b 完成**：上新调度迁入（ListingService/ListingConfig/TaskService/GenerationTask/ListingController/TaskController），包名 com.lyauto→com.gofu.local。**剥离**：ImageGenService 依赖、AI 方法（标题生成 prepareWithAI/Vision/TitleLib、SKU 规划 generateSkuPlans）、生图端点（/prepare /gen-sku-images /analyze-bg）。AppProperties 仅留 Paths。
+- **M4c 暂缓**：Canvas 合成（compositeShowerLeft）与生图调用交织，且可能是对方正在改的区域。等 M3 + 生图稳定。
+- **剥离的 AI 能力**待云端 AI 服务就绪后，由本地 cloudgw 调用，不在本地重建。
+
+**验证（M4a/b/d）**：本地服务启动 5021；product-info/list-images 端点真实响应；通过 /api/listing/run 触发 dry-run，完整链路 Java→Playwright子进程→真实Chromium 跑通，浏览器导航到拼多多商家后台登录页并触发人工介入暂停（headless=false 实证，截图存档 .verify-evidence/）。
+
 ---
 
 ## 第二部分：雷区清单（不读源码发现不了的隐藏约束）
@@ -155,8 +167,8 @@
 |---|---|---|---|
 | M1 地基 | 骨架+父POM+三模块+分层CLAUDE.md+本文件 | `mvn compile` 通过 | ✅ 完成 |
 | M2 契约 | ProductContext+DTO+云端上下文表（预埋tenant_id） | 建表成功 | ✅ 完成 |
-| M3 云端 | ele 生图Agent迁入，封装生图/重绘REST，接上下文 | 生图并写入context | 待办 |
-| M4 本地 | LY上新/Canvas/反风控迁入，生图改调cloudgw | 拉context+Playwright headless=false留截图 | 待办 |
+| M3 云端 | ele 生图Agent迁入，封装生图/重绘REST，接上下文 | 生图并写入context | ⏸ 暂停（等LY生图稳定） |
+| M4 本地 | LY上新/Canvas/反风控迁入，生图改调cloudgw | 拉context+Playwright headless=false留截图 | 🔄 M4a/b/d 完成，M4c 暂缓 |
 | M5 双轨 | 流程1卖点→流程2 SKU规划反哺打通 | 录入1品类，context两轨数据齐全 | 待办 |
 | M6 预览页 | Vue3 预览页（合流预览+微调回写+字段锁定）+ 旧页原生JS共存 | 点击≤3次，改价联动/局部重绘/锁定生效 | 待办 |
 | M7 上新 | 预览确认→本地一键上新，滑块人工介入 | 真实店铺跑通一单，留截图 | 待办 |
