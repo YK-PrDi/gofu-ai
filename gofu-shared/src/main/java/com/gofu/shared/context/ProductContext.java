@@ -1,16 +1,60 @@
 package com.gofu.shared.context;
 
-/**
- * 商品全局上下文（系统脊柱）—— 占位。
- *
- * <p>这是打通"生图视觉流"与"上新结构流"数据孤岛的核心对象，权威存储在云端。
- * 完整字段（visual / structure / lockedFields / status / tenantId）在 M2 契约里程碑定义。
- *
- * <p>本类目前仅作骨架占位，使三模块可编译。请勿在此添加业务逻辑。
- */
-public final class ProductContext {
+import com.gofu.shared.enums.ContextStatus;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 
-    private ProductContext() {
-        // 占位：M2 将替换为真实的不可变上下文模型
-    }
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * 商品全局上下文（系统脊柱）。打通"生图视觉流"与"上新结构流"数据孤岛的核心聚合根。
+ *
+ * <p>权威源在云端数据库（{@code gofu-server-cloud}），本地按需拉取+乐观回写（ADR-003）。
+ * 完整数据流：流程1 写入 visual.sellingPoints → 流程2 读卖点反哺 structure.plans →
+ * 预览页渲染整个 context → 人工微调写回并追加 lockedFields → 上新从 context 取最终数据。
+ *
+ * <p>⚠️ 改本类字段属于大改动（影响云端存储、本地缓存、预览页渲染三处），
+ * 须先按 CLAUDE.md 改动分级走 brainstorm + plan + 独立 review。
+ */
+@Data
+@NoArgsConstructor
+public class ProductContext {
+
+    /** 上下文唯一 ID（云端生成）。 */
+    private String id;
+
+    /**
+     * 租户 ID。⚠️ 预埋字段（ADR-004）：MVP 写死 "default"，不实现隔离逻辑。
+     * 所有持久化数据强绑定此字段，未来多租户隔离的基础。
+     */
+    private String tenantId = "default";
+
+    /** 业务商品 ID。 */
+    private String productId;
+
+    /** 品类（完整路径，如"家装主材>卫浴>花洒喷头"）。 */
+    private String category;
+
+    /** 主件名称/编码。 */
+    private String mainItem;
+
+    /** 视觉流产物（流程 1）。 */
+    private VisualContent visual = new VisualContent();
+
+    /** 结构流产物（流程 2）。 */
+    private StructureContent structure = new StructureContent();
+
+    /**
+     * 劳动成果锁定：人工微调过的字段名清单（如 ["title","plans[0].items[2].skuDisplayName"]）。
+     * 重新生成时跳过这些字段，防止覆盖人工心血。
+     */
+    private List<String> lockedFields = new ArrayList<>();
+
+    /** 双向状态机当前状态。 */
+    private ContextStatus status = ContextStatus.DRAFT;
+
+    private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
 }

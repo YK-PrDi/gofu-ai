@@ -45,6 +45,14 @@
 - Vue3 优先用 CDN/单文件挂载方式接入，**不引入 Vite 构建链**，以免改变现有"免构建静态文件"的 Electron 加载与打包流程（见雷区 8）。仅当预览页复杂度确实压不住时再评估 Vite。
 - 预览页只负责渲染 + 微调 ProductContext，所有数据走既有 REST，不新造前端状态后端。
 
+### ADR-006 ProductContext 混合存储（2026-06-20）
+
+**决策**：云端 `ProductContextEntity` 用混合存储——高频查询维度（id/tenantId/productId/category/status/时间戳）走真实列并建索引；完整 ProductContext 序列化进 `context_json` clob 列。
+
+**理由**：直接规避 SQLite `ddl-auto:update` 无法 DROP/RENAME 列的陷阱（雷区 3）。改 ProductContext 子结构字段时只动 JSON、不迁移表；只有新增"可查询维度"才加真实列。
+
+**验证（M2）**：POST/GET 往返三层嵌套（visual.sellingPoints → plans[].items[].accParts）完全一致；SQLite 实测建表含 `tenant_id varchar(64) not null` + 4 索引，context_json 存完整 803B JSON。
+
 ---
 
 ## 第二部分：雷区清单（不读源码发现不了的隐藏约束）
@@ -128,6 +136,17 @@
 - 取消靠 worker 主动轮询 `task.isCancelled()`。
 - **TTL**：完成任务内存保留 60 分钟、`.temp-output` 文件 2 小时后清理。前端须在 TTL 内拉完 results，否则 404。
 
+### 雷区 12：本地单模块运行前必须先 install（构建顺序）
+
+- `gofu-shared` 是 cloud/local 的依赖。**单独 `mvn spring-boot:run` 某个模块前**，必须先把父 POM + shared 装进本地仓库，否则报 `Could not find artifact com.gofu:gofu-shared / gofu-ai:pom`。
+- 正确姿势：仓库根执行 `mvn -N install`（装父POM）+ `mvn -pl gofu-shared install`（装契约），或直接 `mvn install -DskipTests` 全量。改了 shared 后也要重新 install 才对下游生效。
+- 全量 `mvn compile`（reactor 模式）不受影响——reactor 会自动按序编译，问题只出在"单模块孤立运行"。
+
+### 雷区 13：中文请求体必须 UTF-8 传输
+
+- 实测 Windows shell 下 `curl -d '中文'` 会触发 `Invalid UTF-8 start byte` 400 错误（shell 编码污染，非代码问题）。
+- 测试带中文的接口用 `--data-binary @file.json` + `charset=utf-8`，文件存 UTF-8。前端 fetch 走 JSON 不受影响。
+
 ---
 
 ## 第三部分：实施里程碑
@@ -135,7 +154,7 @@
 | 里程碑 | 内容 | 验证 | 状态 |
 |---|---|---|---|
 | M1 地基 | 骨架+父POM+三模块+分层CLAUDE.md+本文件 | `mvn compile` 通过 | ✅ 完成 |
-| M2 契约 | ProductContext+DTO+云端上下文表（预埋tenant_id） | 建表成功 | 待办 |
+| M2 契约 | ProductContext+DTO+云端上下文表（预埋tenant_id） | 建表成功 | ✅ 完成 |
 | M3 云端 | ele 生图Agent迁入，封装生图/重绘REST，接上下文 | 生图并写入context | 待办 |
 | M4 本地 | LY上新/Canvas/反风控迁入，生图改调cloudgw | 拉context+Playwright headless=false留截图 | 待办 |
 | M5 双轨 | 流程1卖点→流程2 SKU规划反哺打通 | 录入1品类，context两轨数据齐全 | 待办 |
