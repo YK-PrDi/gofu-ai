@@ -65,6 +65,30 @@
 
 **验证（M4a/b/d）**：本地服务启动 5021；product-info/list-images 端点真实响应；通过 /api/listing/run 触发 dry-run，完整链路 Java→Playwright子进程→真实Chromium 跑通，浏览器导航到拼多多商家后台登录页并触发人工介入暂停（headless=false 实证，截图存档 .verify-evidence/）。
 
+### ADR-008 ProductContext 存永久 COS key，展示层按需换签（2026-07-01）
+
+**背景**：ele 同事把 COS 上传改成返回 7 天签名 URL。若 ProductContext 直接存签名 URL，7 天后图失效、上下文永久损坏。
+
+**决策**：`CosService.upload` 返回**永久 COS key**（如 `generated/20260628/xxx.jpg`），ProductContext 只存 key。新增 `CosService.signKey(key)` 按需换 7 天签名 URL，经 `GET /api/gen/sign?key=` 暴露给展示层。上下文数据永不过期。
+
+**验证（M3）**：/api/gen/sign 端点返回正常；upload 逻辑返回 key（无 COS 环境降级本地路径）。
+
+### ADR-009 GenerationTask 提进 ImageGeneratorAgent 接口（2026-07-01）
+
+**背景**：ele 同事用"加重载 + 调度端 instanceof 类型转换"的方式给 Gemini/Wan 加了任务可中断能力，接口没动。
+
+**决策**：迁移时把带 `GenerationTask` 的 `generateMulti` 提为接口的 default 方法（默认忽略 task 转调旧版，Gemini/Wan 覆写做分段中断）。`ImageGenerationService` 里删掉 `if(gemini)/else if(wan2.7)` 的 instanceof 转换，统一直调 `agent.generateMulti(...task)`。迁移是一步到位重构的合理时机。
+
+**验证（M3）**：5 Agent 全注册成功，收敛端点调 Agent 无类型转换、链路通。
+
+### ADR-010 GenerationTask 不提 shared，两端各留（2026-07-01）
+
+**决策**：本地（M4b）和云端各有一份 `GenerationTask`（内容同源）。**不提到 gofu-shared**——它是进程内运行时对象，不跨网络传输（跨网络传的是 ProductContext/DTO）。守 shared 契约层纯净原则（见 gofu-shared/CLAUDE.md）。
+
+### M3 同步小结（首次上游同步样板）
+
+以 ele 多角度更新为样板跑通首次同步。迁入 gofu-server-cloud：`ImageGeneratorAgent` 接口 + 5 Agent（Gemini/GptImage/Qwen/Wan/Hunyuan，含 GenerationTask 分段中断）+ `ImageGenerationService`（多角度 buildSeriesPrompt 等）+ `CosService`（永久 key）+ `PromptTemplateLoader` + 生图 prompt 模板 + `AppProperties` + 2 config。包名 `com.elebusiness`→`com.gofu.cloud`。对外只暴露收敛的 `/api/gen/{images,regenerate,sign}`，不照搬 ele 8 个散乱端点。**LoRA/Civitai 作为 ele 既有功能连带迁入。** 迁移基线：ele 工作区含同事未提交的多角度更新。
+
 ---
 
 ## 第二部分：雷区清单（不读源码发现不了的隐藏约束）
@@ -167,8 +191,8 @@
 |---|---|---|---|
 | M1 地基 | 骨架+父POM+三模块+分层CLAUDE.md+本文件 | `mvn compile` 通过 | ✅ 完成 |
 | M2 契约 | ProductContext+DTO+云端上下文表（预埋tenant_id） | 建表成功 | ✅ 完成 |
-| M3 云端 | ele 生图Agent迁入，封装生图/重绘REST，接上下文 | 生图并写入context | ⏸ 暂停（等LY生图稳定） |
-| M4 本地 | LY上新/Canvas/反风控迁入，生图改调cloudgw | 拉context+Playwright headless=false留截图 | 🔄 M4a/b/d 完成，M4c 暂缓 |
+| M3 云端 | ele 生图Agent迁入，封装生图/重绘REST，接上下文 | 生图并写入context | ✅ 完成（首次上游同步样板） |
+| M4 本地 | LY上新/Canvas/反风控迁入，生图改调cloudgw | 拉context+Playwright headless=false留截图 | 🔄 M4a/b/d 完成，M4c 待（现可解锁） |
 | M5 双轨 | 流程1卖点→流程2 SKU规划反哺打通 | 录入1品类，context两轨数据齐全 | 待办 |
 | M6 预览页 | Vue3 预览页（合流预览+微调回写+字段锁定）+ 旧页原生JS共存 | 点击≤3次，改价联动/局部重绘/锁定生效 | 待办 |
 | M7 上新 | 预览确认→本地一键上新，滑块人工介入 | 真实店铺跑通一单，留截图 | 待办 |

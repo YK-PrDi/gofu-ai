@@ -1,0 +1,312 @@
+package com.gofu.cloud.service.agent;
+
+import com.gofu.cloud.config.AppProperties;
+import com.gofu.cloud.model.GenerationTask;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import okhttp3.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+import java.io.*;
+import java.net.InetSocketAddress;
+import java.nio.file.Files;
+import java.util.Base64;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+@Service
+public class GeminiImageAgent implements ImageGeneratorAgent {
+
+    private static final Logger log = LoggerFactory.getLogger(GeminiImageAgent.class);
+    private static final MediaType JSON_TYPE = MediaType.get("application/json; charset=utf-8");
+
+    private final AppProperties appProperties;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private volatile OkHttpClient sharedClient;
+    private volatile String sharedClientProxyKey = null;
+
+    public GeminiImageAgent(AppProperties appProperties) {
+        this.appProperties = appProperties;
+    }
+
+    private String currentProxyKey() {
+        AppProperties.Proxy p = appProperties.getProxy();
+        return p.isEnabled() ? p.getHost() + ":" + p.getPort() : "";
+    }
+
+    private OkHttpClient getClient(int timeoutSeconds) {
+        String proxyKey = currentProxyKey();
+        if (sharedClient == null || !proxyKey.equals(sharedClientProxyKey)) {
+            synchronized (this) {
+                if (sharedClient == null || !proxyKey.equals(sharedClientProxyKey)) {
+                    sharedClient = buildClient(timeoutSeconds);
+                    sharedClientProxyKey = proxyKey;
+                }
+            }
+        }
+        return sharedClient;
+    }
+
+    @Override
+    public String getId() { return "gemini"; }
+
+    @Override
+    public String getDisplayName() { return "Gemini 3.1 Flash（图像编辑）"; }
+
+    /** Gemini 图像编辑 API 不支持指定输出尺寸（跟随参考图尺寸），aspect 仅记录日志 */
+    @Override
+    public boolean generateMulti(String prompt, List<String> refImagePaths,
+                                 String whiteBgPath, String outputPath, String aspect) {
+        return generateMulti(prompt, refImagePaths, whiteBgPath, outputPath, aspect, null);
+    }
+
+    public boolean generateMulti(String prompt, List<String> refImagePaths,
+                                 String whiteBgPath, String outputPath, String aspect, GenerationTask task) {
+        log.debug("Gemini 不支持指定输出尺寸，aspect={} 将被忽略", aspect);
+        String first = (refImagePaths != null && !refImagePaths.isEmpty()) ? refImagePaths.get(0) : null;
+        return generate(prompt, first, whiteBgPath, outputPath, task);
+    }
+
+    @Override
+    public boolean generate(String prompt, String refImagePath, String whiteBgPath, String outputPath) {
+        return generate(prompt, refImagePath, whiteBgPath, outputPath, null);
+    }
+
+    public boolean generate(String prompt, String refImagePath, String whiteBgPath, String outputPath, GenerationTask task) {
+        if (refImagePath == null || refImagePath.isBlank()) {
+            log.warn("Gemini 为图像编辑模型，需要参考图才能生成，已跳过（提示词: {}）", prompt);
+            return false;
+        }
+
+        AppProperties.Api apiConfig = appProperties.getApi();
+        int maxRetries = apiConfig.getMaxRetries();
+        int delaySeconds = apiConfig.getDelaySeconds();
+
+        for (int attempt = 0; attempt < maxRetries; attempt++) {
+            // 【检查点1】重试前检查
+            if (task != null && task.isCancelled()) {
+                log.info("任务已取消，停止Gemini API调用");
+                return false;
+            }
+
+            try {
+                // 【检查点2】等待前检查（分段sleep避免不可中断）
+                if (attempt > 0) {
+                    for (int i = 0; i < delaySeconds; i++) {
+                        if (task != null && task.isCancelled()) {
+                            log.info("任务已取消，中断重试等待");
+                            return false;
+                        }
+                        Thread.sleep(1000);
+                    }
+                }
+
+                byte[] refImgBytes = Files.readAllBytes(new File(refImagePath).toPath());
+                String refImgBase64 = Base64.getEncoder().encodeToString(refImgBytes);
+                String refMimeType = getMimeType(refImagePath);
+
+                byte[] whiteImgBytes;
+                String whiteMimeType;
+                if (whiteBgPath != null && whiteBgPath.startsWith("http")) {
+                    whiteImgBytes = downloadBytes(whiteBgPath);
+                    whiteMimeType = "image/jpeg";
+                } else if (whiteBgPath != null) {
+                    whiteImgBytes = Files.readAllBytes(new File(whiteBgPath).toPath());
+                    whiteMimeType = getMimeType(whiteBgPath);
+                } else {
+                    whiteImgBytes = refImgBytes;
+                    whiteMimeType = refMimeType;
+                }
+                String whiteImgBase64 = Base64.getEncoder().encodeToString(whiteImgBytes);
+
+                // 【检查点3】API调用前检查
+                if (task != null && task.isCancelled()) {
+                    log.info("任务已取消，跳过API调用");
+                    return false;
+                }
+
+                String requestJson = buildRequest(prompt, refImgBase64, refMimeType, whiteImgBase64, whiteMimeType);
+                String apiKey = appProperties.getGemini().getApiKey();
+                String model = appProperties.getGemini().getModel();
+                String url = appProperties.getGemini().getImageBaseUrl() + model + ":generateContent?key=" + apiKey;
+
+                OkHttpClient client = getClient(apiConfig.getTimeoutSeconds());
+
+                Request request = new Request.Builder()
+                        .url(url)
+                        .post(RequestBody.create(requestJson, JSON_TYPE))
+                        .build();
+
+                try (Response response = client.newCall(request).execute()) {
+                    String responseBody = response.body().string();
+
+                    if (!response.isSuccessful()) {
+                        int code = response.code();
+                        log.warn("Gemini API 错误 {} (尝试 {}/{}): {}", code, attempt + 1, maxRetries,
+                                responseBody.substring(0, Math.min(300, responseBody.length())));
+                        if (code == 503 && attempt < maxRetries - 1) {
+                            // 【检查点4】503长等待期间检查（分段sleep）
+                            log.warn("Gemini 503错误，等待10秒后重试");
+                            for (int i = 0; i < 10; i++) {
+                                if (task != null && task.isCancelled()) {
+                                    log.info("任务已取消，中断503重试等待");
+                                    return false;
+                                }
+                                Thread.sleep(1000);
+                            }
+                            continue;
+                        } else if (code == 429 && attempt < maxRetries - 1) {
+                            // 【检查点5】429长等待期间检查（分段sleep）
+                            log.warn("Gemini 429错误，等待15秒后重试");
+                            for (int i = 0; i < 15; i++) {
+                                if (task != null && task.isCancelled()) {
+                                    log.info("任务已取消，中断429重试等待");
+                                    return false;
+                                }
+                                Thread.sleep(1000);
+                            }
+                            continue;
+                        } else if (attempt < maxRetries - 1) {
+                            int waitSeconds = 5 * (attempt + 1);
+                            for (int i = 0; i < waitSeconds; i++) {
+                                if (task != null && task.isCancelled()) {
+                                    log.info("任务已取消，中断等待");
+                                    return false;
+                                }
+                                Thread.sleep(1000);
+                            }
+                            continue;
+                        }
+                        return false;
+                    }
+
+                    // 200 OK 但 Gemini 安全/版权策略拦截，重试也不会出图，直接放弃
+                    String finishReason = extractFinishReason(responseBody);
+                    if ("SAFETY".equals(finishReason) || "RECITATION".equals(finishReason)
+                            || "PROHIBITED_CONTENT".equals(finishReason) || "BLOCKLIST".equals(finishReason)) {
+                        log.warn("Gemini 拒绝生成（finishReason={}），跳过重试", finishReason);
+                        return false;
+                    }
+
+                    boolean saved = extractAndSaveImage(responseBody, outputPath);
+                    if (saved) {
+                        log.info("Gemini 图片生成成功: {}", outputPath);
+                        return true;
+                    }
+                    log.warn("Gemini 响应中未找到图片数据 (尝试 {}/{}, finishReason={})",
+                            attempt + 1, maxRetries, finishReason);
+                }
+
+            } catch (InterruptedException e) {
+                log.info("Gemini API调用被中断");
+                Thread.currentThread().interrupt();
+                return false;
+            } catch (Exception e) {
+                log.warn("Gemini 生成失败 (尝试 {}/{}): {}", attempt + 1, maxRetries, e.getMessage());
+                if (attempt < maxRetries - 1) {
+                    try {
+                        int waitSeconds = 5 * (attempt + 1);
+                        for (int i = 0; i < waitSeconds; i++) {
+                            if (task != null && task.isCancelled()) {
+                                return false;
+                            }
+                            Thread.sleep(1000);
+                        }
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return false;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private OkHttpClient buildClient(int timeoutSeconds) {
+        OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                .writeTimeout(60, TimeUnit.SECONDS)
+                .connectTimeout(30, TimeUnit.SECONDS);
+
+        AppProperties.Proxy proxyCfg = appProperties.getProxy();
+        if (proxyCfg.isEnabled()) {
+            builder.proxy(new java.net.Proxy(
+                    java.net.Proxy.Type.HTTP,
+                    new InetSocketAddress(proxyCfg.getHost(), proxyCfg.getPort())));
+            log.debug("Gemini 使用代理 {}:{}", proxyCfg.getHost(), proxyCfg.getPort());
+        }
+        return builder.build();
+    }
+
+    private String buildRequest(String prompt,
+                                String refBase64, String refMime,
+                                String whiteBase64, String whiteMime) {
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode contents = root.putArray("contents");
+        ObjectNode content = contents.addObject();
+        content.put("role", "user");
+        ArrayNode parts = content.putArray("parts");
+
+        parts.addObject().put("text", prompt);
+        parts.addObject().putObject("inlineData").put("mimeType", refMime).put("data", refBase64);
+        parts.addObject().putObject("inlineData").put("mimeType", whiteMime).put("data", whiteBase64);
+
+        ArrayNode modalities = root.putObject("generationConfig").putArray("responseModalities");
+        modalities.add("TEXT");
+        modalities.add("IMAGE");
+
+        return root.toString();
+    }
+
+    private String extractFinishReason(String responseJson) {
+        try {
+            JsonNode root = objectMapper.readTree(responseJson);
+            JsonNode candidates = root.path("candidates");
+            if (candidates.isArray() && !candidates.isEmpty()) {
+                JsonNode reason = candidates.get(0).path("finishReason");
+                if (!reason.isMissingNode()) return reason.asText();
+            }
+        } catch (Exception ignored) {}
+        return "";
+    }
+
+    private boolean extractAndSaveImage(String responseJson, String outputPath) throws Exception {
+        JsonNode root = objectMapper.readTree(responseJson);
+        JsonNode candidates = root.path("candidates");
+        if (!candidates.isArray() || candidates.isEmpty()) return false;
+
+        for (JsonNode part : candidates.get(0).path("content").path("parts")) {
+            JsonNode inlineData = part.path("inlineData");
+            if (!inlineData.isMissingNode()) {
+                byte[] imageBytes = Base64.getDecoder().decode(inlineData.path("data").asText());
+                File outputFile = new File(outputPath);
+                outputFile.getParentFile().mkdirs();
+                try (FileOutputStream fos = new FileOutputStream(outputFile)) {
+                    fos.write(imageBytes);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private byte[] downloadBytes(String url) throws Exception {
+        OkHttpClient client = new OkHttpClient.Builder().readTimeout(30, TimeUnit.SECONDS).build();
+        try (Response response = client.newCall(new Request.Builder().url(url).get().build()).execute()) {
+            if (!response.isSuccessful()) throw new IOException("下载失败: " + url);
+            return response.body().bytes();
+        }
+    }
+
+    private String getMimeType(String path) {
+        String lower = path.toLowerCase();
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".gif")) return "image/gif";
+        if (lower.endsWith(".webp")) return "image/webp";
+        return "image/jpeg";
+    }
+}
