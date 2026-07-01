@@ -373,7 +373,7 @@ public class AiImageClient {
     public String geminiText(String prompt, List<String> imagePaths) throws Exception {
         LyImageProperties.TextGen cfg = appProperties.getText();
         String key = cfg.getApiKey();
-        if (key == null || key.isBlank()) throw new RuntimeException("文本生成密钥未配置（app.text.api-key）");
+        if (key == null || key.isBlank()) throw new RuntimeException("文本生成密钥未配置（ly-image.text.api-key）");
         String baseUrl = cfg.getBaseUrl();
         String model = cfg.getModel();
         OkHttpClient http = buildHttpNoProxy();  // DashScope 国内直连，不走生图境外代理
