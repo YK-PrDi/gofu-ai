@@ -4,6 +4,10 @@ server:
 spring:
   application:
     name: gofu-server-cloud
+  # 密钥覆盖：把真实密钥写进同目录 application-local.yml（已 gitignore，不提交）。
+  # 该文件存在则自动覆盖下面的空占位；不存在也不报错。
+  profiles:
+    active: local
   servlet:
     multipart:
       max-file-size: 50MB
