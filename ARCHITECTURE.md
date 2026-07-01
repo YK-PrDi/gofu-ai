@@ -104,6 +104,17 @@
 
 **进度（M4c 完成）**：LY 生图三层原样迁入云端 `service/lyimage`（AiImageClient/ShowerCompositor/ImageGenService/PromptTemplateService/PromptLoader）+ LY prompt 模板/json。配置隔离：新建 `LyImageProperties`（prefix `ly-image`）与 ele 的 `AppProperties`（prefix `app`）共存不冲突。字体：ShowerCompositor 静态探测可用中文字体（YaHei→Noto/文泉驿→SansSerif 兜底），云端 Linux 可渲染中文。启动实测两套生图线 + 双 Properties 无 Bean 冲突。**LY 生图收敛 REST 入口已接**：`LyGenController` 暴露 `/api/ly-gen/{sku-images,analyze-bg,antiprice-templates}`，请求/响应契约与 LY 原 `/api/listing` 一致，本地 cloudgw 可直接对接。实测模板端点返回真实 JSON、sku-images 链路通到调 Agent（无密钥如实报错）。产物接 ProductContext + COS 永久 key 留到 M5。
 
+### M5 双轨打通小结（数据孤岛打通，2026-07-01）
+
+GOFU-AI 核心价值落地——视觉流卖点反哺结构流 SKU 规划这条链（ele/LY 原本都没有）建成：
+
+- **AI 文本能力归云端**（ADR-002 延伸）：新建 `service/lytext/LyTextService`，从 LY ListingService 迁入 `generateSkuPlans`（SKU规划）+ 标题生成三法（prepareWithAI/Vision/FromTitleLib）+ 标题库辅助。调 lyimage.ImageGenService.geminiText。
+- **新建卖点提取**（`extractSellingPoints`）：LLM 从标题/产品/图输出结构化卖点数组，写 `ProductContext.visual.sellingPoints`。这是数据链起点。
+- **卖点反哺 SKU 规划**（核心）：`generateSkuPlans` 新增 sellingPoints 入参，prompt 注入"围绕这些卖点策划型号"。
+- **收敛端点**（小端点前端串）：`DualTrackController` 暴露 `/api/gen/{selling-points,sku-plans,title}`，各自读写 ProductContext。
+- **生图产物入 context**（ADR-008 尾巴）：LyGenController 生图后 COS upload 永久 key 写 `visual.mainImages`（无 COS 存本地路径）。
+- **验证**：建 context→提卖点→规划读卖点，两端点链路均通到调 geminiText（无密钥如实降级/报错）；sku-plans LLM 失败降级为可读错误非裸 500。ProductContext 往返正常。真实 LLM 输出待密钥环境。
+
 ---
 
 ## 第二部分：雷区清单（不读源码发现不了的隐藏约束）
@@ -208,6 +219,6 @@
 | M2 契约 | ProductContext+DTO+云端上下文表（预埋tenant_id） | 建表成功 | ✅ 完成 |
 | M3 云端 | ele 生图Agent迁入，封装生图/重绘REST，接上下文 | 生图并写入context | ✅ 完成（首次上游同步样板） |
 | M4 本地 | LY上新/Canvas/反风控迁入，生图改调cloudgw | 拉context+Playwright headless=false留截图 | ✅ M4a/b/c/d 完成（生图整流程在云端 lyimage） |
-| M5 双轨 | 流程1卖点→流程2 SKU规划反哺打通 | 录入1品类，context两轨数据齐全 | 待办 |
+| M5 双轨 | 流程1卖点→流程2 SKU规划反哺打通 | 录入1品类，context两轨数据齐全 | ✅ 完成（数据链通，真实LLM待密钥） |
 | M6 预览页 | Vue3 预览页（合流预览+微调回写+字段锁定）+ 旧页原生JS共存 | 点击≤3次，改价联动/局部重绘/锁定生效 | 待办 |
 | M7 上新 | 预览确认→本地一键上新，滑块人工介入 | 真实店铺跑通一单，留截图 | 待办 |

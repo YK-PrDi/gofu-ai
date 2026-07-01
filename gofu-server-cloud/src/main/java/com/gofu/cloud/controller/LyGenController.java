@@ -1,14 +1,19 @@
 package com.gofu.cloud.controller;
 
+import com.gofu.cloud.service.CosService;
+import com.gofu.cloud.service.context.ContextService;
 import com.gofu.cloud.service.lyimage.ImageGenService;
 import com.gofu.cloud.service.lyimage.PromptTemplateService;
+import com.gofu.shared.context.ProductContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.File;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * LY 生图线收敛入口（花洒防比价 / 6 模式）。与 ele 生图线的 {@link GenController} 隔离。
@@ -27,10 +32,15 @@ public class LyGenController {
 
     private final ImageGenService imageGenService;
     private final PromptTemplateService templateService;
+    private final CosService cosService;
+    private final ContextService contextService;
 
-    public LyGenController(ImageGenService imageGenService, PromptTemplateService templateService) {
+    public LyGenController(ImageGenService imageGenService, PromptTemplateService templateService,
+                           CosService cosService, ContextService contextService) {
         this.imageGenService = imageGenService;
         this.templateService = templateService;
+        this.cosService = cosService;
+        this.contextService = contextService;
     }
 
     /**
@@ -60,6 +70,10 @@ public class LyGenController {
                 bgStyle = imageGenService.analyzeBackgroundStyleOnce(refImagePath);
             }
 
+            // M5d：生图产物写回 ProductContext（若带 contextId）
+            String contextId = (String) body.get("contextId");
+            ProductContext ctx = (contextId == null || contextId.isBlank()) ? null : contextService.findById(contextId);
+
             List<Map<String, Object>> images = new java.util.ArrayList<>();
             int loop = 0;
             for (Map<String, Object> s : skus) {
@@ -80,12 +94,26 @@ public class LyGenController {
                             batch, seq, bagImagePath, whiteImgPath, accImagePaths, waterImagePath,
                             bgStyle, itemCode, accParts, templateId);
                     item.put("path", path);
+                    // M5d：配 COS 则存永久 key（ADR-008）写回 context.visual.mainImages；否则存本地路径
+                    if (ctx != null) {
+                        String imageRef = path;
+                        if (cosService.isEnabled()) {
+                            try {
+                                imageRef = cosService.upload(new File(path), UUID.randomUUID() + ".jpg");
+                                item.put("cosKey", imageRef);
+                            } catch (Exception ce) {
+                                log.warn("COS 上传失败，context 存本地路径: {}", ce.getMessage());
+                            }
+                        }
+                        ctx.getVisual().getMainImages().add(imageRef);
+                    }
                 } catch (Exception e) {
                     item.put("error", e.getMessage());
                 }
                 images.add(item);
                 loop++;
             }
+            if (ctx != null) contextService.save(ctx);  // M5d：整批生图后一次性写回 context
             return ResponseEntity.ok(Map.of("images", images));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(Map.of("error", "LY 生图失败：" + e.getMessage()));
