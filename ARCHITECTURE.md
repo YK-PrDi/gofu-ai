@@ -89,16 +89,20 @@
 
 以 ele 多角度更新为样板跑通首次同步。迁入 gofu-server-cloud：`ImageGeneratorAgent` 接口 + 5 Agent（Gemini/GptImage/Qwen/Wan/Hunyuan，含 GenerationTask 分段中断）+ `ImageGenerationService`（多角度 buildSeriesPrompt 等）+ `CosService`（永久 key）+ `PromptTemplateLoader` + 生图 prompt 模板 + `AppProperties` + 2 config。包名 `com.elebusiness`→`com.gofu.cloud`。对外只暴露收敛的 `/api/gen/{images,regenerate,sign}`，不照搬 ele 8 个散乱端点。**LoRA/Civitai 作为 ele 既有功能连带迁入。** 迁移基线：ele 工作区含同事未提交的多角度更新。
 
-### ADR-011 生图 6 模式编排在本地，AI 步骤走云端中粒度接口（2026-07-01）
+### ADR-011 生图整流程在云端（含 Canvas 合成），字体内置（2026-07-01，修正版）
 
-**背景**：LY 生图重构为三层——`AiImageClient`（纯 AI 调用）/ `ShowerCompositor`（纯 Canvas 合成，零 AI 依赖）/ `ImageGenService`（6 模式编排，协调前两者）。这套编排横跨 AI（归云端）与 Canvas（归本地）。
+**背景**：LY 生图重构为三层——`AiImageClient`（AI 调用）/ `ShowerCompositor`（Canvas 合成，零 AI 依赖）/ `ImageGenService`（6 模式编排）。
 
-**决策**：
-- **编排在本地**（`gofu-client-local`）：符合"本地是总控中枢"定位；`ShowerCompositor` 迁本地 `service/canvas`，Canvas 在本地 Windows 跑，`Microsoft YaHei` 字体天然可用，字体跨平台问题消失。
-- **AI 步骤走云端中粒度接口**：云端提供"生右侧主件+背景"这类中粒度接口，本地编排调一次拿主件图，再本地 ShowerCompositor 贴左侧配件卡。避免把 AiImageClient 的细粒度多步调用逐个拆成远程 HTTP（太碎）。
-- `AiImageClient` **不迁本地**（生图归云端 ADR-002）。
+**初版决策（已推翻）**：曾定"编排在本地、AI 步骤走云端中粒度接口、合成在本地"。**精读 500 行 `generateSkuImage` 后推翻**：编排里 AI 调用有 5 处（analyzeRefImage/analyzeBackgroundStyle×2/callGemini/callGptImage2）且与 prompt 组装、img2img 参考图编排、基准图缓存深度交织，无法切出"中粒度接口"——任何切法都会导致 prompt 组装逻辑在云/本地重复或强行拆碎。
 
-**进度**：ShowerCompositor 已迁入本地并编译通过。ImageGenService 编排层 + 云端中粒度接口待做。
+**最终决策**：**整个生图流程（prompt 组装 + AI 调用 + Canvas 合成）都在云端** `gofu-server-cloud`。
+- LY 三层原样迁云端：`AiImageClient` + `ShowerCompositor` + `ImageGenService`，与上游结构一致，未来同步最省。
+- 云端直接调 `ShowerCompositor` 合成。**字体问题一次性解决**：ShowerCompositor 的 `Microsoft YaHei` 改为项目内置中文 ttf（`Font.createFont` 注册），云端 Linux 也能正确渲染中文。
+- 本地不再迁 ShowerCompositor（之前 5f17dda 迁入本地的要挪到云端）。本地通过收敛接口 `/api/gen/images` 拿最终成品图。
+
+**对本地的影响**：本地 `service/canvas` 目录取消；本地只经 cloudgw 调云端生图，收完整成品图。契约层不变。
+
+**进度（M4c 完成）**：LY 生图三层原样迁入云端 `service/lyimage`（AiImageClient/ShowerCompositor/ImageGenService/PromptTemplateService/PromptLoader）+ LY prompt 模板/json。配置隔离：新建 `LyImageProperties`（prefix `ly-image`）与 ele 的 `AppProperties`（prefix `app`）共存不冲突。字体：ShowerCompositor 静态探测可用中文字体（YaHei→Noto/文泉驿→SansSerif 兜底），云端 Linux 可渲染中文。启动实测两套生图线 + 双 Properties 无 Bean 冲突。**待办**：给 LY 生图接收敛 REST 入口（当前 /api/gen/images 走 ele 版；LY 花洒防比价那套需单独入口，下一步）。
 
 ---
 
@@ -203,7 +207,7 @@
 | M1 地基 | 骨架+父POM+三模块+分层CLAUDE.md+本文件 | `mvn compile` 通过 | ✅ 完成 |
 | M2 契约 | ProductContext+DTO+云端上下文表（预埋tenant_id） | 建表成功 | ✅ 完成 |
 | M3 云端 | ele 生图Agent迁入，封装生图/重绘REST，接上下文 | 生图并写入context | ✅ 完成（首次上游同步样板） |
-| M4 本地 | LY上新/Canvas/反风控迁入，生图改调cloudgw | 拉context+Playwright headless=false留截图 | 🔄 M4a/b/d 完成，M4c 待（现可解锁） |
+| M4 本地 | LY上新/Canvas/反风控迁入，生图改调cloudgw | 拉context+Playwright headless=false留截图 | ✅ M4a/b/c/d 完成（生图整流程在云端 lyimage） |
 | M5 双轨 | 流程1卖点→流程2 SKU规划反哺打通 | 录入1品类，context两轨数据齐全 | 待办 |
 | M6 预览页 | Vue3 预览页（合流预览+微调回写+字段锁定）+ 旧页原生JS共存 | 点击≤3次，改价联动/局部重绘/锁定生效 | 待办 |
 | M7 上新 | 预览确认→本地一键上新，滑块人工介入 | 真实店铺跑通一单，留截图 | 待办 |

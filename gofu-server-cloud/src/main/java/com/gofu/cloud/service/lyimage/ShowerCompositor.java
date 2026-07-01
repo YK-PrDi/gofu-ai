@@ -1,6 +1,6 @@
-package com.gofu.local.service.canvas;
+package com.gofu.cloud.service.lyimage;
 
-import com.gofu.local.config.AppProperties;
+import com.gofu.cloud.config.LyImageProperties;
 import org.springframework.stereotype.Component;
 
 import javax.imageio.ImageIO;
@@ -20,9 +20,27 @@ import java.util.List;
 @Component
 public class ShowerCompositor {
 
-    private final AppProperties appProperties;
+    private final LyImageProperties appProperties;
 
-    public ShowerCompositor(AppProperties appProperties) {
+    /**
+     * 合成用中文字体名（ADR-011：云端 Linux 无 Microsoft YaHei，静态探测可用中文字体）。
+     * 优先 Windows 的 YaHei；回退 Linux 常见中文字体；最终回退逻辑字体 SansSerif（JVM 保证存在）。
+     */
+    private static final String CJK_FONT = resolveCjkFont();
+
+    private static String resolveCjkFont() {
+        java.util.Set<String> avail = new java.util.HashSet<>(java.util.Arrays.asList(
+                java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().getAvailableFontFamilyNames()));
+        for (String name : new String[]{
+                "Microsoft YaHei", "微软雅黑",
+                "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC",
+                "WenQuanYi Zen Hei", "WenQuanYi Micro Hei", "SimHei", "SimSun", "PingFang SC"}) {
+            if (avail.contains(name)) return name;
+        }
+        return Font.SANS_SERIF; // 逻辑字体兜底，确保不抛异常
+    }
+
+    public ShowerCompositor(LyImageProperties appProperties) {
         this.appProperties = appProperties;
     }
 
@@ -90,7 +108,7 @@ public class ShowerCompositor {
 
     /** 固定字号居中绘制（不缩放）：保证同类图文字大小一致。 */
     private void drawCenteredText(Graphics2D g, String text, int x, int y, int w, int h, int fs, Color color) {
-        g.setFont(new Font("Microsoft YaHei", Font.BOLD, fs));
+        g.setFont(new Font(CJK_FONT, Font.BOLD, fs));
         java.awt.FontMetrics fm = g.getFontMetrics();
         int tx = x + (w - fm.stringWidth(text)) / 2;
         int ty = y + (h - fm.getHeight()) / 2 + fm.getAscent();
@@ -362,7 +380,7 @@ public class ShowerCompositor {
         int fs = maxFs;
         java.awt.FontMetrics fm;
         while (fs > 10) {
-            g.setFont(new Font("Microsoft YaHei", Font.BOLD, fs));
+            g.setFont(new Font(CJK_FONT, Font.BOLD, fs));
             fm = g.getFontMetrics();
             if (fm.stringWidth(text) <= maxTw && fm.getHeight() <= maxTh) break;
             fs -= 2;
