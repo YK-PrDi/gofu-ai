@@ -89,6 +89,17 @@
 
 以 ele 多角度更新为样板跑通首次同步。迁入 gofu-server-cloud：`ImageGeneratorAgent` 接口 + 5 Agent（Gemini/GptImage/Qwen/Wan/Hunyuan，含 GenerationTask 分段中断）+ `ImageGenerationService`（多角度 buildSeriesPrompt 等）+ `CosService`（永久 key）+ `PromptTemplateLoader` + 生图 prompt 模板 + `AppProperties` + 2 config。包名 `com.elebusiness`→`com.gofu.cloud`。对外只暴露收敛的 `/api/gen/{images,regenerate,sign}`，不照搬 ele 8 个散乱端点。**LoRA/Civitai 作为 ele 既有功能连带迁入。** 迁移基线：ele 工作区含同事未提交的多角度更新。
 
+### ADR-011 生图 6 模式编排在本地，AI 步骤走云端中粒度接口（2026-07-01）
+
+**背景**：LY 生图重构为三层——`AiImageClient`（纯 AI 调用）/ `ShowerCompositor`（纯 Canvas 合成，零 AI 依赖）/ `ImageGenService`（6 模式编排，协调前两者）。这套编排横跨 AI（归云端）与 Canvas（归本地）。
+
+**决策**：
+- **编排在本地**（`gofu-client-local`）：符合"本地是总控中枢"定位；`ShowerCompositor` 迁本地 `service/canvas`，Canvas 在本地 Windows 跑，`Microsoft YaHei` 字体天然可用，字体跨平台问题消失。
+- **AI 步骤走云端中粒度接口**：云端提供"生右侧主件+背景"这类中粒度接口，本地编排调一次拿主件图，再本地 ShowerCompositor 贴左侧配件卡。避免把 AiImageClient 的细粒度多步调用逐个拆成远程 HTTP（太碎）。
+- `AiImageClient` **不迁本地**（生图归云端 ADR-002）。
+
+**进度**：ShowerCompositor 已迁入本地并编译通过。ImageGenService 编排层 + 云端中粒度接口待做。
+
 ---
 
 ## 第二部分：雷区清单（不读源码发现不了的隐藏约束）
