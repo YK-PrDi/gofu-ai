@@ -102,7 +102,7 @@
 
 **对本地的影响**：本地 `service/canvas` 目录取消；本地只经 cloudgw 调云端生图，收完整成品图。契约层不变。
 
-**进度（M4c 完成）**：LY 生图三层原样迁入云端 `service/lyimage`（AiImageClient/ShowerCompositor/ImageGenService/PromptTemplateService/PromptLoader）+ LY prompt 模板/json。配置隔离：新建 `LyImageProperties`（prefix `ly-image`）与 ele 的 `AppProperties`（prefix `app`）共存不冲突。字体：ShowerCompositor 静态探测可用中文字体（YaHei→Noto/文泉驿→SansSerif 兜底），云端 Linux 可渲染中文。启动实测两套生图线 + 双 Properties 无 Bean 冲突。**待办**：给 LY 生图接收敛 REST 入口（当前 /api/gen/images 走 ele 版；LY 花洒防比价那套需单独入口，下一步）。
+**进度（M4c 完成）**：LY 生图三层原样迁入云端 `service/lyimage`（AiImageClient/ShowerCompositor/ImageGenService/PromptTemplateService/PromptLoader）+ LY prompt 模板/json。配置隔离：新建 `LyImageProperties`（prefix `ly-image`）与 ele 的 `AppProperties`（prefix `app`）共存不冲突。字体：ShowerCompositor 静态探测可用中文字体（YaHei→Noto/文泉驿→SansSerif 兜底），云端 Linux 可渲染中文。启动实测两套生图线 + 双 Properties 无 Bean 冲突。**LY 生图收敛 REST 入口已接**：`LyGenController` 暴露 `/api/ly-gen/{sku-images,analyze-bg,antiprice-templates}`，请求/响应契约与 LY 原 `/api/listing` 一致，本地 cloudgw 可直接对接。实测模板端点返回真实 JSON、sku-images 链路通到调 Agent（无密钥如实报错）。产物接 ProductContext + COS 永久 key 留到 M5。
 
 ---
 
