@@ -1,5 +1,6 @@
 package com.gofu.cloud.service.lytext;
 
+import com.fasterxml.jackson.core.json.JsonReadFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gofu.cloud.config.LyImageProperties;
 import com.gofu.cloud.service.lyimage.ImageGenService;
@@ -29,7 +30,12 @@ public class LyTextService {
 
     private final LyImageProperties props;
     private final ImageGenService imageGenService;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    // 宽松解析：LLM 常返回带尾逗号/单引号/注释/未转义控制符的 JSON，容错以免整批失败
+    private final ObjectMapper objectMapper = new ObjectMapper()
+            .configure(JsonReadFeature.ALLOW_TRAILING_COMMA.mappedFeature(), true)
+            .configure(JsonReadFeature.ALLOW_SINGLE_QUOTES.mappedFeature(), true)
+            .configure(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature(), true)
+            .configure(JsonReadFeature.ALLOW_JAVA_COMMENTS.mappedFeature(), true);
 
     public LyTextService(LyImageProperties props, ImageGenService imageGenService) {
         this.props = props;
@@ -281,8 +287,26 @@ public class LyTextService {
     @SuppressWarnings("unchecked")
     private Map<String, Object> parseJsonObject(String content) throws Exception {
         if (content == null) throw new RuntimeException("LLM 返回空");
-        int start = content.indexOf('{'), end = content.lastIndexOf('}');
-        if (start >= 0 && end > start) content = content.substring(start, end + 1);
-        return objectMapper.readValue(content, Map.class);
+        String cleaned = stripJsonFence(content);
+        int start = cleaned.indexOf('{'), end = cleaned.lastIndexOf('}');
+        if (start >= 0 && end > start) cleaned = cleaned.substring(start, end + 1);
+        try {
+            return objectMapper.readValue(cleaned, Map.class);
+        } catch (Exception e) {
+            log.warn("LLM 返回非法 JSON，原始内容：{}", content);
+            throw new RuntimeException("LLM 返回非法 JSON：" + e.getMessage(), e);
+        }
+    }
+
+    /** 剥掉 markdown 代码块围栏（```json ... ``` 或 ``` ... ```），LLM 常包这层。 */
+    private static String stripJsonFence(String s) {
+        String t = s.trim();
+        if (t.startsWith("```")) {
+            int nl = t.indexOf('\n');
+            if (nl > 0) t = t.substring(nl + 1);           // 去掉首行 ```json
+            int fence = t.lastIndexOf("```");
+            if (fence >= 0) t = t.substring(0, fence);      // 去掉尾部 ```
+        }
+        return t.trim();
     }
 }
