@@ -38,6 +38,10 @@ public class ContextService {
         if (ctx.getTenantId() == null || ctx.getTenantId().isBlank()) {
             ctx.setTenantId("default");
         }
+        // 兜底：客户端可能 POST {"visual":null}/{"structure":null}，Jackson 会覆盖字段初始化器为 null，
+        // 导致后续 getVisual()/getStructure() 链式 NPE。补非 null 实例。
+        if (ctx.getVisual() == null) ctx.setVisual(new com.gofu.shared.context.VisualContent());
+        if (ctx.getStructure() == null) ctx.setStructure(new com.gofu.shared.context.StructureContent());
 
         ProductContextEntity entity = new ProductContextEntity();
         entity.setId(ctx.getId());

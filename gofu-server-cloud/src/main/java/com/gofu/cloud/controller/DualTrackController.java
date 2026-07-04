@@ -7,7 +7,6 @@ import com.gofu.shared.context.SkuPlan;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -81,23 +80,13 @@ public class DualTrackController {
                     .body(Map.of("error", "SKU 规划失败：" + e.getMessage()));
         }
 
-        // 把方案的顶层信息（planName/description）写回 context.structure.plans（items 展开留待预览页 M6）
+        // 拍平 LLM 二维产出（mainItems×models）为带结构的 plans[].items[] 写回 context（M6 补链）
         if (ctx != null) {
-            List<SkuPlan> plans = new ArrayList<>();
-            Object rawPlans = result.get("plans");
-            if (rawPlans instanceof List) {
-                for (Object o : (List<Object>) rawPlans) {
-                    if (!(o instanceof Map)) continue;
-                    Map<String, Object> pm = (Map<String, Object>) o;
-                    SkuPlan p = new SkuPlan();
-                    p.setPlanName(String.valueOf(pm.getOrDefault("planName", "")));
-                    p.setDescription(String.valueOf(pm.getOrDefault("description", "")));
-                    plans.add(p);
-                }
-            }
+            List<SkuPlan> plans = lyTextService.flattenPlans(result);
             ctx.getStructure().setPlans(plans);
             contextService.save(ctx);
             result.put("savedPlanCount", plans.size());
+            result.put("savedItemCount", plans.stream().mapToInt(p -> p.getItems().size()).sum());
         }
         return ResponseEntity.ok(result);
     }

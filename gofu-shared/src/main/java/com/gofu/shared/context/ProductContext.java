@@ -1,6 +1,7 @@
 package com.gofu.shared.context;
 
 import com.gofu.shared.enums.ContextStatus;
+import com.gofu.shared.enums.FlowStage;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
@@ -54,6 +55,12 @@ public class ProductContext {
 
     /** 双向状态机当前状态。 */
     private ContextStatus status = ContextStatus.DRAFT;
+
+    /**
+     * 双轨交错编排进度（M8）。null 表示未走交错流程（旧数据/直接建）。
+     * 与 status 并存：status 是整体生命周期，stage 是交错流程内部细粒度进度。
+     */
+    private FlowStage stage;
 
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

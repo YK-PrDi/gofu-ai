@@ -3,6 +3,7 @@ package com.gofu.cloud.controller;
 import com.gofu.cloud.service.CosService;
 import com.gofu.cloud.service.ImageGenerationService;
 import com.gofu.cloud.service.PromptTemplateLoader;
+import com.gofu.cloud.service.agent.GptImageAgent;
 import com.gofu.cloud.service.context.ContextService;
 import com.gofu.shared.context.ProductContext;
 import com.gofu.shared.dto.ImageGenRequest;
@@ -11,9 +12,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.io.File;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -32,13 +35,16 @@ public class GenController {
     private final CosService cosService;
     private final ContextService contextService;
     private final PromptTemplateLoader promptTemplateLoader;
+    private final GptImageAgent gptImageAgent;
 
     public GenController(ImageGenerationService imageGenerationService, CosService cosService,
-                         ContextService contextService, PromptTemplateLoader promptTemplateLoader) {
+                         ContextService contextService, PromptTemplateLoader promptTemplateLoader,
+                         GptImageAgent gptImageAgent) {
         this.imageGenerationService = imageGenerationService;
         this.cosService = cosService;
         this.contextService = contextService;
         this.promptTemplateLoader = promptTemplateLoader;
+        this.gptImageAgent = gptImageAgent;
     }
 
     /**
@@ -102,6 +108,50 @@ public class GenController {
     @PostMapping("/regenerate")
     public ResponseEntity<ImageGenResponse> regenerate(@RequestBody ImageGenRequest req) {
         return generate(req);
+    }
+
+    /**
+     * 局部重绘（M8-B2）：原图 + 蒙版 + 指令 → 单张重绘，同步返回。包装 GptImageAgent.generateWithMask。
+     * 供预览页对单张图做局部编辑。multipart: image, mask, prompt, aspect?。
+     * 返回 {@code { imageRef, signedUrl }}：imageRef 是 COS key(或本地路径)，signedUrl 可直接展示。
+     */
+    @PostMapping("/inpaint")
+    public ResponseEntity<Map<String, Object>> inpaint(@RequestParam("image") MultipartFile image,
+                                                       @RequestParam("mask") MultipartFile mask,
+                                                       @RequestParam("prompt") String prompt,
+                                                       @RequestParam(value = "aspect", defaultValue = "auto") String aspect) {
+        File imgTmp = null, maskTmp = null, outTmp = null;
+        try {
+            imgTmp = File.createTempFile("inpaint-img-", ".png");
+            maskTmp = File.createTempFile("inpaint-mask-", ".png");
+            outTmp = File.createTempFile("inpaint-out-", ".png");
+            image.transferTo(imgTmp);
+            mask.transferTo(maskTmp);
+
+            boolean ok = gptImageAgent.generateWithMask(prompt, imgTmp, maskTmp, outTmp.getAbsolutePath(), aspect);
+            if (!ok) {
+                return ResponseEntity.internalServerError().body(Map.of("error", "局部重绘失败（检查密钥/配额）"));
+            }
+
+            String imageRef = cosService.isEnabled()
+                    ? cosService.upload(outTmp, UUID.randomUUID() + ".png")
+                    : outTmp.getAbsolutePath();
+            String signedUrl = cosService.isEnabled() ? cosService.signKey(imageRef) : imageRef;
+            return ResponseEntity.ok(Map.of("imageRef", imageRef, "signedUrl", signedUrl));
+        } catch (Exception e) {
+            log.error("局部重绘异常: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        } finally {
+            if (imgTmp != null) imgTmp.delete();
+            if (maskTmp != null) maskTmp.delete();
+            // outTmp 已上传 COS 或作为本地路径返回，不删
+        }
+    }
+
+    /** 列出可用生图 Agent（M9：前端模型下拉用，经 cloudgw 转发到 5021）。 */
+    @GetMapping("/agents")
+    public ResponseEntity<List<Map<String, String>>> agents() {
+        return ResponseEntity.ok(imageGenerationService.listAgents());
     }
 
     /**

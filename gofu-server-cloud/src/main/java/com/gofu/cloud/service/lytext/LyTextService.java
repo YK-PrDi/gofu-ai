@@ -5,6 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gofu.cloud.config.LyImageProperties;
 import com.gofu.cloud.service.lyimage.ImageGenService;
 import com.gofu.cloud.service.lyimage.PromptLoader;
+import com.gofu.shared.context.AccPart;
+import com.gofu.shared.context.SkuItem;
+import com.gofu.shared.context.SkuPlan;
+import com.gofu.shared.enums.SkuRole;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -202,7 +206,82 @@ public class LyTextService {
         return parseJsonObject(imageGenService.geminiText(prompt, null));
     }
 
-    // ── 卖点提取（M5b：新建，双轨打通的起点）──────────────────────────
+    /**
+     * 把 {@link #generateSkuPlans} 的 LLM 原始结果拍平成带结构的 {@link SkuPlan} 列表（M6 补链）。
+     *
+     * <p>LLM 产出是二维：每个 plan = mainItems[]（主件）× models[]（共享型号阶梯）。
+     * 拼多多二维 SKU 展开 = 主件 × 型号 的笛卡尔积，每个组合是一个 {@link SkuItem}：
+     * spec1=主件名、spec2=型号名、itemCode=`主件码+配件码*N`、accParts=型号的 components。
+     *
+     * <p>⚠️ 价格/成本此处留 0：LLM 规划阶段不定价（提示词明确"本阶段只做搭配+命名"），
+     * 成本来自 ERP、售价靠预览页人工填。拍平只负责结构展开，不造价格数据。
+     */
+    @SuppressWarnings("unchecked")
+    public List<SkuPlan> flattenPlans(Map<String, Object> llmResult) {
+        List<SkuPlan> out = new ArrayList<>();
+        if (llmResult == null) return out;
+        Object rawPlans = llmResult.get("plans");
+        if (!(rawPlans instanceof List)) return out;
+
+        for (Object po : (List<Object>) rawPlans) {
+            if (!(po instanceof Map)) continue;
+            Map<String, Object> pm = (Map<String, Object>) po;
+
+            SkuPlan plan = new SkuPlan();
+            plan.setPlanName(String.valueOf(pm.getOrDefault("planName", "")));
+            plan.setDescription(String.valueOf(pm.getOrDefault("description", "")));
+
+            List<Map<String, Object>> mainItems = asMapList(pm.get("mainItems"));
+            List<Map<String, Object>> models = asMapList(pm.get("models"));
+            // 型号缺省时兜底一个"单品"，保证主件至少展开成一行
+            if (models.isEmpty()) models = List.of(Map.of("specName", "单品", "components", List.of()));
+
+            for (Map<String, Object> main : mainItems) {
+                String mainCode = String.valueOf(main.getOrDefault("itemCode", ""));
+                String mainSpec = String.valueOf(main.getOrDefault("specName", ""));
+                for (Map<String, Object> model : models) {
+                    plan.getItems().add(buildItem(mainCode, mainSpec, model));
+                }
+            }
+            out.add(plan);
+        }
+        return out;
+    }
+
+    /** 组合一个 SKU 条目：主件 × 单个型号。itemCode 拼 `主件码+配件码*N`，accParts 结构化。 */
+    @SuppressWarnings("unchecked")
+    private SkuItem buildItem(String mainCode, String mainSpec, Map<String, Object> model) {
+        String modelSpec = String.valueOf(model.getOrDefault("specName", ""));
+        List<Map<String, Object>> comps = asMapList(model.get("components"));
+
+        SkuItem item = new SkuItem();
+        item.setName(mainSpec);
+        item.setSkuDisplayName(mainSpec + (modelSpec.isBlank() ? "" : "-" + modelSpec));
+        item.setSpec1(mainSpec);
+        item.setSpec2(modelSpec);
+        item.setRole(SkuRole.MAIN);
+
+        StringBuilder code = new StringBuilder(mainCode);
+        for (Map<String, Object> c : comps) {
+            String ccode = String.valueOf(c.getOrDefault("itemCode", ""));
+            if (ccode.isBlank()) continue;
+            int qty = c.get("qty") instanceof Number n ? n.intValue() : 1;
+            code.append("+").append(ccode).append("*").append(qty);
+            item.getAccParts().add(new AccPart(ccode, qty));
+        }
+        item.setItemCode(code.toString());
+        // 价格/成本留默认 0（见方法注释）
+        return item;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> asMapList(Object o) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        if (o instanceof List) {
+            for (Object e : (List<Object>) o) if (e instanceof Map) out.add((Map<String, Object>) e);
+        }
+        return out;
+    }
 
     /**
      * 从标题/产品/主图提取结构化核心营销卖点（写入 ProductContext.visual.sellingPoints）。

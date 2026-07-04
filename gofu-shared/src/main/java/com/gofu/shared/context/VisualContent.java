@@ -16,6 +16,12 @@ import java.util.List;
 @NoArgsConstructor
 public class VisualContent {
 
+    /**
+     * 主件白底图（用户上传/快麦 ERP 下载，是生图<b>输入</b>）。M8：与产出的 mainImages 区分。
+     * 对应 LY 上新的 whiteImgDir 语义——锁颜色/结构的本色产品图。
+     */
+    private List<String> whiteImages = new ArrayList<>();
+
     /** 主图 URL/路径列表（通常 6 张）。可能是 COS URL 或本地路径（雷区 10）。 */
     private List<String> mainImages = new ArrayList<>();
 
