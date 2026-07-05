@@ -65,6 +65,10 @@ public class ListingService {
 
         taskService.submit(task, () -> {
             Process proc = null;
+            // 成功语义（修 bug6）：脚本用 DONE:/ERROR: 标记真实结果，这里传导到任务状态。
+            // 之前 submit 只要进程正常退出就标 done，与"真实发品成功"脱钩 → 前端误报成功。
+            final boolean[] sawDone = {false};
+            final String[] lastError = {null};
             try {
                 ProcessBuilder pb = dryRun
                     ? new ProcessBuilder(resolveNodeExe(), scriptFile.getAbsolutePath(), "--dry-run")
@@ -87,8 +91,10 @@ public class ListingService {
                             task.addResult(Map.of("type", "progress", "message", msg));
                             task.incrementProgress();
                         } else if (line.startsWith("DONE:")) {
+                            sawDone[0] = true;
                             task.addResult(Map.of("type", "done", "message", "上新完成"));
                         } else if (line.startsWith("ERROR:")) {
+                            lastError[0] = line.substring(6);
                             task.addResult(Map.of("type", "error", "message", line.substring(6)));
                         } else if (!line.isBlank()) {
                             task.addResult(Map.of("type", "log", "message", line));
@@ -108,10 +114,21 @@ public class ListingService {
                 if (!done) {
                     proc.destroyForcibly();
                     task.addResult(Map.of("type", "error", "message", "自动化超时（30分钟）"));
+                    throw new RuntimeException("自动化超时（30分钟）");
                 }
+                // 脚本报了 ERROR 或从未报 DONE → 判定失败（抛异常让 TaskService 标 error），前端才不会误报成功
+                if (lastError[0] != null) {
+                    throw new RuntimeException("上新失败：" + lastError[0]);
+                }
+                if (!sawDone[0]) {
+                    throw new RuntimeException("上新未完成：脚本未输出成功标志（可能停在登录/校验或被拦截）");
+                }
+            } catch (RuntimeException re) {
+                throw re;   // 上面主动抛的失败，透传给 submit 标 error
             } catch (Exception e) {
                 log.error("Playwright 子进程异常: {}", e.getMessage(), e);
                 task.addResult(Map.of("type", "error", "message", "自动化异常: " + e.getMessage()));
+                throw new RuntimeException(e);
             } finally {
                 if (proc != null) try { proc.destroyForcibly(); } catch (Exception ignored) {}
             }
