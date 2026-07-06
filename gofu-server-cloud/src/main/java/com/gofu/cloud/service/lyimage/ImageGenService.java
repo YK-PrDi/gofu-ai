@@ -342,9 +342,11 @@ public class ImageGenService {
             if (hasBag) showerRefs.add(bag);
             if (hasRef) showerRefs.add(ref);
 
-            // 一次生成
+            // 一次生成。M10：撞限流(429/5xx中转站繁忙)时指数退避重试同一调用——
+            // 原来只轮 key 无退避，整批 SKU 排在主图/详情之后、配额耗尽→只出前 1~2 张(07.06反馈)。
             Exception lastShower = null;
-            for (int attempt = 0; attempt < keys.size(); attempt++) {
+            int maxBackoff = 4;
+            for (int attempt = 0; attempt < keys.size() * (1 + maxBackoff); attempt++) {
                 String key = keys.get(Math.abs(aiClient.keyCursor.getAndIncrement()) % keys.size());
                 try {
                     String b64 = showerRefs.isEmpty()
@@ -359,7 +361,17 @@ public class ImageGenService {
                     return out.getAbsolutePath();
                 } catch (Exception e) {
                     lastShower = e;
-                    log.warn("花洒主图失败(密钥{}): {}", attempt, e.getMessage());
+                    String msg = e.getMessage() == null ? "" : e.getMessage();
+                    boolean rateLimited = msg.contains("429") || msg.contains("RESOURCE_EXHAUSTED")
+                            || msg.contains("rate") || msg.contains("Too Many") || msg.contains("503") || msg.contains("繁忙");
+                    if (rateLimited) {
+                        long round = attempt / Math.max(1, keys.size());
+                        long waitMs = Math.min(16000, 2000L * (1L << Math.min(3, round)));
+                        log.warn("花洒主图撞限流，退避 {}ms 重试 (attempt {}): {}", waitMs, attempt, msg);
+                        try { Thread.sleep(waitMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                    } else {
+                        log.warn("花洒主图失败(密钥{}): {}", attempt, msg);
+                    }
                 }
             }
             throw new RuntimeException("花洒主图生成失败: " + (lastShower != null ? lastShower.getMessage() : "未知"));
@@ -480,9 +492,12 @@ public class ImageGenService {
             genRefs.add(ref);  // SKU 无白底图时回退
         }
 
-        // 轮换密钥，失败换下一个
+        // 轮换密钥，失败换下一个。M10：Gemini 按【项目】限流(非按key)，429 换 key 无用，
+        // 必须退避重试同一调用——否则多数 SKU 撞 429 直接失败(现象：整批只出前 1~2 张)。
+        // 每个 key 最多退避重试 maxBackoff 次(指数退避)，总尝试上限 keys*(1+maxBackoff)。
         Exception last = null;
-        for (int attempt = 0; attempt < keys.size(); attempt++) {
+        int maxBackoff = 4;
+        for (int attempt = 0; attempt < keys.size() * (1 + maxBackoff); attempt++) {
             String key = keys.get(Math.abs(aiClient.keyCursor.getAndIncrement()) % keys.size());
             try {
                 // 诊断耗时：记录 API 调用开始/结束，用于判断是「单张本身慢」还是「中转站限并发被串行」
@@ -529,7 +544,18 @@ public class ImageGenService {
                 return out.getAbsolutePath();
             } catch (Exception e) {
                 last = e;
-                log.warn("生图失败(密钥{}): {}", attempt, e.getMessage());
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                boolean rateLimited = msg.contains("429") || msg.contains("RESOURCE_EXHAUSTED")
+                        || msg.contains("rate") || msg.contains("Too Many");
+                if (rateLimited) {
+                    // 指数退避后重试同一调用（换 key 对项目级限流无用）。round 从 0 起：2s,4s,8s,16s
+                    long round = attempt / Math.max(1, keys.size());
+                    long waitMs = Math.min(16000, 2000L * (1L << Math.min(3, round)));
+                    log.warn("生图撞限流(429)，退避 {}ms 后重试 (attempt {}): {}", waitMs, attempt, msg);
+                    try { Thread.sleep(waitMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                } else {
+                    log.warn("生图失败(密钥{}): {}", attempt, msg);
+                }
             }
         }
         throw new RuntimeException("生图失败：" + (last != null ? last.getMessage() : "未知"));
