@@ -134,8 +134,8 @@ public class GptImageAgent implements ImageGeneratorAgent {
             case "1024x1024" -> " Output image must be perfectly square (1:1 aspect ratio, 1024x1024).";
             case "1024x1536" -> " Output image must be portrait (9:16 aspect ratio, 1024x1536).";
             case "1536x1024" -> " Output image must be landscape (16:9 aspect ratio, 1536x1024).";
-            case "1024x1360" -> " Output image must be portrait (3:4 aspect ratio, 1024x1360).";
-            case "1360x1024" -> " Output image must be landscape (4:3 aspect ratio, 1360x1024).";
+            case "1056x1408" -> " Output image must be portrait (3:4 aspect ratio, 1056x1408).";
+            case "1408x1056" -> " Output image must be landscape (4:3 aspect ratio, 1408x1056).";
             default -> "";
         };
     }
@@ -153,12 +153,13 @@ public class GptImageAgent implements ImageGeneratorAgent {
 
     private String pickSize(String aspect) {
         if (aspect == null || "auto".equals(aspect)) return "1024x1024";
+        // gpt-image-2 约束：边为16倍数、长:短≤3:1、总像素65.5万~829万。下列尺寸均满足。
         return switch (aspect) {
             case "9:16", "portrait" -> "1024x1536";
             case "16:9", "landscape" -> "1536x1024";
             case "1:1" -> "1024x1024";
-            case "3:4" -> "1024x1360";
-            case "4:3" -> "1360x1024";
+            case "3:4" -> "1056x1408";   // 正规3:4竖版(都%16)
+            case "4:3" -> "1408x1056";   // 正规4:3横版
             default -> "1024x1024";
         };
     }
@@ -236,11 +237,11 @@ public class GptImageAgent implements ImageGeneratorAgent {
             if (Math.abs(srcRatio - tgtRatio) < 0.02) return src; // already close enough
             BufferedImage canvas = new BufferedImage(tw, th, BufferedImage.TYPE_3BYTE_BGR);
             Graphics2D g = canvas.createGraphics();
-            g.setColor(java.awt.Color.WHITE);
-            g.fillRect(0, 0, tw, th);
             g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
             g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-            double scale = Math.min((double) tw / sw, (double) th / sh);
+            // 参考图改用 cover(铺满+居中裁剪)而非纯白 letterbox——白边会被模型复刻进成品(07.06反馈)。
+            // 参考图只提供产品外观/背景风格，边缘轻微裁剪可接受，换来成品无白边。
+            double scale = Math.max((double) tw / sw, (double) th / sh);
             int dw = (int) Math.round(sw * scale);
             int dh = (int) Math.round(sh * scale);
             int dx = (tw - dw) / 2;
@@ -249,7 +250,7 @@ public class GptImageAgent implements ImageGeneratorAgent {
             g.dispose();
             File tmp = File.createTempFile("gptimg_input_", ".jpg", src.getParentFile());
             ImageIO.write(canvas, "jpeg", tmp);
-            log.info("prepareInputImage: {}x{} -> letterbox {}x{} ({})", sw, sh, tw, th, tmp.getName());
+            log.info("prepareInputImage: {}x{} -> cover {}x{} ({})", sw, sh, tw, th, tmp.getName());
             return tmp;
         } catch (Exception e) {
             log.warn("prepareInputImage failed, using original: {}", e.getMessage());
@@ -425,11 +426,11 @@ public class GptImageAgent implements ImageGeneratorAgent {
             }
             BufferedImage dst = new BufferedImage(tw, th, BufferedImage.TYPE_3BYTE_BGR);
             Graphics2D g = dst.createGraphics();
-            g.setColor(java.awt.Color.WHITE);
-            g.fillRect(0, 0, tw, th);
             g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
             g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-            double scale = Math.min((double) tw / sw, (double) th / sh);
+            // 比例不符时用 cover(缩放到铺满+居中裁剪)，而非纯白 letterbox——
+            // 白填充会在成品两侧留白边(07.06反馈)。cover 铺满目标画布、多余部分裁掉，无白边。
+            double scale = Math.max((double) tw / sw, (double) th / sh);
             int dw = (int) Math.round(sw * scale);
             int dh = (int) Math.round(sh * scale);
             int dx = (tw - dw) / 2;
