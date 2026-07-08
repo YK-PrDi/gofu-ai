@@ -70,12 +70,15 @@ public class GenController {
                 return ResponseEntity.ok(resp);
             }
 
-            // 存永久 key（ADR-008），未配 COS 时降级为本地路径
-            String imageRef;
+            // 存永久 key（ADR-008），未配 COS 或上传失败(如账户欠费451)时降级为本地路径(07.08修:不因COS失败丢图)
+            String imageRef = outputPath;
             if (cosService.isEnabled()) {
-                imageRef = cosService.upload(tmp, UUID.randomUUID() + ".jpg");
+                try {
+                    imageRef = cosService.upload(tmp, UUID.randomUUID() + ".jpg");
+                } catch (Exception ce) {
+                    log.warn("COS 上传失败，暂存本地路径: {}", ce.getMessage());
+                }
             } else {
-                imageRef = outputPath;
                 log.warn("COS 未启用，ProductContext 暂存本地路径: {}", imageRef);
             }
 
@@ -133,10 +136,14 @@ public class GenController {
                 return ResponseEntity.internalServerError().body(Map.of("error", "局部重绘失败（检查密钥/配额）"));
             }
 
-            String imageRef = cosService.isEnabled()
-                    ? cosService.upload(outTmp, UUID.randomUUID() + ".png")
-                    : outTmp.getAbsolutePath();
-            String signedUrl = cosService.isEnabled() ? cosService.signKey(imageRef) : imageRef;
+            // COS 上传失败(如欠费451)回退本地路径,不丢图(07.08修)
+            String imageRef = outTmp.getAbsolutePath();
+            boolean uploaded = false;
+            if (cosService.isEnabled()) {
+                try { imageRef = cosService.upload(outTmp, UUID.randomUUID() + ".png"); uploaded = true; }
+                catch (Exception ce) { log.warn("COS 上传失败，返回本地路径: {}", ce.getMessage()); }
+            }
+            String signedUrl = uploaded ? cosService.signKey(imageRef) : imageRef;
             return ResponseEntity.ok(Map.of("imageRef", imageRef, "signedUrl", signedUrl));
         } catch (Exception e) {
             log.error("局部重绘异常: {}", e.getMessage(), e);

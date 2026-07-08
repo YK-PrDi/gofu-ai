@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>乐羽 · 拼多多自动上新</title>
+<link rel="icon" type="image/png" href="icon.png">
+<style>
+  :root{
+    --primary:#2563eb; --primary-light:#eff6ff; --border:#e5e7eb;
+    --text:#1f2937; --text-muted:#4b5563; --text-dim:#9ca3af;
+    --surface:#ffffff; --surface-alt:#f8fafc; --bg-panel:#ffffff;
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:var(--font);background:var(--surface-alt);color:var(--text);height:100vh;overflow:auto;}
+  .app{max-width:1180px;margin:0 auto;padding:24px 20px 60px;}
+  .ly-cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:22px;align-items:start;}
+  .ly-col-box{border:1px solid var(--border);border-radius:10px;padding:16px;background:var(--surface);}
+  @media(max-width:900px){.ly-cols{grid-template-columns:1fr;}}
+  .app-header{display:flex;align-items:center;gap:10px;margin-bottom:18px;}
+  .app-header h1{font-size:1.1rem;margin:0;font-weight:700;}
+  .app-header .badge{font-size:0.7rem;color:#fff;background:var(--primary);padding:2px 8px;border-radius:10px;}
+  label{font-size:0.78rem;color:var(--text-muted);font-weight:600;display:block;margin-bottom:4px;}
+  .config-group{display:flex;flex-direction:column;margin-bottom:14px;}
+
+  /* gf-select 下拉 */
+  .gf-select{position:relative;border:1px solid var(--border);border-radius:6px;background:var(--surface);cursor:pointer;user-select:none;}
+  .gf-select-header{display:flex;align-items:center;justify-content:space-between;padding:7px 10px;font-size:0.78rem;gap:6px;}
+  .gf-select-arrow{width:14px;height:14px;fill:none;stroke:var(--text-dim);stroke-width:2;transition:transform .2s;}
+  .gf-select.open .gf-select-arrow{transform:rotate(180deg);}
+  .gf-select-options{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--bg-panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 10px 25px -5px rgba(0,0,0,.12);opacity:0;pointer-events:none;transform:translateY(-5px);transition:all .18s;z-index:1000;max-height:220px;overflow-y:auto;padding:6px;}
+  .gf-select.open .gf-select-options{opacity:1;pointer-events:auto;transform:none;}
+  .gf-option{padding:6px 10px;font-size:0.78rem;border-radius:5px;cursor:pointer;}
+  .gf-option:hover{background:var(--primary-light);}
+  .gf-option.selected{background:var(--primary-light);color:var(--primary);font-weight:600;}
+
+  /* 品类级联 */
+  .ec-cascader{position:relative;border:1px solid var(--border);border-radius:6px;background:var(--surface);}
+  .ec-cascader-trigger{display:flex;align-items:center;justify-content:space-between;padding:7px 10px;font-size:0.78rem;cursor:pointer;gap:6px;}
+  .ec-cascader-text{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .ec-cascader-panels{position:absolute;left:0;top:calc(100% + 4px);display:none;flex-direction:row;gap:6px;z-index:9999;max-width:calc(100vw - 40px);overflow-x:auto;padding-bottom:4px;}
+  .ec-cascader.open .ec-cascader-panels{display:flex;}
+  #lst-cat-panels{position:fixed !important;bottom:auto !important;z-index:99999;max-height:none !important;overflow:visible;}
+  #lst-cat-panels .ec-cascader-panel{box-sizing:border-box;}
+  .ec-cascader-panel{background:var(--bg-panel);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.08);padding:4px;min-width:170px;max-height:320px;overflow-y:auto;flex:0 0 auto;}
+  .ec-cascader-item{display:flex;align-items:center;justify-content:space-between;padding:6px 10px 6px 12px;font-size:0.78rem;cursor:pointer;border-radius:5px;gap:6px;}
+  .ec-cascader-item:hover{background:var(--primary-light);}
+  .ec-cascader-item.active{background:var(--primary-light);color:var(--primary);font-weight:600;}
+  .ec-cascader-arrow-r{color:var(--text-dim);font-size:0.9rem;}
+
+  button{font-family:inherit;}
+
+  /* modal */
+  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:6000;}
+  .modal-overlay.show{display:flex;}
+  .modal-card{background:var(--surface);border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.25);}
+  .modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border);}
+  .modal-header h3{margin:0;font-size:0.95rem;}
+  .close-btn{border:none;background:none;font-size:1.4rem;cursor:pointer;color:var(--text-dim);line-height:1;}
+  .modal-footer{display:flex;gap:10px;padding:14px 20px;border-top:1px solid var(--border);}
+  .btn-outline{padding:8px;border:1px solid var(--border);border-radius:7px;background:transparent;cursor:pointer;font-size:0.82rem;}
+  .btn-primary{padding:8px;border:none;border-radius:7px;background:var(--primary);color:#fff;cursor:pointer;font-size:0.82rem;font-weight:600;}
+  .btn-primary:disabled{opacity:.5;cursor:not-allowed;}
+  .sp-chip{display:inline-flex;align-items:center;gap:4px;font-size:0.74rem;cursor:pointer;padding:3px 8px;border:1px solid var(--border);border-radius:6px;}
+  .sp-tab{padding:5px 14px;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;font-size:0.76rem;}
+  .sp-tab.active{background:var(--primary);color:#fff;border-color:var(--primary);}
+  .sp-margin-high{color:#16a34a;font-weight:600;} .sp-margin-mid{color:#d97706;font-weight:600;} .sp-margin-low{color:#dc2626;font-weight:600;}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="app-header">
+    <h1>乐羽</h1>
+    <button onclick="openHelpModal()" style="font-size:0.74rem;padding:3px 10px;border:1px solid var(--primary);border-radius:6px;background:var(--primary-light);color:var(--primary);cursor:pointer;">📖 使用说明</button>
+    <span class="badge">拼多多自动上新</span>
+    <button onclick="openSettingsModal()" title="设置" style="margin-left:auto;font-size:0.9rem;padding:3px 10px;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;">⚙️</button>
+  </div>
+  <div id="listingConfig">
+    <div style="font-size:0.78rem;color:var(--text-dim);line-height:1.5;padding:8px 10px;background:var(--primary-light);border-radius:6px;margin-bottom:14px;">
+      选好品类和材质，拖入商品文件夹，AI 自动生成营销标题、提取 SKU/价格，确认后自动发布到拼多多。
+    </div>
+
+    <div class="ly-cols">
+    <div class="ly-col-box">
+    <div class="config-group">
+      <label>商品品类 <span style="color:#dc2626;">*</span></label>
+      <div class="ec-cascader" id="lst-cat-cascader" tabindex="0">
+        <div class="ec-cascader-trigger" onclick="lstToggleCascader(event)">
+          <span class="ec-cascader-text" id="lst-cat-text">— 点击选择品类</span>
+          <svg class="gf-select-arrow" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div id="lst-cat-search-wrap" style="padding:6px 8px;border-bottom:1px solid var(--border);display:none;">
+          <input type="text" id="lst-cat-search" placeholder="🔎 搜索品类" onclick="event.stopPropagation()" oninput="lstOnCatSearch(this.value)" style="width:100%;padding:4px 8px;border:1px solid var(--border);border-radius:5px;font-size:0.75rem;box-sizing:border-box;">
+        </div>
+        <div class="ec-cascader-panels" id="lst-cat-panels"></div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+      <!-- 材质统一在右侧「产品信息」面板维护，这里只留隐藏值兜底（默认塑料） -->
+      <input type="hidden" id="lstMaterial" value="塑料">
+      <div class="config-group" style="flex:1;min-width:120px;">
+        <label>品牌 <span style="color:#dc2626;">*</span></label>
+        <input type="text" id="lstBrand" value="GOFU" placeholder="如：GOFU" style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;">
+      </div>
+      <div class="config-group" style="flex:0 0 auto;">
+        <label>规格类型</label>
+        <div class="gf-select" tabindex="0" id="lstSpecTypeSelect" style="width:100px;">
+          <input type="hidden" id="lstSkuSpecType" value="款式">
+          <div class="gf-select-header" onclick="toggleSelect(this, event)"><span class="gf-select-text">款式</span><svg class="gf-select-arrow" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg></div>
+          <div class="gf-select-options">
+            <div class="gf-option selected" data-value="款式" onclick="selectOption(this,event)">款式</div>
+            <div class="gf-option" data-value="型号" onclick="selectOption(this,event)">型号</div>
+            <div class="gf-option" data-value="颜色" onclick="selectOption(this,event)">颜色</div>
+            <div class="gf-option" data-value="尺码" onclick="selectOption(this,event)">尺码</div>
+            <div class="gf-option" data-value="尺寸" onclick="selectOption(this,event)">尺寸</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="config-group">
+      <label>商品文件夹 <span style="color:#dc2626;">*</span></label>
+      <div style="display:flex;gap:8px;margin-bottom:6px;">
+        <button type="button" onclick="openErpModal()" style="padding:5px 12px;border:1px solid var(--primary);border-radius:6px;background:var(--primary-light);color:var(--primary);font-size:0.75rem;cursor:pointer;">📦 从ERP选品</button>
+        <button type="button" onclick="openErpConfigModal()" style="padding:5px 12px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--text-muted);font-size:0.75rem;cursor:pointer;">⚙️ ERP设置</button>
+      </div>
+      <div id="lstDropZone" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:18px 12px;border:2px dashed var(--border);border-radius:8px;cursor:pointer;text-align:center;" onclick="lstPickRootDir()" ondragenter="event.preventDefault();event.stopPropagation();lstOnDragOver(event)" ondragover="lstOnDragOver(event)" ondragleave="lstOnDragLeave(event)" ondrop="lstOnDrop(event)">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        <span id="lstDropZoneText" style="font-size:0.75rem;color:var(--text-dim);">点击选择 或 拖入商品文件夹</span>
+        <span style="font-size:0.68rem;color:var(--text-dim);opacity:.7;">文件夹内放：主图 / 详情图 / 白底图 子文件夹（白底图随文件夹一起识别并自动匹配 SKU；SKU 图由「🎨生成SKU图」生成）</span>
+      </div>
+      <div id="lstFolderStatus" style="display:none;margin-top:6px;padding:8px 10px;background:var(--surface-alt);border-radius:6px;font-size:0.73rem;color:var(--text-dim);line-height:1.7;"></div>
+      <input type="hidden" id="lstMainImgDir"><input type="hidden" id="lstDetailImgDir"><input type="hidden" id="lstWhiteImgDir">
+      <div id="lstImgPreview" style="display:none;margin-top:10px;"></div>
+    </div>
+    </div><!-- /左栏 -->
+
+    <div class="ly-col-box"><!-- 右栏 -->
+    <div id="lstProdInfo" style="margin-bottom:14px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span style="font-size:0.78rem;font-weight:700;color:var(--primary);">📝 产品信息</span>
+        <span style="font-size:0.66rem;color:var(--text-dim);">选好品类后自动预填，可编辑</span>
+        <button type="button" onclick="openProductInfoEditor()" style="margin-left:auto;font-size:0.66rem;padding:2px 8px;border:1px solid var(--border);border-radius:5px;background:transparent;cursor:pointer;color:var(--text-muted);">📋 预设库</button>
+        <button type="button" onclick="lstAddAttr()" style="font-size:0.66rem;padding:2px 8px;border:1px solid var(--primary);border-radius:5px;background:var(--primary-light);cursor:pointer;color:var(--primary);">+ 新增属性</button>
+      </div>
+      <div id="lstAttrList" style="display:flex;flex-direction:column;gap:6px;"></div>
+      <div id="lstAttrEmpty" style="font-size:0.72rem;color:var(--text-dim);padding:8px 0;">请先选择商品品类</div>
+    </div>
+
+    <div id="lstPreview" style="display:none;border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface);margin-bottom:14px;">
+      <div style="font-size:0.72rem;font-weight:700;color:var(--primary);margin-bottom:8px;">📋 上架信息确认（可编辑）</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+        <label style="margin:0;font-size:0.72rem;color:var(--text-dim);">商品标题</label>
+        <span id="lstTitleCount" style="font-size:0.66rem;color:var(--text-dim);">0/30</span>
+        <button type="button" onclick="lstAutoPrepare()" id="lstRegenBtn" style="margin-left:auto;font-size:0.66rem;padding:2px 8px;border:1px solid var(--primary);border-radius:5px;background:var(--primary-light);cursor:pointer;color:var(--primary);">🔄 重新生成</button>
+      </div>
+      <input type="text" id="lstTitle" oninput="lstUpdateTitleCount()" placeholder="导入后 AI 自动生成，可手动修改" style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;box-sizing:border-box;margin-bottom:10px;">
+      <div style="font-size:0.7rem;color:var(--text-dim);margin-bottom:4px;">主图</div>
+      <div id="lstMainThumbs" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;"></div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+        <span style="font-size:0.7rem;color:var(--text-dim);">SKU 列表</span>
+        <span id="lstSkuCount" style="font-size:0.66rem;color:var(--text-dim);"></span>
+        <button type="button" id="lstGenImgBtn" onclick="openSkuImgModal()" style="margin-left:auto;font-size:0.66rem;padding:2px 8px;border:1px solid #16a34a;border-radius:5px;background:#f0fdf4;cursor:pointer;color:#16a34a;">🎨 生成SKU图</button>
+        <button type="button" onclick="lstFetchWhiteFromErp()" style="font-size:0.66rem;padding:2px 8px;border:1px solid #16a34a;border-radius:5px;background:#f0fdf4;cursor:pointer;color:#16a34a;">📥 从快麦取白底图</button>
+        <button type="button" onclick="lstImportWhite()" style="font-size:0.66rem;padding:2px 8px;border:1px solid var(--border);border-radius:5px;background:transparent;cursor:pointer;color:var(--text-muted);">⬜ 导入白底图</button>
+        <button type="button" onclick="lstExportSkuImages()" style="font-size:0.66rem;padding:2px 8px;border:1px solid var(--border);border-radius:5px;background:transparent;cursor:pointer;color:var(--text-muted);">💾 导出SKU图</button>
+        <button type="button" onclick="lstImportSkuImages()" style="font-size:0.66rem;padding:2px 8px;border:1px solid var(--border);border-radius:5px;background:transparent;cursor:pointer;color:var(--text-muted);">📂 导入SKU图</button>
+        <button type="button" id="lstAiPlanBtn" onclick="openSkuPlanModal()" style="font-size:0.66rem;padding:2px 8px;border:1px solid var(--primary);border-radius:5px;background:var(--primary-light);cursor:pointer;color:var(--primary);">✨ AI 定价方案</button>
+      </div>
+      <div id="lstSkuList" style="display:flex;flex-direction:column;gap:4px;"></div>
+      <div style="font-size:0.68rem;color:var(--text-dim);margin-top:8px;">满件折扣 9.9 折 · 承诺 48 小时发货（固定）</div>
+    </div>
+    </div><!-- /右栏 -->
+    </div><!-- /ly-cols -->
+
+    <div style="display:flex;gap:8px;margin-top:4px;">
+      <button type="button" onclick="lstCheckEnv()" style="flex:1;padding:8px;border:1px solid var(--border);border-radius:7px;background:transparent;cursor:pointer;font-size:0.78rem;color:var(--text-muted);">🔍 检查环境</button>
+      <button type="button" onclick="lstLoginPdd()" style="flex:1;padding:8px;border:1px solid var(--border);border-radius:7px;background:transparent;cursor:pointer;font-size:0.78rem;color:var(--text-muted);">🔑 登录拼多多</button>
+      <button type="button" onclick="lstStartListing(true)" id="lstDryRunBtn" style="flex:1;padding:8px;border:1px solid var(--border);border-radius:7px;background:transparent;color:var(--text-muted);cursor:pointer;font-size:0.78rem;" title="诊断模式：不提交，生成 sku_input_diag.json">🔍 诊断模式</button>
+      <button type="button" onclick="lstStartListing()" id="lstStartBtn" style="flex:2;padding:8px;border:none;border-radius:7px;background:var(--primary);color:#fff;cursor:pointer;font-size:0.82rem;font-weight:600;">🚀 开始自动上新</button>
+    </div>
+    <div id="lstProgressLog" style="display:none;margin-top:10px;padding:10px 12px;background:#0f172a;color:#e2e8f0;border-radius:6px;font-size:0.7rem;font-family:monospace;white-space:pre-wrap;max-height:240px;overflow:auto;"></div>
+  </div>
+</div>
+
+<div id="helpModal" class="modal-overlay" onclick="if(event.target===this)closeHelpModal()">
+  <div class="modal-card" style="width:680px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column;">
+    <div class="modal-header"><h3>📖 使用说明</h3><button class="close-btn" onclick="closeHelpModal()">×</button></div>
+    <div style="flex:1;overflow-y:auto;padding:18px 22px;font-size:0.82rem;line-height:1.8;color:var(--text);">
+      <h4 style="margin:0 0 6px;color:var(--primary);">软件用途</h4>
+      <p style="margin:0 0 14px;color:var(--text-muted);">自动把商品发布到拼多多商家后台：选好品类、拖入商品文件夹，软件用 AI 生成标题、提取 SKU 和价格，确认后自动打开浏览器完成上架。无需手动一项项填写。</p>
+
+      <h4 style="margin:0 0 6px;color:var(--primary);">商品文件夹怎么准备</h4>
+      <p style="margin:0 0 6px;color:var(--text-muted);">一个商品建一个文件夹，里面放这些子文件夹和文件：</p>
+      <ul style="margin:0 0 14px;padding-left:20px;color:var(--text-muted);">
+        <li><b>主图</b>：文件夹名含「主图」，放轮播主图（也用作 AI 生成 SKU 图的参考）</li>
+        <li><b>详情</b>：文件夹名含「详情」，放详情长图</li>
+        <li><b>SKU 图</b>：无需准备，确认布局后点「🎨 生成SKU图」由 AI 按主图参考生成</li>
+        <li><b>白底图</b>：上架前在 SKU 列表处单独按顺序导入（可选）</li>
+      </ul>
+
+      <h4 style="margin:0 0 6px;color:var(--primary);">操作步骤</h4>
+      <ol style="margin:0 0 14px;padding-left:20px;color:var(--text-muted);">
+        <li><b>选品类</b>（必填）：点「商品品类」逐级选到具体类目，决定上架到拼多多哪个分类</li>
+        <li><b>选材质</b>（必填）+ 填<b>品牌</b>（可选，留空则标题不含品牌）</li>
+        <li><b>首次使用先点「🔑 登录拼多多」</b>：弹出浏览器，手动登录一次，之后会记住登录态</li>
+        <li><b>拖入商品文件夹</b>（或点击选择）：软件自动扫描、AI 生成标题和 SKU 款式名，显示在下方「上架信息确认」区</li>
+        <li><b>核对并可修改</b>：标题、各 SKU 的款式名/拼单价/单买价/库存/编码都能直接改</li>
+        <li>点<b>「🚀 开始自动上新」</b>：浏览器自动操作拼多多后台完成发布，进度显示在底部日志</li>
+      </ol>
+
+      <h4 style="margin:0 0 6px;color:var(--primary);">小提示</h4>
+      <ul style="margin:0 0 4px;padding-left:20px;color:var(--text-muted);">
+        <li>标题点「🔄 重新生成」可换一版；「✨ AI 定价方案」可让 AI 按毛利率给多套定价</li>
+        <li>满件折扣固定 9.9 折、承诺 48 小时发货</li>
+        <li>遇到问题可点「🔍 检查环境」确认运行环境是否正常</li>
+      </ul>
+    </div>
+    <div class="modal-footer"><button class="btn-primary" style="flex:1" onclick="closeHelpModal()">知道了</button></div>
+  </div>
+</div>
+
+<div id="skuPlanModal" class="modal-overlay">
+  <div class="modal-card" style="width:980px;max-width:97vw;max-height:90vh;display:flex;flex-direction:column;">
+    <div class="modal-header"><h3>✨ SKU 方案工作台</h3><button class="close-btn" onclick="closeSkuPlanModal()">×</button></div>
+    <div style="padding:12px 20px;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:12px;align-items:center;flex-shrink:0;">
+      <div style="font-size:0.75rem;color:var(--text-dim);">品类：<span id="spCategoryLabel" style="color:var(--text);font-weight:600;">—</span></div>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <span style="font-size:0.75rem;color:var(--text-dim);">生成套数：</span>
+        <input id="spCount" type="number" min="1" max="20" value="3" style="width:60px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;text-align:center;">
+        <span style="font-size:0.72rem;color:var(--text-dim);">套</span>
+      </div>
+      <button id="spGenBtn" onclick="spGenerate()" style="margin-left:auto;padding:6px 16px;border:none;border-radius:6px;background:var(--primary);color:#fff;font-size:0.78rem;font-weight:600;cursor:pointer;">✨ 生成搭配</button>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:16px 20px;">
+      <div id="spTabBar" style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;"></div>
+      <div id="spPlanContent" style="min-height:200px;">
+        <div style="text-align:center;padding:40px 0;color:var(--text-dim);font-size:0.82rem;">点击「生成搭配」让 AI 把单品组合成多套布局</div>
+      </div>
+    </div>
+    <div class="modal-footer" style="flex-shrink:0;">
+      <button class="btn-outline" style="flex:1" onclick="spBack()">← 上一步</button>
+      <button class="btn-outline" style="flex:1" onclick="closeSkuPlanModal()">取消</button>
+      <button id="spConfirmBtn" class="btn-primary" style="flex:2" onclick="spConfirm()" disabled>确认此搭配 → 定价</button>
+    </div>
+  </div>
+</div>
+
+<!-- SKU 生图面板 -->
+<div id="skuImgModal" class="modal-overlay">
+  <div class="modal-card" style="width:900px;max-width:97vw;max-height:90vh;display:flex;flex-direction:column;">
+    <div class="modal-header"><h3>🎨 生成 SKU 图</h3><button class="close-btn" onclick="closeSkuImgModal()">×</button></div>
+    <div style="padding:12px 20px;border-bottom:1px solid var(--border);flex-shrink:0;">
+      <div style="font-size:0.74rem;color:var(--text-muted);margin-bottom:6px;">选一张主图作参考（AI 会参考其外观风格逐个生成 SKU 展示图）：</div>
+      <div id="siRefThumbs" style="display:flex;gap:8px;flex-wrap:wrap;"></div>
+      <input type="hidden" id="siRefPath">
+      <div style="font-size:0.7rem;color:var(--text-dim);margin-top:8px;">防比价构图、排除人像等可在右上角 ⚙️ 设置里调整。</div>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:16px 20px;">
+      <div id="siContent" style="min-height:160px;">
+        <div style="text-align:center;padding:30px 0;color:var(--text-dim);font-size:0.82rem;">选好参考图后点「开始生成」</div>
+      </div>
+    </div>
+    <div class="modal-footer" style="flex-shrink:0;">
+      <button class="btn-outline" style="flex:1" onclick="closeSkuImgModal()">取消</button>
+      <button id="siGenBtn" class="btn-primary" style="flex:2" onclick="siGenerate()">开始生成</button>
+    </div>
+  </div>
+</div>
+
+<!-- 设置 -->
+<div id="settingsModal" class="modal-overlay">
+  <div class="modal-card" style="width:460px;max-width:94vw;display:flex;flex-direction:column;">
+    <div class="modal-header"><h3>⚙️ 设置</h3><button class="close-btn" onclick="closeSettingsModal()">×</button></div>
+    <div style="padding:16px 20px;display:flex;flex-direction:column;gap:16px;">
+      <div>
+        <div style="font-size:0.78rem;font-weight:600;margin-bottom:6px;">上新模式</div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:0.78rem;margin-bottom:4px;cursor:pointer;">
+          <input type="radio" name="setMode" value="manual" checked> 人工（逐步：选品→搭配→定价→生图→确认→上架）
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:0.78rem;cursor:pointer;">
+          <input type="radio" name="setMode" value="auto"> 全自动（只选主件→自动搭配/定价/生图→确认后自动上架）
+        </label>
+      </div>
+      <div>
+        <div style="font-size:0.78rem;font-weight:600;margin-bottom:6px;">方案数量</div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:0.78rem;margin-bottom:4px;cursor:pointer;">
+          <input type="radio" name="setPlan" value="1" checked> 1 套（测试用，省成本）
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:0.78rem;cursor:pointer;">
+          <input type="radio" name="setPlan" value="multi"> 多套预览
+        </label>
+      </div>
+      <div>
+        <div style="font-size:0.78rem;font-weight:600;margin-bottom:6px;">配件搭配规则</div>
+        <button onclick="openRuleEditor()" style="font-size:0.74rem;padding:5px 12px;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;">📋 编辑规则库</button>
+        <div style="font-size:0.68rem;color:var(--text-dim);margin-top:4px;">全自动模式下，按此规则把"只选的主件"扩展成配件/批量件搭配。</div>
+      </div>
+      <div>
+        <div style="font-size:0.78rem;font-weight:600;margin-bottom:6px;">防比价构图</div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <div class="gf-select" style="min-width:200px;">
+            <input type="hidden" id="siTemplate" value="">
+            <div class="gf-select-header" onclick="toggleSelect(this,event)">
+              <span class="gf-select-text" id="siTemplateText">🎲 随机一种</span>
+              <svg class="gf-select-arrow" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+            </div>
+            <div class="gf-select-options" id="siTemplateOptions"></div>
+          </div>
+          <label style="font-size:0.72rem;color:var(--text-muted);display:flex;align-items:center;gap:4px;cursor:pointer;">
+            <input type="checkbox" id="siExcludePortrait" checked> 排除人像
+          </label>
+          <button type="button" onclick="openTplEditor()" style="font-size:0.68rem;padding:3px 10px;border:1px solid var(--border);border-radius:5px;background:transparent;cursor:pointer;color:var(--text-muted);">⚙️ 编辑模板</button>
+        </div>
+        <div style="font-size:0.68rem;color:var(--text-dim);margin-top:4px;">生成 SKU 图时使用的构图模式；选「随机」则每批随机一种。</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-primary" style="flex:1" onclick="saveSettings()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 配件规则编辑 -->
+<div id="ruleEditorModal" class="modal-overlay">
+  <div class="modal-card" style="width:720px;max-width:96vw;max-height:86vh;display:flex;flex-direction:column;">
+    <div class="modal-header"><h3>📋 配件搭配规则库</h3><button class="close-btn" onclick="closeRuleEditor()">×</button></div>
+    <div style="padding:10px 20px;border-bottom:1px solid var(--border);font-size:0.72rem;color:var(--text-dim);flex-shrink:0;">
+      JSON 直接编辑。byCategory 按品类配规则，byMainCode 按主件编码覆盖。accessories=配件关键字+角色(accessory/batch)，ladders=阶梯型号（留空则交 AI 自由组合）。
+    </div>
+    <textarea id="ruleJson" style="flex:1;min-height:320px;margin:12px 20px;padding:10px;border:1px solid var(--border);border-radius:6px;font-family:monospace;font-size:0.72rem;resize:vertical;"></textarea>
+    <div class="modal-footer">
+      <button class="btn-outline" style="flex:1" onclick="closeRuleEditor()">取消</button>
+      <button class="btn-primary" style="flex:2" onclick="saveRules()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 产品信息预设库编辑 -->
+<div id="piPresetModal" class="modal-overlay">
+  <div class="modal-card" style="width:720px;max-width:96vw;max-height:86vh;display:flex;flex-direction:column;">
+    <div class="modal-header"><h3>📝 产品信息预设库</h3><button class="close-btn" onclick="closeProductInfoEditor()">×</button></div>
+    <div style="padding:10px 20px;border-bottom:1px solid var(--border);font-size:0.72rem;color:var(--text-dim);flex-shrink:0;">
+      JSON 直接编辑。键=品类全路径（如「家装主材 &gt; 卫浴配件 &gt; 花洒配件 &gt; 花洒喷头」），值=属性数组 [{name,value,options:[],manual}]。manual=true 表示人工选择，options 为可选项。选品类后自动预填。
+    </div>
+    <textarea id="piPresetJson" style="flex:1;min-height:320px;margin:12px 20px;padding:10px;border:1px solid var(--border);border-radius:6px;font-family:monospace;font-size:0.72rem;resize:vertical;"></textarea>
+    <div class="modal-footer">
+      <button class="btn-outline" style="flex:1" onclick="closeProductInfoEditor()">取消</button>
+      <button class="btn-primary" style="flex:2" onclick="saveProductInfoPresets()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 防比价模板编辑 -->
+<div id="tplEditorModal" class="modal-overlay">
+  <div class="modal-card" style="width:760px;max-width:96vw;max-height:88vh;display:flex;flex-direction:column;">
+    <div class="modal-header"><h3>⚙️ 防比价构图模板</h3><button class="close-btn" onclick="closeTplEditor()">×</button></div>
+    <div style="padding:10px 20px;border-bottom:1px solid var(--border);font-size:0.72rem;color:var(--text-dim);flex-shrink:0;">
+      每个模板是一种构图。type=ai 整图由 AI 生成（多样化防比价）；type=sticker 走左右布局贴配件卡（配件精确）。提示词可用占位符 {{colorName}} {{bgStyle}}。
+    </div>
+    <div id="tplList" style="flex:1;overflow-y:auto;padding:12px 20px;display:flex;flex-direction:column;gap:10px;"></div>
+    <div class="modal-footer" style="flex-shrink:0;">
+      <button class="btn-outline" style="flex:1" onclick="tplAdd()">+ 新增模板</button>
+      <button class="btn-outline" style="flex:1" onclick="closeTplEditor()">取消</button>
+      <button class="btn-primary" style="flex:2" onclick="tplSave()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 定价确认面板 -->
+<div id="pricingModal" class="modal-overlay">
+  <div class="modal-card" style="width:980px;max-width:97vw;max-height:90vh;display:flex;flex-direction:column;">
+    <div class="modal-header"><h3>💰 定价确认</h3><button class="close-btn" onclick="closePricingModal()">×</button></div>
+    <div style="padding:12px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:16px;flex-shrink:0;">
+      <span style="font-size:0.78rem;color:var(--text-muted);">成本占比：</span>
+      <input id="pmRatioSlider" type="range" min="0.28" max="0.78" step="0.01" value="0.35"
+        oninput="pmOnSlider(this.value)" style="flex:1;max-width:260px;accent-color:var(--primary);">
+      <span id="pmRatioVal" style="font-size:0.82rem;font-weight:700;color:var(--primary);min-width:36px;">35%</span>
+      <span style="font-size:0.72rem;color:var(--text-dim);">（价格 = 成本 ÷ 成本占比）</span>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:16px 20px;">
+      <div id="pmTableBox" style="min-height:160px;"></div>
+      <span id="pmLastData" data-json="{}"></span>
+    </div>
+    <div class="modal-footer" style="flex-shrink:0;">
+      <button id="pmExportBtn" class="btn-outline" style="flex:1" onclick="pmExport()">📥 导出定价表 xlsx</button>
+      <button class="btn-outline" style="flex:1" onclick="pmBack()">← 上一步</button>
+      <button class="btn-outline" style="flex:1" onclick="closePricingModal()">取消</button>
+      <button class="btn-primary" style="flex:2" onclick="pmApply()">确认 → 填入上新</button>
+    </div>
+  </div>
+</div>
+
+<!-- ERP 选品面板 -->
+<div id="erpModal" class="modal-overlay">
+  <div class="modal-card" style="width:700px;max-width:97vw;height:90vh;display:flex;flex-direction:column;">
+    <div class="modal-header">
+      <h3>📦 从快麦ERP选品 <span id="erpProductTypeTag" style="font-size:0.72rem;padding:2px 8px;background:var(--primary-light);color:var(--primary);border-radius:10px;font-weight:600;margin-left:6px;"></span></h3>
+      <button class="close-btn" onclick="closeErpModal()">×</button>
+    </div>
+    <div style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;gap:8px;flex-shrink:0;">
+      <input id="erpSearchInput" type="text" placeholder="输入关键词过滤..." oninput="erpSearchLocal(this.value)"
+        style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;">
+      <button id="erpRefreshCacheBtn" onclick="erpRefreshCache()" class="btn-outline" style="padding:6px 12px;font-size:0.76rem;white-space:nowrap;" title="ERP有新单品时点此重新拉取">🔄 刷新</button>
+    </div>
+    <div id="erpProductList" style="flex:1;overflow-y:auto;min-height:200px;"></div>
+    <div style="padding:8px 16px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0;">
+      <span id="erpPageInfo" style="font-size:0.76rem;color:var(--text-dim);flex:1;">加载中...</span>
+      <button id="erpNextBtn" onclick="erpNext()" class="btn-outline" style="padding:5px 12px;font-size:0.76rem;display:none;">加载更多 ▼</button>
+      <span id="erpSelectedCount" style="font-size:0.74rem;color:var(--primary);font-weight:600;"></span>
+      <button id="erpConfirmBtn" onclick="erpConfirm()" class="btn-primary" style="padding:5px 14px;font-size:0.78rem;">确认选品 →</button>
+    </div>
+  </div>
+</div>
+
+<!-- 成本录入面板 -->
+<div id="costModal" class="modal-overlay">
+  <div class="modal-card" style="width:520px;max-width:97vw;max-height:88vh;display:flex;flex-direction:column;">
+    <div class="modal-header"><h3>✏️ 录入各SKU成本</h3><button class="close-btn" onclick="closeCostModal()">×</button></div>
+    <div style="flex:1;overflow-y:auto;padding:14px 20px;">
+      <p style="font-size:0.76rem;color:var(--text-dim);margin:0 0 10px;">请填入每个SKU的总成本（含物料+工艺，不含运费）：</p>
+      <table style="width:100%;border-collapse:collapse;font-size:0.78rem;">
+        <thead><tr style="background:var(--surface-alt);font-size:0.7rem;color:var(--text-dim);">
+          <th style="padding:6px 10px;text-align:left;">商品编码</th>
+          <th style="padding:6px 10px;text-align:left;">商品名</th>
+          <th style="padding:6px 10px;text-align:left;">总成本 (元)</th>
+        </tr></thead>
+        <tbody id="costTableBody"></tbody>
+      </table>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-outline" style="flex:1" onclick="closeCostModal()">取消</button>
+      <button class="btn-primary" style="flex:2" onclick="costConfirm()">确认成本 → 生成方案</button>
+    </div>
+  </div>
+</div>
+
+<!-- 成本核对面板 -->
+<div id="costReviewModal" class="modal-overlay">
+  <div class="modal-card" style="width:780px;max-width:97vw;max-height:90vh;display:flex;flex-direction:column;">
+    <div class="modal-header"><h3>✅ 成本核对</h3><button class="close-btn" onclick="closeCostReviewModal()">×</button></div>
+    <div style="flex:1;overflow-y:auto;padding:14px 20px;">
+      <p style="font-size:0.74rem;color:var(--text-dim);margin:0 0 10px;">成本价、重量可编辑。架类运费按重量实时计算，重量必填；代发商品运费豁免。</p>
+      <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;">
+        <thead><tr style="background:var(--surface-alt);font-size:0.7rem;color:var(--text-dim);">
+          <th style="padding:6px 8px;text-align:left;">编码</th>
+          <th style="padding:6px 8px;text-align:left;">名称</th>
+          <th style="padding:6px 8px;text-align:left;">角色</th>
+          <th style="padding:6px 8px;text-align:left;">成本价</th>
+          <th style="padding:6px 8px;text-align:left;">重量(kg)</th>
+          <th style="padding:6px 8px;text-align:left;">代发</th>
+          <th style="padding:6px 8px;text-align:left;">材料成本(可改)</th>
+        </tr></thead>
+        <tbody id="crTableBody"></tbody>
+      </table>
+      </div>
+      <div style="margin-top:12px;text-align:right;font-size:0.82rem;font-weight:700;">
+        总成本：<span id="crTotalCost" style="color:var(--primary);">¥0.00</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-outline" style="flex:1" onclick="crBack()">← 上一步</button>
+      <button class="btn-outline" style="flex:1" onclick="closeCostReviewModal()">取消</button>
+      <button class="btn-primary" style="flex:2" onclick="crConfirm()">确认成本 → 生成方案</button>
+    </div>
+  </div>
+</div>
+
+<!-- ERP 凭证设置 -->
+<div id="erpConfigModal" class="modal-overlay" onclick="if(event.target===this)closeErpConfigModal()">
+  <div class="modal-card" style="width:460px;max-width:95vw;">
+    <div class="modal-header"><h3>⚙️ 快麦ERP设置</h3><button class="close-btn" onclick="closeErpConfigModal()">×</button></div>
+    <div style="padding:16px 20px;display:flex;flex-direction:column;gap:12px;font-size:0.8rem;">
+      <div><label style="margin-bottom:4px;">AppKey</label>
+        <input id="erpConfigAppKey" type="text" placeholder="快麦 AppKey"
+          style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:5px;font-size:0.75rem;box-sizing:border-box;font-family:monospace;">
+      </div>
+      <div><label style="margin-bottom:4px;">AppSecret</label>
+        <input id="erpConfigAppSecret" type="text" placeholder="快麦 AppSecret"
+          style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:5px;font-size:0.75rem;box-sizing:border-box;font-family:monospace;">
+      </div>
+      <div><label style="margin-bottom:4px;">AccessToken</label>
+        <input id="erpConfigAccessToken" type="text" placeholder="粘贴新 accessToken"
+          style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:5px;font-size:0.75rem;box-sizing:border-box;font-family:monospace;">
+      </div>
+      <div><label style="margin-bottom:4px;">RefreshToken（用于刷新会话）</label>
+        <input id="erpConfigRefreshToken" type="text" placeholder="粘贴新 refreshToken"
+          style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:5px;font-size:0.75rem;box-sizing:border-box;font-family:monospace;">
+      </div>
+      <div><label style="margin-bottom:4px;">CompanyId（公司编号，可选）</label>
+        <input id="erpConfigCompanyId" type="text" placeholder="公司编号"
+          style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:5px;font-size:0.75rem;box-sizing:border-box;font-family:monospace;">
+      </div>
+      <div><label style="margin-bottom:4px;">AppTitle（应用名，可选）</label>
+        <input id="erpConfigAppTitle" type="text" placeholder="应用名"
+          style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:5px;font-size:0.75rem;box-sizing:border-box;">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button id="erpRefreshBtn" class="btn-outline" style="flex:1" onclick="erpRefreshToken()">刷新 Token</button>
+      <button class="btn-primary" style="flex:2" onclick="erpSaveConfig()">保存</button>
+    </div>
+  </div>
+</div>
+
+<script src="data/categories.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

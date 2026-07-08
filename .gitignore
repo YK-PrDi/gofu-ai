@@ -33,6 +33,23 @@ application-prod.yml
 .env
 *-session.json
 user-prefs.json
+# 快麦真实凭证（appSecret/accessToken 等，绝不提交）
+kuaimai-config.json
+kuaimai-sku-cache.json
+
+# 便携打包产物与运行时（体积大/含登录态，不入库）
+packaging/dist/
+packaging/_runtime/
+packaging/_input/
+packaging/launcher/build/
+*.zip
+# 拼多多浏览器 profile（含登录态 Cookie，绝不提交）
+gofu-client-local/tools/pdd_browser_profile/
+# ERP 拉取的白底图 / 生成的 SKU 图（运行时产物）
+erp-white/
+sku-gen/
+# 备份文件
+*.bak-*
 
 # 运行时临时目录
 .temp-output/

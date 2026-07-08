@@ -1,0 +1,184 @@
+package com.gofu.local.service.listing;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.gofu.local.config.AppProperties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * 配件搭配规则库（自 LY-Automation 原样迁入，ADR-002：配件规则依赖本地 ERP 单品池，归本地）。
+ * 存 userDataDir/accessory-rules.json，前端可编辑、运行时即时生效。
+ * 粒度＝品类默认（byCategory）+ 主件编码覆盖（byMainCode）。
+ * 把"只选了主件"扩展成"主件+配件/批量件+阶梯型号"。
+ *
+ * <p>⚠️ 配件匹配规则（精确优先/排组合装/软管去重）禁止"优化"，与乐羽逐字一致。
+ */
+@Service
+public class AccessoryRuleService {
+
+    private static final Logger log = LoggerFactory.getLogger(AccessoryRuleService.class);
+    private final AppProperties appProperties;
+    private final ObjectMapper om = new ObjectMapper();
+
+    public AccessoryRuleService(AppProperties appProperties) {
+        this.appProperties = appProperties;
+    }
+
+    private File ruleFile() {
+        return new File(appProperties.getPaths().getUserDataDir(), "accessory-rules.json");
+    }
+
+    /** 读规则库 JSON 文本；版本化加载（classpath _v 更高则覆盖缓存）。 */
+    public synchronized String loadJson() {
+        return PromptLoader.loadVersioned("prompt/accessory-rules.json", ruleFile(), om);
+    }
+
+    public synchronized void saveJson(String json) throws Exception {
+        File f = ruleFile();
+        f.getParentFile().mkdirs();
+        Files.write(f.toPath(), json.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** 取某品类的规则（主件编码有覆盖则优先）。找不到返回 null。 */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> ruleFor(String category, String mainCode) {
+        try {
+            Map<String, Object> root = om.readValue(loadJson(), Map.class);
+            Map<String, Object> byMain = (Map<String, Object>) root.getOrDefault("byMainCode", Map.of());
+            if (mainCode != null && byMain.get(mainCode) instanceof Map) {
+                return (Map<String, Object>) byMain.get(mainCode);
+            }
+            Map<String, Object> byCat = (Map<String, Object>) root.getOrDefault("byCategory", Map.of());
+            // 品类全路径或末级名都尝试匹配
+            if (category != null) {
+                if (byCat.get(category) instanceof Map) return (Map<String, Object>) byCat.get(category);
+                String leaf = category.contains(">") ? category.substring(category.lastIndexOf('>') + 1).trim() : category.trim();
+                if (byCat.get(leaf) instanceof Map) return (Map<String, Object>) byCat.get(leaf);
+            }
+        } catch (Exception e) { log.warn("解析配件规则失败: {}", e.getMessage()); }
+        return null;
+    }
+
+    /** 只按品类取规则（忽略主件覆盖），用于阶梯回退。 */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> ruleForCategoryOnly(String category) {
+        try {
+            Map<String, Object> root = om.readValue(loadJson(), Map.class);
+            Map<String, Object> byCat = (Map<String, Object>) root.getOrDefault("byCategory", Map.of());
+            if (category != null) {
+                if (byCat.get(category) instanceof Map) return (Map<String, Object>) byCat.get(category);
+                String leaf = category.contains(">") ? category.substring(category.lastIndexOf('>') + 1).trim() : category.trim();
+                if (byCat.get(leaf) instanceof Map) return (Map<String, Object>) byCat.get(leaf);
+            }
+        } catch (Exception e) { log.warn("解析品类规则失败: {}", e.getMessage()); }
+        return null;
+    }
+
+    /**
+     * 根据规则 + ERP 单品池，解析出该主件应搭配的配件/批量件单品 + 阶梯定义。
+     * 返回 { ladders:[...](可能空), accSkus:[{itemCode,name,role,keyword,defaultQty}...] }。
+     * accSkus 从 erpSkus 里按规则关键字匹配 name 得到（找不到对应单品的配件跳过）。
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> resolveForMain(String category, String mainCode,
+                                              List<Map<String, Object>> erpSkus) {
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        List<Object> ladders = new java.util.ArrayList<>();
+        List<Map<String, Object>> accSkus = new java.util.ArrayList<>();
+        Map<String, Object> rule = ruleFor(category, mainCode);
+        if (rule != null) {
+            Object ld = rule.get("ladders");
+            if (ld instanceof List) ladders.addAll((List<Object>) ld);
+            // byMainCode 通常只给 accessories（候选），阶梯回退到品类默认
+            if (ladders.isEmpty()) {
+                Map<String, Object> catRule = ruleForCategoryOnly(category);
+                if (catRule != null && catRule.get("ladders") instanceof List) {
+                    ladders.addAll((List<Object>) catRule.get("ladders"));
+                }
+            }
+            Object accs = rule.get("accessories");
+            if (accs instanceof List) {
+                for (Object a : (List<Object>) accs) {
+                    if (!(a instanceof Map)) continue;
+                    Map<String, Object> acc = (Map<String, Object>) a;
+                    String kw = String.valueOf(acc.getOrDefault("keyword", ""));
+                    String role = String.valueOf(acc.getOrDefault("role", "accessory"));
+                    int defQty = acc.get("defaultQty") instanceof Number ? ((Number) acc.get("defaultQty")).intValue() : 1;
+                    if (kw.isBlank()) continue;
+                    // 在 ERP 单品池里按 name 或 itemCode 匹配配件单品。
+                    // 注意：① 滤芯类单品 name 统一是「滤芯*N」，区分编号只在 itemCode（如 001滤芯），故必须匹配 itemCode；
+                    //       ② 必须排除组合装（编码/名称含「+」，如 GF-001-纯白+银底座+001滤芯*10），否则关键字会命中套装而非纯配件单品；
+                    //       ③ 精确优先：先取 cd/nm 恰好==kw 的纯单品，其次去掉「*N」后==kw（如 001滤芯*6→001滤芯），最后才兜底第一个含 kw 的。
+                    Map<String, Object> hit = null;
+                    if (erpSkus != null) {
+                        List<Map<String, Object>> cands = new java.util.ArrayList<>();
+                        for (Map<String, Object> s : erpSkus) {
+                            String nm = String.valueOf(s.getOrDefault("name", s.getOrDefault("productName", "")));
+                            String cd = String.valueOf(s.getOrDefault("itemCode", s.getOrDefault("skuOuterId", "")));
+                            // 防御：配件绝不能命中整支花洒/整机/喷头主体
+                            if (nm.contains("花洒") || nm.contains("喷头") || nm.contains("手喷")
+                                || nm.contains("单花洒") || nm.contains("整机")) continue;
+                            // 排除组合装：编码/名称含「+」的是多配件套装，不是纯配件单品
+                            if (cd.contains("+") || nm.contains("+")) continue;
+                            // 排除单卖变体：名称/编码形如「<关键字>-数字」(如 银色1.5米软管-1) 是单卖款、成本不同
+                            if (nm.matches(".*" + java.util.regex.Pattern.quote(kw) + "-\\d+.*")
+                                || cd.matches(".*" + java.util.regex.Pattern.quote(kw) + "-\\d+.*")) continue;
+                            if (cd.contains(kw) || nm.contains(kw)) cands.add(s);
+                        }
+                        // 精确优先：cd 或 nm 恰好等于 kw
+                        for (Map<String, Object> c : cands) {
+                            String cd = String.valueOf(c.getOrDefault("itemCode", c.getOrDefault("skuOuterId", "")));
+                            String nm = String.valueOf(c.getOrDefault("name", c.getOrDefault("productName", "")));
+                            if (cd.equals(kw) || nm.equals(kw)) { hit = c; break; }
+                        }
+                        // 次选：去掉末尾「*N」数量后恰好等于 kw（如 001滤芯*6 → 001滤芯）
+                        if (hit == null) {
+                            for (Map<String, Object> c : cands) {
+                                String cd = String.valueOf(c.getOrDefault("itemCode", c.getOrDefault("skuOuterId", ""))).replaceAll("\\*\\d+$", "");
+                                String nm = String.valueOf(c.getOrDefault("name", c.getOrDefault("productName", ""))).replaceAll("\\*\\d+$", "");
+                                if (cd.equals(kw) || nm.equals(kw)) { hit = c; break; }
+                            }
+                        }
+                        // 兜底：第一个含 kw 的候选
+                        if (hit == null && !cands.isEmpty()) hit = cands.get(0);
+                    }
+                    if (hit != null) {
+                        // 通用类型（供阶梯的 match 用，如 软管/底座/滤芯）
+                        String type = kw.contains("软管") ? "软管" : kw.contains("底座") ? "底座" : kw.contains("滤芯") ? "滤芯" : kw;
+                        // 软管去重：只保留一条，优先 1.5 米
+                        if ("软管".equals(type)) {
+                            boolean hasHose = accSkus.stream().anyMatch(x -> "软管".equals(x.get("type")));
+                            if (hasHose) {
+                                if (kw.contains("1.5")) {
+                                    accSkus.removeIf(x -> "软管".equals(x.get("type")));  // 用 1.5 米替换已有
+                                } else {
+                                    continue;  // 已有软管且当前不是 1.5 米，跳过
+                                }
+                            }
+                        }
+                        Map<String, Object> as = new java.util.LinkedHashMap<>();
+                        as.put("itemCode", hit.getOrDefault("itemCode", hit.getOrDefault("skuOuterId", "")));
+                        as.put("name", hit.getOrDefault("name", hit.getOrDefault("productName", "")));
+                        as.put("role", role);
+                        as.put("keyword", kw);
+                        as.put("type", type);
+                        as.put("defaultQty", defQty);
+                        accSkus.add(as);
+                    } else {
+                        log.info("规则配件「{}」在 ERP 单品池里未找到对应单品，跳过", kw);
+                    }
+                }
+            }
+        }
+        out.put("ladders", ladders);
+        out.put("accSkus", accSkus);
+        return out;
+    }
+}
