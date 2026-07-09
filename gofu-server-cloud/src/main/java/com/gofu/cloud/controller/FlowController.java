@@ -176,13 +176,21 @@ public class FlowController {
         }
         String fallbackBase = buildMainPrompt(ctx);
 
+        // B1：重新生成前清空旧主图，实现"覆盖而非追加"（重复点/一键重生都靠这里）。
+        synchronized (ctx) { ctx.getVisual().getMainImages().clear(); }
+        contextService.save(ctx);
+
         String firstRef = null;
         for (int i = 0; i < mainTotal; i++) {
             String out = new File(tmpOut, "main-" + i + ".jpg").getAbsolutePath();
             // 每张用各自分析段；段数不足或分析失败则用静态模板兜底
             String base = i < segPrompts.size() ? segPrompts.get(i) : fallbackBase;
             String prompt = buildSeriesPrompt(base, i + 1, mainTotal);
-            List<String> refs = firstRef != null ? List.of(firstRef) : List.of();
+            // A1：白底产品图必须作为像素参考进 refs——GptImageAgent.generateMulti 会丢弃 whiteBgPath 参数，
+            // 只认 refImagePaths。对齐羽刃：首图 ref=白底图；2~N 张 ref=白底图+第1张AI结果（双锚定保产品一致）。
+            List<String> refs = new ArrayList<>();
+            refs.add(white);
+            if (firstRef != null) refs.add(firstRef);
             if (genWithRetry(prompt, refs, white, out, mainAspect, 2)) {
                 String key = uploadIfCos(out);
                 synchronized (ctx) { ctx.getVisual().getMainImages().add(key); }
@@ -289,6 +297,8 @@ public class FlowController {
 
         // 详情图：配对生成——每张主图转一张 9:16 竖版，第 i 张详情以第 i 张主图为参考（内容一一对应）
         if (genDetail) {
+            // B1：重新生成前清空旧详情图，覆盖而非追加。
+            ctx.getVisual().getDetailImages().clear();
             for (int i = 0; i < mainImgs.size(); i++) {
                 String mainLocal = localizeWhite(mainImgs.get(i));
                 List<String> refs = mainLocal != null ? List.of(mainLocal) : (refMain.isBlank() ? List.of() : List.of(refMain));
@@ -413,9 +423,15 @@ public class FlowController {
                     base = parts.length > 1 ? parts[1].trim() : buildMainPrompt(ctx);
                 } catch (Exception e) { base = buildMainPrompt(ctx); }
                 List<String> mains = ctx.getVisual().getMainImages();
+                // A2：重生也包系列连贯性+角度约束（与 genAllMains 初次生成一致，避免重生比初次还散）
+                int total = Math.max(mains.size(), index + 1);
+                String prompt = buildSeriesPrompt(base, index + 1, total);
+                // A1：白底图进 refs（首图重生 ref=白底图；非首图 ref=白底图+第1张，双锚定保一致）
                 String firstRef = (index > 0 && !mains.isEmpty()) ? localizeWhite(mains.get(0)) : null;
-                List<String> refs = firstRef != null ? List.of(firstRef) : List.of();
-                if (!genWithRetry(base, refs, white, out, mainAspect, 2)) return ResponseEntity.internalServerError().body(Map.of("error", "主图重生失败"));
+                List<String> refs = new ArrayList<>();
+                refs.add(white);
+                if (firstRef != null) refs.add(firstRef);
+                if (!genWithRetry(prompt, refs, white, out, mainAspect, 2)) return ResponseEntity.internalServerError().body(Map.of("error", "主图重生失败"));
                 key = uploadIfCos(out);
                 if (index < mains.size()) mains.set(index, key); else mains.add(key);
             }

@@ -321,6 +321,15 @@
             <div class="cell-actions"><button @click="entry.whites.splice(i,1)">✕ 移除</button></div>
           </div>
         </div>
+        <!-- D：配件白底图（自动搭配后拉取的软管/底座/滤芯等），之前只塞后端无展示出口 -->
+        <template v-if="entry.accWhites && entry.accWhites.length">
+          <div class="subhead">配件白底图（{{ entry.accWhites.length }} 张）</div>
+          <div class="grid" style="margin-top:4px">
+            <div v-for="(w,i) in entry.accWhites" :key="'aw'+i" class="cell" style="background:#fff">
+              <img :src="whiteThumb(w)" :title="'配件白底#'+(i+1)" />
+            </div>
+          </div>
+        </template>
       </div>
 
       <div v-if="ctx" class="section">
@@ -335,9 +344,13 @@
         <span v-if="!ctx.visual.sellingPoints.length" class="hint">（无卖点）</span>
       </div>
 
-      <div class="subhead">主图</div>
+      <div class="subhead" style="display:flex;align-items:center;justify-content:space-between">
+        <span>主图</span>
+        <button v-if="ctx.visual.mainImages.length" class="btn btn-ghost" style="padding:2px 10px;font-size:12px"
+                @click="regenAllMains" :disabled="genRunning">🔄 一键重生全部主图（覆盖）</button>
+      </div>
       <div class="grid">
-        <div v-for="(k,i) in ctx.visual.mainImages" :key="'m'+i" class="cell">
+        <div v-for="(k,i) in ctx.visual.mainImages" :key="k" class="cell">
           <img v-if="signed[k]" :src="signed[k]" />
           <span v-else class="ph">加载中…</span>
           <div class="cell-actions">
@@ -350,7 +363,7 @@
 
       <div class="subhead">详情图</div>
       <div class="grid">
-        <div v-for="(k,i) in ctx.visual.detailImages" :key="'d'+i" class="cell">
+        <div v-for="(k,i) in ctx.visual.detailImages" :key="k" class="cell">
           <img v-if="signed[k]" :src="signed[k]" />
           <span v-else class="ph">加载中…</span>
           <div class="cell-actions">
@@ -393,7 +406,7 @@
 
       <div class="subhead">SKU 图（按型号名匹配挂到上表）</div>
       <div class="grid">
-        <div v-for="(k,i) in skuImages" :key="'s'+i" class="cell">
+        <div v-for="(k,i) in skuImages" :key="k" class="cell">
           <img v-if="signed[k]" :src="signed[k]" /><span v-else class="ph">加载中…</span>
         </div>
         <div v-if="!skuImages.length" class="empty" style="grid-column:1/-1">暂无 SKU 图</div>
@@ -586,7 +599,9 @@ createApp({
         if (!r.ok) throw new Error('HTTP ' + r.status);
         this.ctx = await r.json();
         this.selectedPlan = this.ctx.structure?.selectedPlanIndex || 0;
-        this.signed = {};
+        // C1 防频闪：只在切换商品时清空签名缓存；同一商品轮询刷新时保留已签 URL，
+        // resolveImages 只补新 key（避免每 1.5s 把所有 <img> 清成占位再重签导致闪烁）。
+        if (this._signedFor !== id) { this.signed = {}; this._signedFor = id; }
         this.resolveImages();
         this.setMsg('已加载', 'ok');
       } catch (e) { this.ctx = null; this.setMsg('加载失败：' + e.message, 'err'); }
@@ -811,6 +826,9 @@ createApp({
     // ── 第一步：配件搭配 → step1(布局+全部主图,并行,异步) → 回填定价+标题。出来后用户在预览选方案。──
     async runLayout() {
       if (!this.entry.whites.length) { this.setMsg('请先加白底图', 'err'); return; }
+      // C3 防呆：已有主图时二次确认（避免误触覆盖已生成的图）
+      if ((this.ctx?.visual?.mainImages || []).length &&
+          !confirm('已有主图，重新生成将【覆盖】现有所有主图与详情图，是否继续？')) return;
       this.genRunning = true; this.genDone = false; this.layoutDone = false; this.genProgress = 5;
       try {
         // 0) 配件自动搭配：只选了主件时，按规则库补配件（乐羽核心逻辑），一并喂给 AI 布局
@@ -851,6 +869,9 @@ createApp({
       } catch (e) { this.genMsg = '布局生成失败：' + e.message; this.setMsg(e.message, 'err'); }
       finally { this.genRunning = false; }
     },
+
+    // 一键重生：复用 runLayout（后端 genAllMains 生成前 clear，天然覆盖主图；详情随后 step2 重生）。confirm 已在 runLayout 内。
+    async regenAllMains() { await this.runLayout(); },
 
     // ── 第二步：对选定方案生 SKU 图 + 配对详情图（每张主图转一张 9:16）──
     async runSkuImages() {
