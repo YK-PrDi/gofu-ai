@@ -93,6 +93,7 @@ public class FlowController {
 
             int mainTotal = body.get("mainCount") instanceof Number n ? Math.max(1, n.intValue()) : 6;
             String mainAspect = normalizeAspect(body.get("mainAspect"));
+            String customRequest = body.get("customRequest") instanceof String s ? s.trim() : "";   // M11:可选手输生图要求
             Map<String, Object> planReq = new LinkedHashMap<>(body);
 
             // 07.08重构：布局(乐羽线/千问)与全部主图(羽刃线/白底图)互不依赖→并行跑，缩短总时长。
@@ -104,6 +105,7 @@ public class FlowController {
             flowTasks.put(taskId, task);
             final int fMainTotal = mainTotal;
             final String fMainAspect = mainAspect;
+            final String fCustomReq = customRequest;
             imageGen.getExecutor().submit(() -> {
                 try {
                     // 布局与主图并行
@@ -120,7 +122,7 @@ public class FlowController {
                         }
                     }, imageGen.getExecutor());
                     var mainF = java.util.concurrent.CompletableFuture.runAsync(() ->
-                            genAllMains(ctx, localWhites, fMainTotal, fMainAspect, task), imageGen.getExecutor());
+                            genAllMains(ctx, localWhites, fMainTotal, fMainAspect, task, fCustomReq), imageGen.getExecutor());
                     java.util.concurrent.CompletableFuture.allOf(layoutF, mainF).join();
                     ctx.setStage(FlowStage.LAYOUT_DONE);
                     contextService.save(ctx);
@@ -144,21 +146,44 @@ public class FlowController {
         }
     }
 
-    /** step1 主图工作体：生成全部 mainTotal 张主图（首图作基调，2~N 多角度系列），逐张 append+save+进度。 */
+    /**
+     * step1 主图工作体（M11：改用羽刃自定义模式——先视觉分析真实白底图出产品专属提示词，再逐张生图）。
+     * 每张主图用各自的分析段 prompt(不再套静态模板)；首图作基调、2~N 以首图为参考保持系列一致。
+     * 分析失败则降级用 buildMainPrompt。customRequest 为空则自动按品类/卖点/主件名生成。
+     */
     private void genAllMains(ProductContext ctx, List<String> whiteImages, int mainTotal,
-                             String mainAspect, GenerationTask task) {
+                             String mainAspect, GenerationTask task, String customRequest) {
         if (whiteImages == null || whiteImages.isEmpty()) { log.info("step1 无白底图，跳过主图"); return; }
         String white = localizeWhite(whiteImages.get(0));
         if (white == null) { log.info("step1 白底图无法本地化，跳过主图"); return; }
         File tmpOut = new File(appProperties.getPaths().getTempOutputDir(), "flow1-" + System.nanoTime());
         tmpOut.mkdirs();
-        String mainBase = buildMainPrompt(ctx);
-        // 首图作系列基调后续以它为角度差异化参考
+
+        // M11：视觉分析白底图 → 产品专属多段 prompt。请求词优先用前端传入(customRequest)，否则自动生成。
+        List<String> segPrompts = new ArrayList<>();
+        try {
+            String req = (customRequest != null && !customRequest.isBlank()) ? customRequest : autoCustomRequest(ctx);
+            String raw = imageGen.analyzeCustomImagePrompts(req, List.of(new File(white)), mainTotal, false);
+            // 返回：1段【总分析】+ N段图 prompt，--- 分隔。丢掉总分析(首段)，取图 prompt。
+            String[] parts = raw.split("(?m)^\\s*-{3,}\\s*$");
+            for (int i = 1; i < parts.length; i++) {   // 跳过 parts[0] 总分析
+                String p = parts[i].trim();
+                if (!p.isBlank()) segPrompts.add(p);
+            }
+            log.info("M11 自定义分析出 {} 段主图提示词", segPrompts.size());
+        } catch (Exception e) {
+            log.warn("M11 自定义分析失败，降级静态模板: {}", e.getMessage());
+        }
+        String fallbackBase = buildMainPrompt(ctx);
+
         String firstRef = null;
         for (int i = 0; i < mainTotal; i++) {
             String out = new File(tmpOut, "main-" + i + ".jpg").getAbsolutePath();
+            // 每张用各自分析段；段数不足或分析失败则用静态模板兜底
+            String base = i < segPrompts.size() ? segPrompts.get(i) : fallbackBase;
+            String prompt = buildSeriesPrompt(base, i + 1, mainTotal);
             List<String> refs = firstRef != null ? List.of(firstRef) : List.of();
-            if (genWithRetry(buildSeriesPrompt(mainBase, i + 1, mainTotal), refs, white, out, mainAspect, 2)) {
+            if (genWithRetry(prompt, refs, white, out, mainAspect, 2)) {
                 String key = uploadIfCos(out);
                 synchronized (ctx) { ctx.getVisual().getMainImages().add(key); }
                 contextService.save(ctx);
@@ -166,6 +191,18 @@ public class FlowController {
             }
             task.incrementProgress();
         }
+    }
+
+    /** 自动生成"生图要求"（M11：零人工——按品类/卖点/主件名拼一句喂给视觉分析）。 */
+    private String autoCustomRequest(ProductContext ctx) {
+        String cat = ctx.getCategory() == null ? "" : ctx.getCategory();
+        String leaf = cat.contains(">") ? cat.substring(cat.lastIndexOf('>') + 1).trim() : cat;
+        String pts = ctx.getVisual().getSellingPoints().isEmpty()
+                ? "" : "核心卖点：" + String.join("、", ctx.getVisual().getSellingPoints()) + "。";
+        String main = ctx.getMainItem() == null ? "" : ctx.getMainItem();
+        return "为【" + leaf + "】" + (main.isBlank() ? "" : "（" + main + "）")
+                + "生成一组电商营销主图，突出产品真实外观与质感。" + pts
+                + "多角度差异化拍摄，风格统一、高级、干净，适合拼多多主图。";
     }
 
     /** 交错第二步的异步任务表（M10：step2 改异步，规避同步长请求 300s 超时）。 */
@@ -329,6 +366,65 @@ public class FlowController {
         resp.put("total", t.getTotal());
         resp.put("results", t.getResults());
         return ResponseEntity.ok(resp);
+    }
+
+    /**
+     * 重新生成单张主图/详情图（M11：走与初次生成一致的视觉分析路径，保证重生质量不降级）。
+     * 入参 {@code {contextId, kind:"main"|"detail", index, mainAspect?, customRequest?}}。
+     * 同步返回 {@code {imageRef}}；原地替换 context 里第 index 张。
+     */
+    @PostMapping("/regen-main")
+    public ResponseEntity<Map<String, Object>> regenMain(@RequestBody Map<String, Object> body) {
+        String contextId = (String) body.get("contextId");
+        if (contextId == null || contextId.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "contextId 必填"));
+        ProductContext ctx = contextService.findById(contextId);
+        if (ctx == null) return ResponseEntity.status(404).body(Map.of("error", "context 不存在"));
+        String kind = String.valueOf(body.getOrDefault("kind", "main"));
+        int index = body.get("index") instanceof Number n ? n.intValue() : 0;
+        boolean isDetail = "detail".equals(kind);
+        List<String> whites = ctx.getVisual().getWhiteImages();
+        if (whites == null || whites.isEmpty()) return ResponseEntity.badRequest().body(Map.of("error", "无白底图，无法重生"));
+        String white = localizeWhite(whites.get(0));
+        if (white == null) return ResponseEntity.badRequest().body(Map.of("error", "白底图无法本地化"));
+        try {
+            File tmpOut = new File(appProperties.getPaths().getTempOutputDir(), "regen-" + System.nanoTime());
+            tmpOut.mkdirs();
+            String out = new File(tmpOut, kind + "-regen.jpg").getAbsolutePath();
+            String key;
+            if (isDetail) {
+                // 详情图：以对应主图为参考转 9:16 竖版（与 step2 配对逻辑一致）
+                List<String> mains = ctx.getVisual().getMainImages();
+                String mref = (index < mains.size()) ? localizeWhite(mains.get(index)) : null;
+                List<String> refs = mref != null ? List.of(mref) : List.of();
+                String base = mref != null ? mref : white;
+                String dp = "将所给主图重新排版为 9:16 竖版电商详情图，产品主体/颜色/角度与该主图一致，纵向铺陈卖点，适合详情页。";
+                if (!genWithRetry(dp, refs, base, out, "9:16", 2)) return ResponseEntity.internalServerError().body(Map.of("error", "详情图重生失败"));
+                key = uploadIfCos(out);
+                if (index < ctx.getVisual().getDetailImages().size()) ctx.getVisual().getDetailImages().set(index, key);
+                else ctx.getVisual().getDetailImages().add(key);
+            } else {
+                // 主图：走 M11 视觉分析出单段 prompt（与 genAllMains 一致，保证质量），以首图为参考保持系列一致
+                String mainAspect = normalizeAspect(body.get("mainAspect"));
+                String req = body.get("customRequest") instanceof String s && !s.isBlank() ? s.trim() : autoCustomRequest(ctx);
+                String base;
+                try {
+                    String raw = imageGen.analyzeCustomImagePrompts(req, List.of(new File(white)), 1, false);
+                    String[] parts = raw.split("(?m)^\\s*-{3,}\\s*$");
+                    base = parts.length > 1 ? parts[1].trim() : buildMainPrompt(ctx);
+                } catch (Exception e) { base = buildMainPrompt(ctx); }
+                List<String> mains = ctx.getVisual().getMainImages();
+                String firstRef = (index > 0 && !mains.isEmpty()) ? localizeWhite(mains.get(0)) : null;
+                List<String> refs = firstRef != null ? List.of(firstRef) : List.of();
+                if (!genWithRetry(base, refs, white, out, mainAspect, 2)) return ResponseEntity.internalServerError().body(Map.of("error", "主图重生失败"));
+                key = uploadIfCos(out);
+                if (index < mains.size()) mains.set(index, key); else mains.add(key);
+            }
+            contextService.save(ctx);
+            return ResponseEntity.ok(Map.of("imageRef", key, "kind", kind, "index", index));
+        } catch (Exception e) {
+            log.error("重生失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body(Map.of("error", "重生失败：" + e.getMessage()));
+        }
     }
 
     /** COS 启用则上传返回 key，否则原样返回本地路径。 */

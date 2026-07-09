@@ -262,6 +262,10 @@
             </select>
           </label>
         </div>
+        <div class="field" style="margin-bottom:8px">
+          <label style="font-size:12px;color:var(--text-dim)">生图要求（选填，留空则按品类/卖点自动生成；AI 会看白底图针对性出图）</label>
+          <input type="text" v-model="genOpts.customRequest" placeholder="如：浴室场景、突出增压水流、高级感" style="width:100%;padding:6px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)" />
+        </div>
         <!-- 两段式（07.08）：先出布局+主图 → 预览选方案 → 再对选定方案生 SKU图+详情图 -->
         <button class="btn btn-primary btn-lg" @click="runLayout" :disabled="genRunning || !canGenerate" style="width:100%">
           {{ genRunning && !layoutDone ? '生成布局+主图中…' : '① 生成布局 + 主图' }}
@@ -510,7 +514,7 @@ createApp({
       picker: { open: false, kw: '', loading: false, searched: false, results: [], all: [], roleFor: {} },
       lightbox: '',   // 图片放大灯箱当前URL
       erpCfg: { open: false, form: { appKey: '', appSecret: '', accessToken: '', refreshToken: '', companyId: '', appTitle: '' }, msg: '', msgType: '' },
-      genOpts: { mainCount: 6, planCount: 3, templateId: '__random__', mainAspect: '1:1' },   // 主图张数默认6(详情图配对=主图数)；方案数默认3；防比价默认随机；主图比例默认1:1(详情固定9:16,SKU固定1:1)
+      genOpts: { mainCount: 6, planCount: 3, templateId: '__random__', mainAspect: '1:1', customRequest: '' },   // 主图张数默认6(详情配对=主图数)；方案数默认3；防比价默认随机；主图比例默认1:1；生图要求选填(空则自动)
       antipriceTemplates: [],   // 防比价模板库(从云端 /api/listing/antiprice-templates 拉)
       genRunning: false, genDone: false, layoutDone: false, genProgress: 0, genMsg: '',
       imgBusy: false,
@@ -828,7 +832,7 @@ createApp({
           body: JSON.stringify({
             contextId: this.ctx?.id || undefined,
             category: this.cat.path.join('>'), mainItem: this.mainItemName, productName: this.mainItemName,
-            whiteImages: this.entry.whites, skus: skus, agentId: this.entry.agentId, mainCount: this.genOpts.mainCount, planCount: this.genOpts.planCount, mainAspect: this.genOpts.mainAspect,
+            whiteImages: this.entry.whites, skus: skus, agentId: this.entry.agentId, mainCount: this.genOpts.mainCount, planCount: this.genOpts.planCount, mainAspect: this.genOpts.mainAspect, customRequest: this.genOpts.customRequest,
           }),
         });
         const d1 = await r1.json();
@@ -1036,25 +1040,14 @@ createApp({
     async regenImage(kind, i) {
       if (!this.ctx) return;
       this.imgBusy = true; this.setMsg('重生第 ' + (i + 1) + ' 张…');
-      // /api/gen/regenerate 语义：新图恒 append 到 mainImages 末尾。前端把它挪到目标位置。
-      const mainBefore = this.ctx.visual.mainImages.length;
       try {
-        const point = this.ctx.visual.sellingPoints[i % Math.max(1, this.ctx.visual.sellingPoints.length)] || '';
-        const r = await fetch('/api/gen/regenerate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contextId: this.ctx.id, name: (kind === 'main' ? '主图' : '详情图') + (i + 1), compDesc: point, whiteImgPath: (this.ctx.visual.whiteImages || [])[0] || '', agentId: this.entry.agentId }) });
+        // M11：走 /api/flow/regen-main，与初次生成同一视觉分析路径，原地替换第 i 张（不再 append+挪位）
+        const r = await fetch('/api/flow/regen-main', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contextId: this.ctx.id, kind, index: i, mainAspect: this.genOpts.mainAspect, customRequest: this.genOpts.customRequest }) });
         const d = await r.json();
-        if (!d.success) throw new Error(d.error || '生图失败');
-        await this.loadContext();
-        const mains = this.ctx.visual.mainImages;
-        if (mains.length > mainBefore) {
-          const neu = mains.splice(mains.length - 1, 1)[0];   // 取出新追加的那张
-          const target = kind === 'main' ? this.ctx.visual.mainImages : this.ctx.visual.detailImages;
-          target.splice(i, 1, neu);                            // 替换目标列表第 i 张（详情图也归位，不留在主图）
-          await this.saveContext(); this.resolveImages();
-          this.setMsg('第 ' + (i + 1) + ' 张已重生', 'ok');
-        } else {
-          this.setMsg('重生未产出新图（检查白底图/密钥/配额）', 'err');
-        }
+        if (d.error) throw new Error(d.error);
+        await this.loadContext(); this.resolveImages();
+        this.setMsg('第 ' + (i + 1) + ' 张已重生', 'ok');
       } catch (e) { this.setMsg('重生失败：' + e.message, 'err'); }
       finally { this.imgBusy = false; }
     },
