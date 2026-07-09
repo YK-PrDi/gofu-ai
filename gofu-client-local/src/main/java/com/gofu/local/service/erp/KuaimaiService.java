@@ -392,4 +392,48 @@ public class KuaimaiService {
         for (String v : vals) if (v != null && !v.isBlank()) return v;
         return "";
     }
+
+    /**
+     * 回传白底图到快麦（07.08）：调 item.general.addorupdate 把 picUrl 写到该编码单品的 picPath。
+     * outerId 命中主商品→写商品级 picPath；命中某 SKU→写该 sku 的 picPath。title 必填(从缓存取现有标题)。
+     * 返回快麦响应；success=false 或异常由调用方处理。
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> uploadItemImage(String outerId, String picUrl) throws Exception {
+        if (outerId == null || outerId.isBlank()) throw new IllegalArgumentException("outerId 不能为空");
+        if (picUrl == null || picUrl.isBlank()) throw new IllegalArgumentException("picUrl 不能为空");
+        // 找到该编码所属商品(拿 title 必填 + 判断是商品级还是 SKU 级)
+        String itemTitle = null, itemOuterId = null, skuOuterId = null;
+        for (Map<String, Object> item : getAllSkuItemsCached()) {
+            String io = str(item.get("outerId"));
+            List<Map<String, Object>> skus = (List<Map<String, Object>>) item.get("skus");
+            if (skus != null) {
+                for (Map<String, Object> sk : skus) {
+                    if (outerId.equals(str(sk.get("skuOuterId")))) {
+                        itemOuterId = io; skuOuterId = outerId;
+                        itemTitle = firstNonBlank(str(item.get("title")), str(item.get("shortTitle")), io);
+                        break;
+                    }
+                }
+            }
+            if (skuOuterId == null && outerId.equals(io)) {
+                itemOuterId = io;
+                itemTitle = firstNonBlank(str(item.get("title")), str(item.get("shortTitle")), io);
+            }
+            if (itemOuterId != null) break;
+        }
+        if (itemOuterId == null) throw new RuntimeException("快麦缓存中找不到编码 " + outerId + "（先刷新缓存）");
+
+        Map<String, String> biz = new LinkedHashMap<>();
+        biz.put("outerId", itemOuterId);
+        biz.put("title", itemTitle);
+        if (skuOuterId != null) {
+            // SKU 级：picPath 放进 skus 数组对应项
+            biz.put("skus", "[{\"outerId\":\"" + skuOuterId + "\",\"picPath\":\"" + picUrl + "\"}]");
+        } else {
+            // 商品级预览图
+            biz.put("picPath", picUrl);
+        }
+        return call("item.general.addorupdate", biz);
+    }
 }

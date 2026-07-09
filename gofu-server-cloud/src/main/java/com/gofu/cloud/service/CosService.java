@@ -89,6 +89,33 @@ public class CosService {
         }
     }
 
+    /**
+     * 上传并返回【永久公网 URL】（07.08：回传快麦用——快麦会长期存这个 picPath，不能用7天签名URL）。
+     * 对象设 public-read ACL，返回标准 COS 对象 URL（永久有效，只要对象存在）。
+     */
+    public String uploadPublic(File file, String filename) {
+        String bucket = appProperties.getCos().getPublicBucket();   // 公开读的独立桶(回传快麦用)
+        String region = appProperties.getCos().getRegion();
+        String date = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd"));
+        String key = "kuaimai-white/" + date + "/" + filename;
+        try {
+            COSClient cos = getClient();
+            ObjectMetadata meta = new ObjectMetadata();
+            meta.setContentLength(file.length());
+            meta.setContentType(filename.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg");
+            // 桶已设「公有读私有写」，对象继承桶权限即可公网读；不再设对象级 ACL
+            // （某些桶开启 bucket-owner-enforced 时对象 ACL 会被拒，反而导致上传/读取异常）。
+            PutObjectRequest req = new PutObjectRequest(bucket, key, file).withMetadata(meta);
+            cos.putObject(req);
+            String url = "https://" + bucket + ".cos." + region + ".myqcloud.com/" + key;
+            log.info("COS uploadPublic: {} -> {}", file.getName(), url);
+            return url;
+        } catch (Exception e) {
+            log.error("COS uploadPublic failed: {}", e.getMessage(), e);
+            throw new RuntimeException("COS 公网上传失败: " + e.getMessage(), e);
+        }
+    }
+
     private COSClient getClient() {
         if (client == null) {
             synchronized (this) {

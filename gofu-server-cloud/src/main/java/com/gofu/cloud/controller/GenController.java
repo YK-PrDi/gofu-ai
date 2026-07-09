@@ -48,6 +48,40 @@ public class GenController {
     }
 
     /**
+     * 通用图片上传（07.08）：本地导入的白底图需回传快麦(快麦 picPath 要 URL 不收二进制)，
+     * 先把图上传 COS 拿公网 URL。入参 {@code {dataUrl: "data:image/..;base64,.."} 或 {base64,ext}}。
+     * 返回 {@code {imageRef(COS key), signedUrl(可公网访问)}}。COS 未启用/失败则报错(回传本就需要 URL)。
+     */
+    @PostMapping("/upload-image")
+    public ResponseEntity<Map<String, Object>> uploadImage(@RequestBody Map<String, Object> body) {
+        try {
+            String dataUrl = String.valueOf(body.getOrDefault("dataUrl", ""));
+            String b64; String ext = "jpg";
+            if (dataUrl.startsWith("data:")) {
+                int comma = dataUrl.indexOf(',');
+                String head = dataUrl.substring(5, comma);   // image/png;base64
+                if (head.contains("png")) ext = "png";
+                b64 = dataUrl.substring(comma + 1);
+            } else {
+                b64 = String.valueOf(body.getOrDefault("base64", ""));
+                if ("png".equalsIgnoreCase(String.valueOf(body.getOrDefault("ext", "")))) ext = "png";
+            }
+            if (b64.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "无图片数据"));
+            if (!cosService.isEnabled()) return ResponseEntity.badRequest().body(Map.of("error", "COS 未启用，无法生成公网 URL 供回传"));
+            byte[] bytes = java.util.Base64.getDecoder().decode(b64);
+            File tmp = File.createTempFile("upload-", "." + ext);
+            java.nio.file.Files.write(tmp.toPath(), bytes);
+            // 永久公网 URL：快麦会长期存 picPath，不能用 7 天签名 URL
+            String publicUrl = cosService.uploadPublic(tmp, UUID.randomUUID() + "." + ext);
+            tmp.delete();
+            return ResponseEntity.ok(Map.of("imageRef", publicUrl, "signedUrl", publicUrl));
+        } catch (Exception e) {
+            log.error("图片上传 COS 失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body(Map.of("error", "上传失败：" + e.getMessage()));
+        }
+    }
+
+    /**
      * 生成一张 SKU 图，产物写回 ProductContext.visual.mainImages（存永久 COS key）。
      */
     @PostMapping("/images")

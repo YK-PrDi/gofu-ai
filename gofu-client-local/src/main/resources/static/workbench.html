@@ -146,7 +146,10 @@
     .modal-foot { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
     .pick-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--radius-sm);
       border: 1px solid var(--border); margin-bottom: 6px; font-size: 13px; }
+    .pick-row { cursor: pointer; }
     .pick-row:hover { background: #fafbfc; }
+    .pick-row.picked { background: #e8f2ff; box-shadow: inset 3px 0 0 var(--primary); }
+    .pick-row.picked:hover { background: #ddebff; }
     .pick-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .pick-row .pr { color: var(--text-dim); font-size: 12px; }
     .pick-row select { width: 92px; padding: 3px 6px; font-size: 12px; }
@@ -227,13 +230,14 @@
         </div>
 
         <div class="field">
-          <label>主件白底图</label>
+          <label>白底图</label>
           <div class="hint" style="margin-bottom:6px">
-            选好主件后自动从快麦拉取白底图（预览在右侧）；快麦没有的会在右侧提示，可在此手动导入。
+            选好主件后自动从快麦拉取白底图（预览在右侧）。快麦缺图的编码会在右侧「产品白底图」区**按编码**提示，
+            在那里为每个编码导入并可一键回传快麦。也可在下方批量拖入一批白底图。
           </div>
           <div class="dropzone" :class="{over:dropOver}"
                @click="pickWhiteFiles" @dragover.prevent="dropOver=true" @dragleave="dropOver=false" @drop.prevent="onDropWhite">
-            缺图时拖拽白底图到此，或点击选择文件；也可
+            批量拖拽白底图到此，或点击选择文件；也可
             <a href="#" @click.stop.prevent="pickWhiteDir">选择文件夹</a>
           </div>
         </div>
@@ -241,18 +245,18 @@
 
       <div class="section">
         <h2><span class="num">2</span> 一键生成</h2>
-        <div class="settings-row" style="margin-bottom:8px;display:flex;gap:16px;flex-wrap:wrap;align-items:center">
-          <label>主图张数
-            <select v-model.number="genOpts.mainCount"><option v-for="n in [3,4,5,6,8,10]" :key="n" :value="n">{{n}}</option></select>
+        <div class="settings-row" style="margin-bottom:8px;display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;align-items:center">
+          <label style="display:flex;align-items:center;justify-content:space-between;gap:6px">主图张数
+            <select v-model.number="genOpts.mainCount" style="flex:1;max-width:110px"><option v-for="n in [3,4,5,6,8,10]" :key="n" :value="n">{{n}}</option></select>
           </label>
-          <label>主图比例
-            <select v-model="genOpts.mainAspect"><option v-for="a in ['1:1','3:4','4:3','9:16','16:9']" :key="a" :value="a">{{a}}</option></select>
+          <label style="display:flex;align-items:center;justify-content:space-between;gap:6px">主图比例
+            <select v-model="genOpts.mainAspect" style="flex:1;max-width:110px"><option v-for="a in ['1:1','3:4','4:3','9:16','16:9']" :key="a" :value="a">{{a}}</option></select>
           </label>
-          <label>方案数
-            <select v-model.number="genOpts.planCount"><option v-for="n in [1,2,3,4,5]" :key="n" :value="n">{{n}}套</option></select>
+          <label style="display:flex;align-items:center;justify-content:space-between;gap:6px">方案数
+            <select v-model.number="genOpts.planCount" style="flex:1;max-width:110px"><option v-for="n in [1,2,3,4,5]" :key="n" :value="n">{{n}}套</option></select>
           </label>
-          <label>防比价模式
-            <select v-model="genOpts.templateId">
+          <label style="display:flex;align-items:center;justify-content:space-between;gap:6px">防比价模式
+            <select v-model="genOpts.templateId" style="flex:1;max-width:110px">
               <option value="__random__">随机</option>
               <option v-for="t in antipriceTemplates" :key="t.id" :value="t.id">{{ t.name }}</option>
             </select>
@@ -293,7 +297,18 @@
         <h2>产品白底图</h2>
         <div v-if="whiteFetching" class="hint">从快麦拉取白底图…</div>
         <div v-if="whiteCheck.missing.length" class="white-warn">
-          ⚠️ 快麦无白底图：{{ whiteCheck.missing.join('、') }}。请在左侧「主件白底图」处拖拽/选文件夹导入，否则无法生成。
+          ⚠️ 快麦无白底图的编码（主件/配件）：为每个缺图编码导入白底图，导入后可一键回传快麦。
+          <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
+            <div v-for="code in whiteCheck.missing" :key="'miss'+code" style="display:flex;align-items:center;gap:8px;font-size:12px">
+              <span style="min-width:150px;font-family:monospace">{{ code }}</span>
+              <button class="btn btn-ghost" @click="importForCode(code)">导入白底图</button>
+              <span v-if="importedFor[code]" class="pick-thumb" style="width:32px;height:32px"><img :src="importedFor[code]" /></span>
+              <button v-if="importedFor[code]" class="btn btn-ghost" @click="pushWhiteToKuaimai(code)" :disabled="pushingCode===code">
+                {{ pushingCode===code ? '回传中…' : '↑ 回传快麦' }}
+              </button>
+              <span v-if="pushedCodes.includes(code)" class="white-ok" style="padding:2px 6px">✓ 已回传</span>
+            </div>
+          </div>
         </div>
         <div v-else-if="entry.whites.length" class="white-ok">✓ 白底图就绪（{{ entry.whites.length }} 张）</div>
         <div v-if="entry.whites.length" class="grid" style="margin-top:8px">
@@ -418,19 +433,20 @@
         <div v-else-if="!picker.results.length" class="empty">
           {{ picker.kw ? '无匹配单品，换个关键词' : '无单品（快麦凭证未配或缓存为空，点⚙️设置检查/刷新缓存）' }}
         </div>
-        <div v-for="(r,i) in picker.results" :key="i" class="pick-row">
-          <span class="pick-thumb" @click="lightbox = rowImg(r) || lightbox" :class="{clickable:rowImg(r)}">
+        <div v-for="(r,i) in picker.results" :key="i" class="pick-row" :class="{picked: !!picker.roleFor[r.outerId]}" @click="togglePick(r)">
+          <span class="pick-thumb" @click.stop="lightbox = rowImg(r) || lightbox" :class="{clickable:rowImg(r)}">
             <img v-if="rowImg(r)" :src="rowImg(r)" :title="'点击放大'" />
             <span v-else class="ph" style="font-size:10px">无图</span>
           </span>
           <span class="nm">{{ r.title || r.outerId }}</span>
           <span class="pr">¥{{ (r.purchasePrice||0) }}</span>
-          <select v-model="picker.roleFor[r.outerId]">
-            <option value="">不选</option>
+          <!-- 选中后才显示角色下拉(默认主件)，可改配件/批量件；点整行切换选中/取消 -->
+          <select v-if="picker.roleFor[r.outerId]" v-model="picker.roleFor[r.outerId]" @click.stop>
             <option value="main">主件</option>
             <option value="accessory">配件</option>
             <option value="batch">批量件</option>
           </select>
+          <span v-else class="hint" style="width:92px;text-align:center">点击选中</span>
         </div>
         <div v-if="picker.results.length>=200" class="hint" style="padding:8px">仅显示前 200 条，用上方搜索缩小范围</div>
       </div>
@@ -487,6 +503,9 @@ createApp({
       casc: { open: false, x: 0, y: 0, kw: '', sel: [] },   // 级联下拉状态
       dropOver: false,
       whiteCheck: { done: false, has: [], missing: [] },
+      importedFor: {},        // 缺图编码 → 导入的白底图 dataURL（供预览+回传）
+      pushingCode: '',        // 正在回传快麦的编码
+      pushedCodes: [],        // 已成功回传的编码
       whiteFetching: false,
       picker: { open: false, kw: '', loading: false, searched: false, results: [], all: [], roleFor: {} },
       lightbox: '',   // 图片放大灯箱当前URL
@@ -681,7 +700,45 @@ createApp({
         const d = await r.json();
         if (d.error) throw new Error(d.error);
         this.entry.accWhites = (d.matched || []).map(m => m.file).filter(Boolean);
+        // 配件缺图也并入 whiteCheck.missing（去重），让缺图补传区同时覆盖主件+配件
+        const accMissing = (d.missing || []).filter(c => !this.whiteCheck.missing.includes(c));
+        if (accMissing.length) this.whiteCheck.missing = [...this.whiteCheck.missing, ...accMissing];
       } catch (e) { this.setMsg('取配件白底图失败（SKU贴图可能缺配件）：' + e.message, 'err'); }
+    },
+    // 为某缺图编码导入白底图：弹文件选择 → 存 importedFor[code] + 并入 entry.whites/accWhites
+    importForCode(code) {
+      const inp = document.createElement('input');
+      inp.type = 'file'; inp.accept = 'image/*';
+      inp.onchange = () => {
+        const f = inp.files && inp.files[0];
+        if (!f) return;
+        const rd = new FileReader();
+        rd.onload = () => {
+          this.importedFor[code] = rd.result;
+          const isMain = this.mainCodes.includes(code);
+          if (isMain) { if (!this.entry.whites.includes(rd.result)) this.entry.whites.push(rd.result); }
+          else { if (!this.entry.accWhites.includes(rd.result)) this.entry.accWhites.push(rd.result); }
+          this.setMsg('已为 ' + code + ' 导入白底图，可点「回传快麦」写回该单品', 'ok');
+        };
+        rd.readAsDataURL(f);
+      };
+      inp.click();
+    },
+    // 回传快麦：把导入的白底图写回该编码的快麦单品(会改线上商品档案,先二次确认)
+    async pushWhiteToKuaimai(code) {
+      const dataUrl = this.importedFor[code];
+      if (!dataUrl) { this.setMsg('请先为 ' + code + ' 导入白底图', 'err'); return; }
+      if (!confirm('确认把这张白底图回传到快麦单品【' + code + '】？\n这会修改快麦线上商品档案的图片。')) return;
+      this.pushingCode = code;
+      try {
+        const r = await fetch('/api/erp/upload-white-image', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ outerId: code, dataUrl }) });
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        if (!this.pushedCodes.includes(code)) this.pushedCodes.push(code);
+        this.setMsg('✓ 已回传快麦：' + code, 'ok');
+      } catch (e) { this.setMsg('回传快麦失败：' + e.message, 'err'); }
+      finally { this.pushingCode = ''; }
     },
     // 刷新快麦缓存（选品弹窗内按钮）：刷新单品列表；弹窗开着则重载列表，已选主件则顺带重取白底图
     async refreshErpCache() {
@@ -724,6 +781,12 @@ createApp({
         const t = String(r.title || '').toLowerCase(), o = String(r.outerId || '').toLowerCase();
         return t.includes(kw) || o.includes(kw);
       }).slice(0, 200);
+    },
+    // 点整行切换选中：未选→默认主件；已选→取消(点错再点即取消)。Vue3 直接增删即响应。
+    togglePick(r) {
+      const id = r.outerId;
+      if (this.picker.roleFor[id]) delete this.picker.roleFor[id];
+      else this.picker.roleFor[id] = 'main';
     },
     confirmPick() {
       const rf = this.picker.roleFor;

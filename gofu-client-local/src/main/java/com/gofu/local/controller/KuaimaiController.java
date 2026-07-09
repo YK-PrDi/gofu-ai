@@ -1,15 +1,22 @@
 package com.gofu.local.controller;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gofu.local.config.AppProperties;
 import com.gofu.local.service.erp.KuaimaiService;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 快麦 ERP 成本接口（自 LY-Automation 迁入，精简为成本/配置相关端点）。
@@ -24,10 +31,54 @@ public class KuaimaiController {
     private static final Logger log = LoggerFactory.getLogger(KuaimaiController.class);
     private final KuaimaiService kuaimaiService;
     private final AppProperties appProperties;
+    private final String cloudBase;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final OkHttpClient http = new OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).build();
 
-    public KuaimaiController(KuaimaiService kuaimaiService, AppProperties appProperties) {
+    public KuaimaiController(KuaimaiService kuaimaiService, AppProperties appProperties,
+                             @Value("${gofu.cloud.base-url:http://localhost:5020}") String cloudBase) {
         this.kuaimaiService = kuaimaiService;
         this.appProperties = appProperties;
+        this.cloudBase = cloudBase;
+    }
+
+    /**
+     * 回传白底图到快麦（07.08）：入参 {@code {outerId, dataUrl}}。
+     * 先把导入图上传云端 COS 拿永久公网 URL，再调快麦 addorupdate 写回该编码的 picPath。
+     * ⚠️ 会真改快麦线上商品档案，前端已加二次确认。
+     */
+    @PostMapping("/upload-white-image")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<Map<String, Object>> uploadWhiteImage(@RequestBody Map<String, Object> body) {
+        String outerId = String.valueOf(body.getOrDefault("outerId", ""));
+        String dataUrl = String.valueOf(body.getOrDefault("dataUrl", ""));
+        if (outerId.isBlank() || dataUrl.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "outerId 和 dataUrl 必填"));
+        }
+        try {
+            // 1) 上传云端 COS 拿公网 URL
+            String reqJson = objectMapper.writeValueAsString(Map.of("dataUrl", dataUrl));
+            Request up = new Request.Builder().url(cloudBase + "/api/gen/upload-image")
+                    .post(okhttp3.RequestBody.create(reqJson, MediaType.parse("application/json"))).build();
+            String picUrl;
+            try (Response r = http.newCall(up).execute()) {
+                String rb = r.body() != null ? r.body().string() : "{}";
+                Map<String, Object> rm = objectMapper.readValue(rb, Map.class);
+                if (!r.isSuccessful() || rm.get("signedUrl") == null) {
+                    return ResponseEntity.internalServerError().body(Map.of("error", "上传COS失败：" + rm.getOrDefault("error", rb)));
+                }
+                picUrl = String.valueOf(rm.get("signedUrl"));
+            }
+            // 2) 回写快麦
+            Map<String, Object> km = kuaimaiService.uploadItemImage(outerId, picUrl);
+            boolean ok = Boolean.TRUE.equals(km.get("success")) || km.get("id") != null || km.get("skus") != null;
+            if (!ok) return ResponseEntity.internalServerError().body(Map.of("error", "快麦回写失败：" + km.getOrDefault("msg", km), "picUrl", picUrl));
+            return ResponseEntity.ok(Map.of("success", true, "picUrl", picUrl, "outerId", outerId));
+        } catch (Exception e) {
+            log.error("回传白底图失败 {}: {}", outerId, e.getMessage(), e);
+            return ResponseEntity.internalServerError().body(Map.of("error", "回传失败：" + e.getMessage()));
+        }
     }
 
     /** 刷新快麦 accessToken（30 天过期）。 POST /api/erp/refresh-token */

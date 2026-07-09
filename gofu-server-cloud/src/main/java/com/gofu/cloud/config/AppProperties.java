@@ -182,6 +182,8 @@ public class AppProperties {
         private String secretKey = "";
         private String region = "ap-guangzhou";
         private String bucket = "graduation-project-1416091844";
+        // 公开读的桶：专放回传快麦的白底图(快麦要永久公网URL)。留空则回退主桶。
+        private String publicBucket = "";
 
         public String getSecretId() { return secretId; }
         public void setSecretId(String secretId) { this.secretId = secretId; }
@@ -191,6 +193,8 @@ public class AppProperties {
         public void setRegion(String region) { this.region = region; }
         public String getBucket() { return bucket; }
         public void setBucket(String bucket) { this.bucket = bucket; }
+        public String getPublicBucket() { return (publicBucket == null || publicBucket.isBlank()) ? bucket : publicBucket; }
+        public void setPublicBucket(String publicBucket) { this.publicBucket = publicBucket; }
 
         public boolean isEnabled() { return secretId != null && !secretId.isBlank()
                                          && secretKey != null && !secretKey.isBlank(); }
