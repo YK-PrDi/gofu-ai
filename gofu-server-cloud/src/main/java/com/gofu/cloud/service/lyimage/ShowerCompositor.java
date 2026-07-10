@@ -371,25 +371,86 @@ public class ShowerCompositor {
     }
 
     /**
-     * 在 (x,y,w,h) 框内居中绘制文字：字号从 maxFs 起，若超过框宽-内边距则逐级缩小，
-     * 保证文字不超出框、且四周留缝隙。用于配件卡底条 / 底部通栏。
+     * 在 (x,y,w,h) 框内居中绘制文字：字号从 maxFs 起，超框宽/框高则逐级缩小；
+     * 07.10#3 修配件框文字被遮挡：单行缩到底仍超宽时，按 " / " 分隔符折成多行绘制，
+     * 每行独立缩字，整体垂直居中；无分隔符的超长单行末位补省略号。保证任何 label 都落在内边距框内。
      */
     private void drawFitText(Graphics2D g, String text, int x, int y, int w, int h, int maxFs, Color color) {
         int padX = (int)(w * 0.08), padY = (int)(h * 0.18);
         int maxTw = w - padX * 2, maxTh = h - padY * 2;
-        int fs = maxFs;
-        java.awt.FontMetrics fm;
-        while (fs > 10) {
-            g.setFont(new Font(CJK_FONT, Font.BOLD, fs));
-            fm = g.getFontMetrics();
-            if (fm.stringWidth(text) <= maxTw && fm.getHeight() <= maxTh) break;
-            fs -= 2;
+        final int floor = 14;   // 字号下限，低于此宁可折行/省略也不再缩（保证清晰可读）
+
+        // 先按单行尝试：从 maxFs 缩到 floor，能放下就单行居中绘制
+        int fs = fitSingleLine(g, text, maxTw, maxTh, maxFs, floor);
+        if (fs > 0) { drawLineCentered(g, text, x, y, w, h, fs, color); return; }
+
+        // 单行放不下：按 " / " 拆成多行（label 形如「银底座 / 2米软管 / 过滤滤芯*4」）
+        String[] rawLines = text.split("\\s*/\\s*");
+        java.util.List<String> lines = new java.util.ArrayList<>();
+        for (String s : rawLines) { s = s.trim(); if (!s.isEmpty()) lines.add(s); }
+        if (lines.size() <= 1) {   // 无分隔符的超长单行：floor 字号 + 省略号截断
+            g.setFont(new Font(CJK_FONT, Font.BOLD, floor));
+            String clipped = clipToWidth(g.getFontMetrics(), text, maxTw);
+            drawLineCentered(g, clipped, x, y, w, h, floor, color);
+            return;
         }
-        fm = g.getFontMetrics();
+        // 多行：每行行高 = maxTh / 行数，逐行取能放下的字号（超宽的行也允许缩到 floor 再省略）
+        int rows = lines.size();
+        int lineH = maxTh / rows;
+        int blockTop = y + (h - lineH * rows) / 2;   // 整体垂直居中
+        g.setColor(color);
+        for (int i = 0; i < rows; i++) {
+            String ln = lines.get(i);
+            int lfs = fitSingleLine(g, ln, maxTw, lineH, maxFs, floor);
+            if (lfs <= 0) {   // 该行 floor 仍超宽 → 省略号截断
+                lfs = floor;
+                g.setFont(new Font(CJK_FONT, Font.BOLD, lfs));
+                ln = clipToWidth(g.getFontMetrics(), ln, maxTw);
+            } else {
+                g.setFont(new Font(CJK_FONT, Font.BOLD, lfs));
+            }
+            java.awt.FontMetrics fm = g.getFontMetrics();
+            int lineTop = blockTop + i * lineH;
+            int tx = x + (w - fm.stringWidth(ln)) / 2;
+            int ty = lineTop + (lineH - fm.getHeight()) / 2 + fm.getAscent();
+            g.drawString(ln, tx, ty);
+        }
+    }
+
+    /** 从 maxFs 缩到 floor，返回首个能放进 (maxTw,maxTh) 的字号；都放不下返回 -1。 */
+    private int fitSingleLine(Graphics2D g, String text, int maxTw, int maxTh, int maxFs, int floor) {
+        for (int fs = maxFs; fs >= floor; fs -= 2) {
+            g.setFont(new Font(CJK_FONT, Font.BOLD, fs));
+            java.awt.FontMetrics fm = g.getFontMetrics();
+            if (fm.stringWidth(text) <= maxTw && fm.getHeight() <= maxTh) return fs;
+        }
+        return -1;
+    }
+
+    /** 在 (x,y,w,h) 内以指定字号单行居中绘制。 */
+    private void drawLineCentered(Graphics2D g, String text, int x, int y, int w, int h, int fs, Color color) {
+        g.setFont(new Font(CJK_FONT, Font.BOLD, fs));
+        java.awt.FontMetrics fm = g.getFontMetrics();
         int tx = x + (w - fm.stringWidth(text)) / 2;
         int ty = y + (h - fm.getHeight()) / 2 + fm.getAscent();
         g.setColor(color);
         g.drawString(text, tx, ty);
+    }
+
+    /** 用当前 FontMetrics 把 text 截到不超过 maxTw，末位补省略号。 */
+    private String clipToWidth(java.awt.FontMetrics fm, String text, int maxTw) {
+        if (fm.stringWidth(text) <= maxTw) return text;
+        String ell = "…";
+        int ellW = fm.stringWidth(ell);
+        StringBuilder sb = new StringBuilder();
+        int wsum = 0;
+        for (int i = 0; i < text.length(); i++) {
+            int cw = fm.charWidth(text.charAt(i));
+            if (wsum + cw + ellW > maxTw) break;
+            sb.append(text.charAt(i));
+            wsum += cw;
+        }
+        return sb.append(ell).toString();
     }
 
     /** 等比缩放把 img 贴进 (x,y,w,h) 居中区域。 */

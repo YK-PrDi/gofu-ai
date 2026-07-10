@@ -212,7 +212,7 @@
             <template v-if="entry.skus.length">
               <span v-for="(s,i) in entry.skus" :key="i" class="chip" @click.stop>
                 <b>{{ roleLabel(s.role) }}</b> {{ s.name }}
-                <span class="rm" @click.stop="entry.skus.splice(i,1)">✕</span>
+                <span class="rm" @click.stop="removeSku(i)">✕</span>
               </span>
             </template>
             <template v-else>📦 从快麦 ERP 选品（主件/配件）</template>
@@ -526,6 +526,7 @@ createApp({
       dropOver: false,
       whiteCheck: { done: false, has: [], missing: [] },
       importedFor: {},        // 缺图编码 → 导入的白底图 dataURL（供预览+回传）
+      whiteCodeMap: {},       // 编码 → [白底图file,...] 旁路映射（快麦取/导入的记来源，删单品时同步移除白底图）
       pushingCode: '',        // 正在回传快麦的编码
       pushedCodes: [],        // 已成功回传的编码
       whiteFetching: false,
@@ -720,7 +721,10 @@ createApp({
         const r = await fetch('/api/erp/fetch-white-images', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ codes }) });
         const d = await r.json();
         if (d.error) throw new Error(d.error);
-        (d.matched || []).forEach(m => { if (m.file && !this.entry.whites.includes(m.file)) this.entry.whites.push(m.file); });
+        (d.matched || []).forEach(m => {
+          if (m.file && !this.entry.whites.includes(m.file)) this.entry.whites.push(m.file);
+          if (m.code && m.file) this.recordWhiteCode(m.code, m.file);   // 记来源，供删单品时同步移除
+        });
         this.whiteCheck = { done: true, has: (d.matched || []).map(m => m.code), missing: d.missing || [] };
         const miss = (d.missing || []).length;
         this.setMsg('自动取白底图：' + (d.matched || []).length + ' 张' + (miss ? '，缺 ' + miss + ' 张待导入' : '（齐全）'), miss ? 'err' : 'ok');
@@ -737,6 +741,7 @@ createApp({
         const d = await r.json();
         if (d.error) throw new Error(d.error);
         this.entry.accWhites = (d.matched || []).map(m => m.file).filter(Boolean);
+        (d.matched || []).forEach(m => { if (m.code && m.file) this.recordWhiteCode(m.code, m.file); });   // 记来源，供删单品时同步移除
         // 配件缺图也并入 whiteCheck.missing（去重），让缺图补传区同时覆盖主件+配件
         const accMissing = (d.missing || []).filter(c => !this.whiteCheck.missing.includes(c));
         if (accMissing.length) this.whiteCheck.missing = [...this.whiteCheck.missing, ...accMissing];
@@ -755,6 +760,7 @@ createApp({
           const isMain = this.mainCodes.includes(code);
           if (isMain) { if (!this.entry.whites.includes(rd.result)) this.entry.whites.push(rd.result); }
           else { if (!this.entry.accWhites.includes(rd.result)) this.entry.accWhites.push(rd.result); }
+          this.recordWhiteCode(code, rd.result);   // 记来源，供删单品时同步移除
           this.setMsg('已为 ' + code + ' 导入白底图，可点「回传快麦」写回该单品', 'ok');
         };
         rd.readAsDataURL(f);
@@ -818,6 +824,32 @@ createApp({
         const t = String(r.title || '').toLowerCase(), o = String(r.outerId || '').toLowerCase();
         return t.includes(kw) || o.includes(kw);
       }).slice(0, 200);
+    },
+    // 记录 编码→白底图file 来源（快麦取/导入时调用），供删单品时反查移除。同码多图存数组去重。
+    recordWhiteCode(code, file) {
+      if (!code || !file) return;
+      const arr = this.whiteCodeMap[code] || (this.whiteCodeMap[code] = []);
+      if (!arr.includes(file)) arr.push(file);
+    },
+    // 删除已选单品：同步移除该单品对应的白底图(快麦取/导入的，按 whiteCodeMap 反查)。
+    // 拖拽加的白底图无编码归属，不受影响。
+    removeSku(i) {
+      const sku = this.entry.skus[i];
+      const code = sku && sku.itemCode;
+      if (code) {
+        const files = this.whiteCodeMap[code] || [];
+        files.forEach(f => {
+          let k = this.entry.whites.indexOf(f);
+          if (k >= 0) this.entry.whites.splice(k, 1);
+          k = this.entry.accWhites.indexOf(f);
+          if (k >= 0) this.entry.accWhites.splice(k, 1);
+        });
+        delete this.whiteCodeMap[code];
+        delete this.importedFor[code];
+      }
+      this.entry.skus.splice(i, 1);
+      // 主件全删空则重置白底检测状态（缺图提示区随之清空）
+      if (!this.mainCodes.length) this.whiteCheck = { done: false, has: [], missing: [] };
     },
     // 点整行切换选中：未选→默认主件；已选→取消(点错再点即取消)。Vue3 直接增删即响应。
     togglePick(r) {

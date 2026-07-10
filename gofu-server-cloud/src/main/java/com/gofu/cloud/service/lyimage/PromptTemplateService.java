@@ -138,6 +138,21 @@ public class PromptTemplateService {
         return null;
     }
 
+    /**
+     * 架类品种 prompt：从 classpath prompt/shelf-prompts.json 读指定品种(kind)的构图文案段。
+     * 找不到该品种返回 null。文案取自架类防比价 xlsx，卖点标签已写死其中。
+     */
+    @SuppressWarnings("unchecked")
+    public String shelfPrompt(String kind) {
+        if (kind == null || kind.isBlank()) return null;
+        try {
+            String json = PromptLoader.load("prompt/shelf-prompts.json");
+            Map<String, Object> map = om.readValue(json, Map.class);
+            Object v = map.get(kind.trim());
+            return v == null ? null : String.valueOf(v);
+        } catch (Exception e) { log.warn("架类 prompt 读取失败(kind={}): {}", kind, e.getMessage()); return null; }
+    }
+
     /** 拆解结构参考图（classpath assets/explode-ref.jpg），供拆解类模板锁定内部结构。 */
     public File explodeRefFile() {
         try {

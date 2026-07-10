@@ -45,6 +45,23 @@ public class ImageGenService {
         return aiClient.geminiText(prompt, imagePaths);
     }
 
+    /**
+     * 架类品种匹配：按叶子类目 + SKU 名关键词，映射到 shelf-prompts.json 的品种键。
+     * 锅盖架按名含"吸盘/壁挂/墙"→吸盘款，否则落地款；其余按关键词。兜底返回"刀架"（避免空）。
+     */
+    private static String matchShelfKind(String leaf, String skuName) {
+        String s = ((leaf == null ? "" : leaf) + " " + (skuName == null ? "" : skuName));
+        if (s.contains("锅盖")) {
+            return (s.contains("吸盘") || s.contains("壁挂") || s.contains("墙") || s.contains("免钉")) ? "吸盘锅盖架" : "落地锅盖架";
+        }
+        if (s.contains("刀架") || s.contains("刀具")) return "刀架";
+        if (s.contains("挂钩") || s.contains("门后")) return "挂钩";
+        if (s.contains("沥水") || s.contains("收纳架")) return "沥水收纳架";
+        if (s.contains("转角") || s.contains("置物") || s.contains("浴室")) return "浴室转角置物架";
+        if (s.contains("刀")) return "刀架";
+        return "刀架";
+    }
+
     /** 从 compDesc（如"全配+5支滤芯【可用1年】"）提取滤芯数量，无匹配返回 0 */
     private static int parseFilterCount(String compDesc) {
         if (compDesc == null || compDesc.isBlank()) return 0;
@@ -144,6 +161,9 @@ public class ImageGenService {
         boolean gemini = "gemini".equalsIgnoreCase(cfg.getProvider());
         boolean openai = "openai".equalsIgnoreCase(cfg.getProvider());
         boolean isShower = productType != null && (productType.contains("花洒") || productType.contains("淋浴"));
+        // 架类品（家装主材>厨房>厨房挂件）：productType 形如 "架类:<叶子>"（见 FlowController.deriveProductTypeForGen）。
+        // 整图 AI（每品种一段专属 prompt + 参考图作构图底 + 白底图锁主体），不走任何 Java 贴图合成。
+        boolean isShelf = productType != null && productType.startsWith("架类");
 
         // 纯颜色名：从 skuName 取首段（去【】后，遇 - / 空格 截断），用于左上色标等「只写颜色」处。
         // 如「雅黑色-亲肤按摩 单品」→「雅黑色」、「【月光银】增压」→「月光银」。
@@ -385,6 +405,50 @@ public class ImageGenService {
                 }
             }
             throw new RuntimeException("花洒主图生成失败: " + (lastShower != null ? lastShower.getMessage() : "未知"));
+        }
+
+        // ── 架类品防比价：整图 AI（品种专属 prompt + 参考图作构图底 + 白底图锁主体），不走 Java 贴图 ──
+        if (isShelf) {
+            String leaf = productType.contains(":") ? productType.substring(productType.indexOf(':') + 1).trim() : "";
+            String kind = matchShelfKind(leaf, skuName);
+            String shelfSeg = templateService.shelfPrompt(kind);
+            if (shelfSeg == null || shelfSeg.isBlank())
+                throw new RuntimeException("架类品种 prompt 缺失(kind=" + kind + ")，请检查 shelf-prompts.json");
+            String shelfTpl = PromptLoader.load("prompt/image-shelf-main.txt");
+            String shelfPrompt = shelfTpl
+                .replace("{{shelfPrompt}}", shelfSeg)
+                .replace("{{colorName}}", colorOnly);
+            // 参考图作构图底（refs 第一张权重最高）+ 商品白底图锁主体
+            File shelfBase = templateService.builtinBaseByName("shelf-" + kind);
+            List<File> shelfRefs = new java.util.ArrayList<>();
+            if (shelfBase != null && shelfBase.isFile()) shelfRefs.add(shelfBase);
+            if (hasWhiteBg) shelfRefs.add(whiteBgRef);
+            else if (hasRef) shelfRefs.add(ref);
+            log.info("架类生图: kind={}, 参考图={}, 白底={}", kind, shelfBase != null, hasWhiteBg);
+            Exception lastShelf = null;
+            int maxBackoff = 4;
+            for (int attempt = 0; attempt < keys.size() * (1 + maxBackoff); attempt++) {
+                String key = keys.get(Math.abs(aiClient.keyCursor.getAndIncrement()) % keys.size());
+                try {
+                    String b64 = shelfRefs.isEmpty()
+                        ? aiClient.callGptImage2TextOnly(http, baseUrl, key, model, shelfPrompt)
+                        : aiClient.callGptImage2(http, baseUrl, key, model, shelfPrompt, shelfRefs);
+                    return aiClient.saveAsJpg(b64, batch, seq, skuName).getAbsolutePath();
+                } catch (Exception e) {
+                    lastShelf = e;
+                    String msg = e.getMessage() == null ? "" : e.getMessage();
+                    boolean rl = msg.contains("429") || msg.contains("rate") || msg.contains("Too Many") || msg.contains("繁忙");
+                    if (rl && attempt < keys.size() * (1 + maxBackoff) - 1) {
+                        long round = attempt / Math.max(1, keys.size());
+                        long waitMs = Math.min(16000, 2000L * (1L << Math.min(3, round)));
+                        log.warn("架类图撞限流，退避 {}ms 重试 (attempt {}): {}", waitMs, attempt, msg);
+                        try { Thread.sleep(waitMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                    } else {
+                        log.warn("架类图失败(密钥{}): {}", attempt, msg);
+                    }
+                }
+            }
+            throw new RuntimeException("架类图生成失败: " + (lastShelf != null ? lastShelf.getMessage() : "未知"));
         }
 
         // 参考图列表
