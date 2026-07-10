@@ -202,7 +202,8 @@ public class GptImageAgent implements ImageGeneratorAgent {
             int status = conn.getResponseCode();
             String respBody;
             try (InputStream is = (status >= 200 && status < 300) ? conn.getInputStream() : conn.getErrorStream()) {
-                respBody = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+                // 健壮性修复：错误响应可能无 body（getErrorStream 返回 null），不判空会 NPE 掩盖真实 status
+                respBody = (is == null) ? "" : new String(is.readAllBytes(), StandardCharsets.UTF_8);
             } finally {
                 conn.disconnect();
             }
@@ -310,7 +311,8 @@ public class GptImageAgent implements ImageGeneratorAgent {
             int status = conn.getResponseCode();
             String respBody;
             try (InputStream is = (status >= 200 && status < 300) ? conn.getInputStream() : conn.getErrorStream()) {
-                respBody = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+                // 健壮性修复：错误响应可能无 body（getErrorStream 返回 null），不判空会 NPE 掩盖真实 status
+                respBody = (is == null) ? "" : new String(is.readAllBytes(), StandardCharsets.UTF_8);
             } finally {
                 conn.disconnect();
             }
@@ -356,7 +358,8 @@ public class GptImageAgent implements ImageGeneratorAgent {
             int status = conn.getResponseCode();
             String respBody;
             try (InputStream is = (status >= 200 && status < 300) ? conn.getInputStream() : conn.getErrorStream()) {
-                respBody = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+                // 健壮性修复：错误响应可能无 body（getErrorStream 返回 null），不判空会 NPE 掩盖真实 status
+                respBody = (is == null) ? "" : new String(is.readAllBytes(), StandardCharsets.UTF_8);
             } finally {
                 conn.disconnect();
             }

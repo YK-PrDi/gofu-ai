@@ -40,6 +40,10 @@ public class ImageGenService {
         return aiClient.analyzeBackgroundStyleOnce(refImagePath);
     }
 
+    /** M18 公开委托：品类主体一致性约束 / 禁止项（FlowController 主图组装用）。 */
+    public String ecSubjectLock(String category) { return templateService.ecSubjectLock(category); }
+    public String ecNegative(String category) { return templateService.ecNegative(category); }
+
     /** 公开委托：文本/多模态生成（标题/款式名/搭配方案，ListingService 调用）。 */
     public String geminiText(String prompt, List<String> imagePaths) throws Exception {
         return aiClient.geminiText(prompt, imagePaths);
@@ -59,7 +63,7 @@ public class ImageGenService {
         if (s.contains("沥水") || s.contains("收纳架")) return "沥水收纳架";
         if (s.contains("转角") || s.contains("置物") || s.contains("浴室")) return "浴室转角置物架";
         if (s.contains("刀")) return "刀架";
-        return "刀架";
+        return null;   // M18-P0-C：兜底不再猜"刀架"，返回 null 让上层"品种 prompt 缺失"显式暴露，避免挂钩误套刀架构图
     }
 
     /** 从 compDesc（如"全配+5支滤芯【可用1年】"）提取滤芯数量，无匹配返回 0 */

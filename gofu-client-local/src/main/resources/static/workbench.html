@@ -881,10 +881,13 @@ createApp({
           !confirm('已有主图，重新生成将【覆盖】现有所有主图与详情图，是否继续？')) return;
       this.genRunning = true; this.genDone = false; this.layoutDone = false; this.genProgress = 5;
       try {
-        // 0) 配件自动搭配：只选了主件时，按规则库补配件（乐羽核心逻辑），一并喂给 AI 布局
+        // 0) 配件自动搭配：只选了主件时，按规则库补配件（乐羽核心逻辑），一并喂给 AI 布局。
+        // M18-P0-B 类目分隔：配件规则库(软管/底座/滤芯)是花洒专属，非花洒品类(如架类)不跑，
+        // 避免对架类误报"按规则库搭配配件"文案、也避免未来规则库串味。
         let skus = this.entry.skus.slice();
+        const isShower = this.cat.path.join('>').includes('花洒') || this.cat.path.join('>').includes('淋浴');
         const hasAcc = skus.some(s => s.role === 'accessory' || s.role === 'batch');
-        if (this.mainCodes.length && !hasAcc) {
+        if (isShower && this.mainCodes.length && !hasAcc) {
           this.genMsg = '按规则库自动搭配配件…';
           const acc = await this.autoResolveAccessories();
           if (acc.length) { skus = skus.concat(acc); this.entry.skus = skus; }

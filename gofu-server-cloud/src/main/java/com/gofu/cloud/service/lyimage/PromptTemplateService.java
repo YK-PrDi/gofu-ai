@@ -153,6 +153,58 @@ public class PromptTemplateService {
         } catch (Exception e) { log.warn("架类 prompt 读取失败(kind={}): {}", kind, e.getMessage()); return null; }
     }
 
+    // ── M18 品类库（subjectLock/negative）：从羽刃前端 EC_CATALOG 移植为后端 ec-catalog.json ──
+    private volatile Map<String, Object> ecCatalogCache;
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> ecCatalog() {
+        if (ecCatalogCache == null) {
+            synchronized (this) {
+                if (ecCatalogCache == null) {
+                    try {
+                        ecCatalogCache = om.readValue(PromptLoader.load("prompt/ec-catalog.json"), Map.class);
+                    } catch (Exception e) {
+                        log.warn("ec-catalog.json 读取失败，品类库禁用: {}", e.getMessage());
+                        ecCatalogCache = Map.of();
+                    }
+                }
+            }
+        }
+        return ecCatalogCache;
+    }
+
+    /**
+     * 按 category 路径从叶子向根**冒泡**查找品类字段（subjectLock/negative），仿羽刃 ecCatalogResolveUp。
+     * 如 "家装主材>厨房>厨房挂件>锅盖架" 依次试完整路径→去尾段→…→"家装主材"→ __default__ 全局默认。
+     */
+    private String ecResolveUp(String category, String field) {
+        Map<String, Object> cat = ecCatalog();
+        String c = category == null ? "" : category.replace('＞', '>').replace('›', '>').trim();
+        while (!c.isBlank()) {
+            Object node = cat.get(c);
+            if (node instanceof Map<?, ?> m) {
+                Object v = m.get(field);
+                if (v != null && !String.valueOf(v).isBlank()) return String.valueOf(v);
+            }
+            int gt = c.lastIndexOf('>');
+            if (gt < 0) break;
+            c = c.substring(0, gt).trim();
+        }
+        // 回退全局默认 __default__
+        Object def = cat.get("__default__");
+        if (def instanceof Map<?, ?> m) {
+            Object v = m.get(field);
+            if (v != null) return String.valueOf(v);
+        }
+        return "";
+    }
+
+    /** 品类主体一致性约束（放生图 prompt 起首作最高优先级锚点）。找不到回退全局默认。 */
+    public String ecSubjectLock(String category) { return ecResolveUp(category, "subjectLock"); }
+
+    /** 品类禁止项（放生图 prompt 末尾）。找不到回退全局默认。 */
+    public String ecNegative(String category) { return ecResolveUp(category, "negative"); }
+
     /** 拆解结构参考图（classpath assets/explode-ref.jpg），供拆解类模板锁定内部结构。 */
     public File explodeRefFile() {
         try {

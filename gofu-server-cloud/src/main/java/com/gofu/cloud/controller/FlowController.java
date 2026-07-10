@@ -109,6 +109,7 @@ public class FlowController {
             final int fMainTotal = mainTotal;
             final String fMainAspect = mainAspect;
             final String fCustomReq = customRequest;
+            final String fStyleReq = styleReq;   // M18-R5：风格单独传，供最终生图 prompt 直拼（不只喂分析）
             imageGen.getExecutor().submit(() -> {
                 try {
                     // 布局与主图并行
@@ -125,7 +126,7 @@ public class FlowController {
                         }
                     }, imageGen.getExecutor());
                     var mainF = java.util.concurrent.CompletableFuture.runAsync(() ->
-                            genAllMains(ctx, localWhites, fMainTotal, fMainAspect, task, fCustomReq), imageGen.getExecutor());
+                            genAllMains(ctx, localWhites, fMainTotal, fMainAspect, task, fCustomReq, fStyleReq), imageGen.getExecutor());
                     java.util.concurrent.CompletableFuture.allOf(layoutF, mainF).join();
                     ctx.setStage(FlowStage.LAYOUT_DONE);
                     contextService.save(ctx);
@@ -155,12 +156,20 @@ public class FlowController {
      * 分析失败则降级用 buildMainPrompt。customRequest 为空则自动按品类/卖点/主件名生成。
      */
     private void genAllMains(ProductContext ctx, List<String> whiteImages, int mainTotal,
-                             String mainAspect, GenerationTask task, String customRequest) {
+                             String mainAspect, GenerationTask task, String customRequest, String styleReq) {
         if (whiteImages == null || whiteImages.isEmpty()) { log.info("step1 无白底图，跳过主图"); return; }
         String white = localizeWhite(whiteImages.get(0));
         if (white == null) { log.info("step1 白底图无法本地化，跳过主图"); return; }
         File tmpOut = new File(appProperties.getPaths().getTempOutputDir(), "flow1-" + System.nanoTime());
         tmpOut.mkdirs();
+
+        // M18：品类主体一致性约束/禁止项（从品类库按 category 冒泡查找，回退全局默认）+ auto 比例按白底图推断。
+        String subjectLock = lyImageGen.ecSubjectLock(ctx.getCategory());
+        String negative = lyImageGen.ecNegative(ctx.getCategory());
+        String aspect = resolveAutoAspect(mainAspect, white);   // R3：auto→按白底图真实宽高吸附
+        final String fStyleReq = styleReq;
+        log.info("主图组装: aspect={}, subjectLock={}字, negative={}字, style={}", aspect,
+                subjectLock.length(), negative.length(), styleReq == null ? "" : styleReq);
 
         // M11：视觉分析白底图 → 产品专属多段 prompt。请求词优先用前端传入(customRequest)，否则自动生成。
         List<String> segPrompts = new ArrayList<>();
@@ -196,10 +205,14 @@ public class FlowController {
         {
             String out = new File(tmpOut, "main-0.jpg").getAbsolutePath();
             String base = !segPrompts.isEmpty() ? segPrompts.get(0) : buildMainPrompt(ctx, 1);
-            String prompt = buildSeriesPrompt(base, 1, mainTotal, fSeriesPlan);
-            if (genWithRetry(prompt, List.of(white), white, out, mainAspect, 2)) {
+            String prompt = buildSeriesPrompt(base, 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true);
+            if (genWithRetry(prompt, List.of(white), white, out, aspect, 2)) {
                 keys[0] = uploadIfCos(out);
                 firstRef = localizeWhite(keys[0]);
+            } else {
+                // P0-A：单张失败要可见（原来静默），前端能看到"某张没出"
+                task.addResult(Map.of("message", "主图 #1 生成失败"));
+                log.warn("主图 #1(首图) 生成失败");
             }
             task.incrementProgress();
         }
@@ -215,26 +228,39 @@ public class FlowController {
                     try {
                         String out = new File(tmpOut, "main-" + idx + ".jpg").getAbsolutePath();
                         String base = idx < segPrompts.size() ? segPrompts.get(idx) : buildMainPrompt(ctx, idx + 1);
-                        String prompt = buildSeriesPrompt(base, idx + 1, mainTotal, fSeriesPlan);
+                        String prompt = buildSeriesPrompt(base, idx + 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true);
                         List<String> refs = new ArrayList<>();
                         refs.add(white);
                         if (fFirstRef != null) refs.add(fFirstRef);
-                        if (genWithRetry(prompt, refs, white, out, mainAspect, 2)) {
+                        if (genWithRetry(prompt, refs, white, out, aspect, 2)) {
                             keys[idx] = uploadIfCos(out);
+                        } else {
+                            task.addResult(Map.of("message", "主图 #" + (idx + 1) + " 生成失败"));
+                            log.warn("主图 #{} 生成失败(重试用尽)", idx + 1);
                         }
                     } finally { GEN_CONC.release(); }
                 } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                catch (Exception e) { log.warn("主图 #{} 并发生成失败(跳过): {}", idx, e.getMessage()); }
+                catch (Exception e) {
+                    task.addResult(Map.of("message", "主图 #" + (idx + 1) + " 异常: " + e.getMessage()));
+                    log.warn("主图 #{} 并发生成失败(跳过): {}", idx + 1, e.getMessage());
+                }
                 finally { task.incrementProgress(); }
             }, imageGen.getExecutor()));
         }
         java.util.concurrent.CompletableFuture.allOf(futures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
 
         // 按 index 顺序回填（跳过失败的 null），保证主图顺序稳定
+        int okCount = 0;
         synchronized (ctx) {
-            for (String k : keys) if (k != null) ctx.getVisual().getMainImages().add(k);
+            for (String k : keys) if (k != null) { ctx.getVisual().getMainImages().add(k); okCount++; }
         }
         contextService.save(ctx);
+        // P0-A：有白底图却一张主图都没出 = 真失败，必须抛出让 step1 置 task=error，
+        // 而不是静默标 done 让前端误以为成功（"图没生成还假装完成"的黑洞根因）。
+        if (okCount == 0) {
+            throw new RuntimeException("主图全部生成失败（共 " + mainTotal + " 张，成功 0 张）——请查生图服务返回");
+        }
+        log.info("主图生成完成：{}/{} 张成功", okCount, mainTotal);
     }
 
     /** 自动生成"生图要求"（M11：零人工——按品类/卖点/主件名拼一句喂给视觉分析）。 */
@@ -539,7 +565,11 @@ public class FlowController {
                 List<String> mains = ctx.getVisual().getMainImages();
                 // A2：重生也包系列连贯性+角度约束（与 genAllMains 初次生成一致，避免重生比初次还散）
                 int total = Math.max(mains.size(), index + 1);
-                String prompt = buildSeriesPrompt(base, index + 1, total, seriesPlan);
+                // M18：重生也用品类库 subjectLock/negative + 风格 + 文字渲染，与初次一致
+                String subjectLock = lyImageGen.ecSubjectLock(ctx.getCategory());
+                String negative = lyImageGen.ecNegative(ctx.getCategory());
+                mainAspect = resolveAutoAspect(mainAspect, white);
+                String prompt = buildSeriesPrompt(base, index + 1, total, seriesPlan, subjectLock, negative, styleReq, true);
                 // A1：白底图进 refs（首图重生 ref=白底图；非首图 ref=白底图+第1张，双锚定保一致）
                 String firstRef = (index > 0 && !mains.isEmpty()) ? localizeWhite(mains.get(0)) : null;
                 List<String> refs = new ArrayList<>();
@@ -664,68 +694,104 @@ public class FlowController {
         return false;
     }
 
-    /** 主图比例白名单校验（后端兜底防乱传）：只接受 5 档 gpt-image-2 合法比例，其余回退 1:1。 */
+    /**
+     * 主图比例白名单校验：接受 5 档 gpt-image-2 合法比例 + "auto"（透传，由 resolveAutoAspect 按白底图推断），
+     * 其余回退 auto（M18-R3：不再强制 1:1，避免非方产品被塞进方框裁切/留白）。
+     */
     private String normalizeAspect(Object raw) {
         String a = raw instanceof String s ? s.trim() : "";
         return switch (a) {
-            case "1:1", "3:4", "4:3", "9:16", "16:9" -> a;
-            default -> "1:1";
+            case "1:1", "3:4", "4:3", "9:16", "16:9", "auto" -> a;
+            default -> "auto";
         };
     }
 
+    /** M18-P0-C：全项目统一的花洒品类判定（花洒 或 淋浴）。消除"只花洒/花洒||淋浴"多口径分裂。 */
+    static boolean isShowerCategory(String category) {
+        return category != null && (category.contains("花洒") || category.contains("淋浴"));
+    }
+
+    /** M18-P0-C：category 分隔符归一化（全角＞/›/半角混用 → 统一半角 >），防叶子解析口径不一致。 */
+    static String normalizeCategory(String category) {
+        return category == null ? "" : category.replace('＞', '>').replace('›', '>').trim();
+    }
+
     /**
-     * category 末段派生 productType：含"花洒"→花洒；厨房挂件/架/挂钩/锅盖架等架类→"架类:&lt;叶子&gt;"
+     * category 末段派生 productType：花洒/淋浴→"花洒"；厨房挂件/锅盖架/刀架等架类→"架类:&lt;叶子&gt;"
      * （下游 ImageGenService.isShelf 按前缀判定、按叶子名选品种 prompt）；其余→末段。
+     * M18-P0-C：统一花洒判定、归一化分隔符、收紧架类判定（含"架"需排除花洒且不再空类目兜底架类）。
      */
-    private String deriveProductTypeForGen(String category, String mainItem) {
-        if (category == null || category.isBlank()) return "架类";
-        if (category.contains("花洒")) return "花洒";
+    private String deriveProductTypeForGen(String rawCategory, String mainItem) {
+        String category = normalizeCategory(rawCategory);
+        if (category.isBlank()) return "未知";   // 不再静默兜底"架类"，避免未知品类走错生图分支
+        if (isShowerCategory(category)) return "花洒";
         String leaf = category.contains(">") ? category.substring(category.lastIndexOf('>') + 1).trim() : category.trim();
-        // 架类品（家装主材>厨房>厨房挂件 下的刀架/挂钩/锅盖架/沥水架/收纳架/置物架等）
+        // 架类品（家装主材>厨房>厨房挂件 下的刀架/挂钩/锅盖架/沥水架/收纳架/置物架等）。
+        // 花洒已在上面 return，这里 leaf.contains("架") 不会误吞花洒；仍显式列关键词优先。
         boolean isShelf = category.contains("厨房挂件") || category.contains("挂钩") || category.contains("锅盖架")
                 || category.contains("刀架") || category.contains("置物架") || category.contains("收纳架")
                 || category.contains("沥水") || leaf.contains("架");
         // 架类品种细分（如吸盘/落地锅盖架）靠主件名区分，把主件名一并带上供下游 matchShelfKind 判定。
         if (isShelf) return ("架类:" + (leaf.isBlank() ? "" : leaf) + " " + (mainItem == null ? "" : mainItem)).trim();
-        return leaf.isBlank() ? "架类" : leaf;
+        return leaf.isBlank() ? "未知" : leaf;
     }
 
     // ── 多主图系列差异化（自 ele-business-java GenerateController 原样迁入，M9）──
     // 同场景多角度系列：第1张建基调，2~N张不同拍摄角度+不同卖点营销文案，产品主体100%一致。
 
     /**
-     * 在原始 prompt 后追加系列连贯性约束 + 角度差异化约束。
-     * @param currentIndex 当前图序号(1-based)  @param totalCount 系列总张数
+     * M18-R1：文字渲染指令（照搬羽刃 index.html:1622）。withText 时每张 prompt 加，
+     * 明确要求生图模型把分析产出的【画面文案】作为真实中文渲染到画面——补回"无画面文案"的根因。
      */
-    private String buildSeriesPrompt(String basePrompt, int currentIndex, int totalCount, String seriesPlan) {
+    private static final String TEXT_RENDER_INSTRUCTION =
+        "【文字渲染要求】请把本方案【画面文案】中的主标题、副标题和卖点标签作为清晰可读的中文文字渲染在画面合适位置："
+        + "字体现代简洁、排版整齐、与背景高对比、无错别字、不遮挡产品主体关键结构；"
+        + "除这些卖点文案外，画面不要出现其他多余文字、水印或乱码。";
+
+    /**
+     * M18 重构：仿羽刃自定义模式最终 prompt 组装（index.html:1625-1635）。每张最终 prompt 从前到后：
+     * 品类subjectLock(R5锚点) → 【总分析】前置(R4) → 本张方案(base) → 风格(R5) → 系列连贯性+角度(R2) →
+     * 文字渲染指令(R1) → 品类negative。
+     * @param seriesPlan 全局【总分析】(含系列文案规划)  @param subjectLock 品类主体一致性约束
+     * @param negative 品类禁止项  @param styleReq 改图风格文案  @param withText 是否渲染画面文案
+     */
+    private String buildSeriesPrompt(String basePrompt, int currentIndex, int totalCount, String seriesPlan,
+                                     String subjectLock, String negative, String styleReq, boolean withText) {
         String base = basePrompt == null ? "" : basePrompt.trim();
-        String seriesConstraint = String.format("""
+        StringBuilder sb = new StringBuilder();
+        // R5：品类主体一致性约束前置（最高优先级锚点，锁产品结构/材质/logo/物理合理性）
+        if (subjectLock != null && !subjectLock.isBlank()) sb.append(subjectLock.trim()).append("\n\n");
+        // R4：【总分析】前置作产品物理识别 + 全局卖点分配强锚点（不再降级到末尾"勿渲染"）
+        if (seriesPlan != null && !seriesPlan.isBlank())
+            sb.append("【总分析·产品与系列规划】\n").append(seriesPlan.trim()).append("\n\n");
+        // 本张分析方案（含本图卖点、画面文案、场景构图）
+        sb.append("【第 ").append(currentIndex).append(" 张方案】\n").append(base).append("\n");
+        // R5：改图风格直拼进生图 prompt（原来只喂分析）
+        if (styleReq != null && !styleReq.isBlank()) sb.append("\n【画面风格】").append(styleReq.trim()).append("\n");
+        // 系列连贯性 + 角度约束（R2 恢复多角度+防变形）
+        sb.append(String.format("""
 
                 【系列连贯性·最高优先级】这是同一场景系列拍摄的第 %d/%d 张：
                 1. 产品主体必须100%%一致：外形、颜色、材质、品牌标识、关键结构完全相同
                 2. **产品原生文字必须与第1张完全相同**：产品本体上的LOGO、品牌名、型号、按钮标签、刻度等，字形/位置/颜色/清晰度一致，禁止模糊变形消失
                 3. 场景类型必须完全一致（浴室保持浴室、厨房保持厨房）
                 4. 整体色调、光线氛围、背景材质保持一致，营造"同一时间同一地点"的连续感
-                5. 允许变化：景别(远近)、聚焦部位、场景中摆放位置、光照角度微调、**画面营销文案（每张按本图卖点不同）**
+                5. 允许变化：拍摄角度、景别(远近)、场景中摆放位置、光照角度、**画面营销文案（每张按本图卖点不同）**
                 6. 禁止：场景类型切换、色调剧变、产品变形、产品原生文字错误/模糊、风格跳跃
-                7. 最终效果：像摄影师在同一场景正对产品走近走远，用不同景别拍同一产品的连续镜头，每张用不同营销文案强调不同卖点
-                """.trim(), currentIndex, totalCount);
-        // 07.10#1 卖点重复/不全修复：把全局【系列文案规划】作为共享上下文附加进每张 prompt，
-        // 让本张既看得到全局分配(第几张讲哪个卖点)、又知道自己的边界(只渲染本张卖点、不重复其他张)。
-        String planContext = "";
-        if (seriesPlan != null && !seriesPlan.isBlank()) {
-            planContext = String.format("""
-
-                【本系列全局文案分配·供参考(勿把整段都渲染到画面)】
-                %s
-                **本张画面只渲染属于第 %d 张的卖点文案，不得重复其他张已分配的卖点。**
-                """.trim(), seriesPlan.trim(), currentIndex);
-        }
-        return base + seriesConstraint + buildAngleConstraint(currentIndex, totalCount)
-                + (planContext.isEmpty() ? "" : "\n\n" + planContext);
+                7. 最终效果：同一场景不同角度/景别拍同一产品的连续镜头，每张用不同营销文案强调不同卖点
+                """.trim(), currentIndex, totalCount));
+        sb.append(buildAngleConstraint(currentIndex, totalCount));
+        // R1：文字渲染指令（补回画面文案）
+        if (withText) sb.append("\n\n").append(TEXT_RENDER_INSTRUCTION);
+        // 品类禁止项收尾
+        if (negative != null && !negative.isBlank()) sb.append("\n\n").append(negative.trim());
+        return sb.toString();
     }
 
-    /** 角度差异化约束：第1张正面基调，2~N张按 selectAngleSequence 指定不同角度+强调第 i 个卖点。 */
+    /**
+     * M18-R2 角度差异化约束（恢复羽刃真多角度 + 防变形约束的结合）：
+     * 第1张正面基调，2~N张按 selectAngleSequence 走真实不同角度(侧/俯/45度)，但强约束"仅换机位、产品本体结构不变形"。
+     */
     private String buildAngleConstraint(int currentIndex, int totalCount) {
         if (currentIndex == 1) {
             return """
@@ -740,46 +806,69 @@ public class FlowController {
         String currentShot = angles[(currentIndex - 2) % angles.length];
         return String.format("""
 
-                【第%d张·景别约束·强制执行】
+                【第%d张·角度约束·强制执行】
                 本图采用：%s。
-                - 产品**必须正对镜头**（正面或正面微侧≤15度），与第1张保持同一朝向
-                - 保持产品主体完整可见，不得被遮挡或裁切
-                - 与前图的区别只来自**景别(远近)和聚焦部位**，不来自旋转产品
-                - 光线和阴影符合该景别物理规律
-                **严禁**：侧面90度/70度、俯视、仰视、背面等会改变产品侧边缘几何、导致结构变形的大角度旋转
-                **严禁**：因构图改变而修改产品结构、比例、侧边缘轮廓
+                - 该角度/景别必须与第1张及前面各张**明显不同**，形成多角度系列展示
+                - **仅改变相机机位与取景（角度/景别）**：产品本体的结构、比例、部件数量与位置、轮廓、侧边缘几何**严格保持不变**，不得因换角度而变形、拉伸、增减部件
+                - 保持产品主体完整可见、不被裁切；光线和阴影符合该视角物理规律
                 **产品原生文字**：参考第1张，产品本体文字/LOGO与第1张完全一致
-                **画面营销文案**：可与前面不同，设计新营销标题强调第%d个卖点或从新的近景/特写证明功能
+                **画面营销文案**：可与前面不同，设计新营销标题强调第%d个卖点或从新角度证明功能
                 """, currentIndex, currentShot, currentIndex);
     }
 
     /**
      * 按总张数返回景别序列（不含第1张正面基调）。
-     * 07.10#2 修产品侧边缘结构变形：全部改为正面系景别/微角度，杜绝侧面90/70度、俯视、仰视、背面等
-     * 会旋转产品、改变侧边缘几何的大角度视角。第2~N张靠"景别(远近)+卖点聚焦区域"区分，视角始终正对镜头。
+     * M18-R2：恢复羽刃真多角度序列（侧/俯/45度/特写混合），营造专业多角度系列展示。
+     * 配合 buildAngleConstraint 的"仅换机位、产品本体结构不变形"强约束——既多角度又不变形，
+     * 修正 M16 为防变形把角度全砍成正面导致的"构图平淡、多图雷同"。
      */
     private String[] selectAngleSequence(int totalCount) {
         if (totalCount <= 3) {
             return new String[]{
-                "正面平视·中景（产品正对镜头、完整居中，展示整体形态与核心卖点）",
-                "正面平视·核心部件近景特写（镜头拉近，正面放大展示功能区/出水口等核心部件，产品不旋转）"
+                "正面45度侧视角（展示产品正面与一侧的立体轮廓，机位偏移不改变产品本身）",
+                "核心部件近景特写（镜头拉近放大功能区/出水口等核心部件）"
             };
         } else if (totalCount <= 5) {
             return new String[]{
-                "正面平视·中景（产品正对镜头、完整居中）",
-                "正面微侧15度·近景（产品仅轻微转身≤15度、仍以正面为主，近景展示主要功能区，不露完整侧面）",
-                "正面平视·核心部件近景特写（正面拉近放大核心功能部件，产品不旋转）",
-                "正面平视·材质局部特写（正面拉近展示表面质感/LOGO/细节，产品不旋转）"
+                "正面45度侧视角（兼顾正面与侧面立体感）",
+                "略微俯视45度视角（从斜上方拍摄，展示顶部特征与整体布局）",
+                "核心部件近景特写（拉近放大核心功能部件）",
+                "材质局部特写（拉近展示表面质感/LOGO/细节）"
             };
         } else {
             return new String[]{
-                "正面平视·中景（产品正对镜头、完整居中）",
-                "正面微侧15度·近景（产品仅轻微转身≤15度、仍以正面为主，不露完整侧面）",
-                "正面平视·核心部件近景特写（正面拉近放大核心功能部件）",
-                "正面平视·材质局部特写（正面拉近展示表面质感/LOGO）",
-                "正面平视·全景（产品正对镜头、稍拉远展示完整全貌与留白）",
-                "正面微侧15度·中景（产品仅轻微转身≤15度、仍以正面为主，中景展示整体）"
+                "正面45度侧视角（兼顾正面与侧面立体感）",
+                "左侧45度斜视角（从产品左前方拍摄，展示左侧结构）",
+                "略微俯视45度视角（从斜上方展示顶部与布局）",
+                "核心部件近景特写（拉近放大核心功能部件）",
+                "材质局部特写（拉近展示表面质感/LOGO）",
+                "正面平视全景（正对镜头稍拉远，展示完整全貌与场景）"
             };
+        }
+    }
+
+    /**
+     * M18-R3：auto 比例解析——按白底图真实宽高吸附到最近的 gpt-image-2 合法比例（仿羽刃 resolveAutoAspect）。
+     * requested 为具体比例(非auto)时原样返回；auto/空时读图推断，读图失败回退 1:1。
+     */
+    private String resolveAutoAspect(String requested, String whiteFile) {
+        if (requested != null && !requested.isBlank() && !"auto".equals(requested)) return requested;
+        try {
+            java.awt.image.BufferedImage img = javax.imageio.ImageIO.read(new File(whiteFile));
+            if (img == null) return "1:1";
+            double r = (double) img.getWidth() / img.getHeight();
+            // 吸附到最近的 5 档合法比例
+            String[] cands = {"1:1", "3:4", "4:3", "9:16", "16:9"};
+            double[] ratios = {1.0, 3.0 / 4, 4.0 / 3, 9.0 / 16, 16.0 / 9};
+            int best = 0; double bestDiff = Double.MAX_VALUE;
+            for (int i = 0; i < cands.length; i++) {
+                double d = Math.abs(Math.log(r) - Math.log(ratios[i]));
+                if (d < bestDiff) { bestDiff = d; best = i; }
+            }
+            return cands[best];
+        } catch (Exception e) {
+            log.warn("resolveAutoAspect 读图失败({})，回退 1:1: {}", whiteFile, e.getMessage());
+            return "1:1";
         }
     }
 }
