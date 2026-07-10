@@ -157,13 +157,23 @@ public class ImageGenService {
         String cacheBaseForTemplate = null;  // 非空＝本次生成的图要缓存为该模板的基准图
 
         int filterCount = parseFilterCount(compDesc);
+        // 滤芯材质锁定（07.09 反馈#1）：只要有滤芯就约束材质=加厚 PP 棉多层过滤棉柱，禁止任何其它材质。
+        boolean hasFilterInDesc = compDesc != null && compDesc.contains("滤芯");
+        String filterMaterial = hasFilterInDesc
+            ? "FILTER MATERIAL LOCK: every filter is a THICK MULTI-LAYER PP COTTON filter cartridge "
+              + "(加厚 PP 棉多层过滤棉柱, for sediment removal & water purification / 除杂净水). "
+              + "The visible fill must read as dense white PP cotton fibre. "
+              + "STRICTLY FORBIDDEN: metal, ceramic, resin, activated-carbon granules, or any non-PP-cotton "
+              + "filter material (严禁金属/陶瓷/树脂/活性炭颗粒等任何非 PP 棉材质的滤芯). "
+            : "";
         String filterConstraint = filterCount > 0
-            ? "ABSOLUTE FILTER COUNT: exactly " + filterCount + " (" + numberToWords(filterCount) + ") "
+            ? filterMaterial
+              + "ABSOLUTE FILTER COUNT: exactly " + filterCount + " (" + numberToWords(filterCount) + ") "
               + "white sleek cylindrical filter sticks. "
               + "These are plain matte white tubes — NO holes, NO handle, NO black rubber, "
               + "NO water-outlet pattern, NO surface details from the main product. "
               + "Count them: there must be exactly " + filterCount + " on the left side. "
-            : "";
+            : filterMaterial;
 
         String skuPromptTemplate = PromptLoader.load("prompt/image-sku-white-bg.txt");
         String prompt = skuPromptTemplate

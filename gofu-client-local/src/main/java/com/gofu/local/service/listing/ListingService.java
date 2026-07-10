@@ -33,10 +33,16 @@ public class ListingService {
     private final TaskService taskService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    /** M15：上新/登录进程是否在跑。保活与它争用同一 pdd_browser_profile，需互斥（保活跑时若上新占用则跳过）。 */
+    private final java.util.concurrent.atomic.AtomicBoolean browserBusy =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     public ListingService(AppProperties appProperties, TaskService taskService) {
         this.appProperties = appProperties;
         this.taskService = taskService;
     }
+
+    public boolean isBrowserBusy() { return browserBusy.get(); }
 
     // ──────────────────────────────────────────────────────────────────────
     // 上新执行（Playwright 反风控）—— 原样迁入，禁止重写
@@ -69,6 +75,7 @@ public class ListingService {
             // 之前 submit 只要进程正常退出就标 done，与"真实发品成功"脱钩 → 前端误报成功。
             final boolean[] sawDone = {false};
             final String[] lastError = {null};
+            browserBusy.set(true);   // M15：占用 profile，保活此时会跳过
             try {
                 ProcessBuilder pb = dryRun
                     ? new ProcessBuilder(resolveNodeExe(), scriptFile.getAbsolutePath(), "--dry-run")
@@ -131,10 +138,54 @@ public class ListingService {
                 throw new RuntimeException(e);
             } finally {
                 if (proc != null) try { proc.destroyForcibly(); } catch (Exception ignored) {}
+                browserBusy.set(false);
             }
         });
 
         return task.getId();
+    }
+
+    /**
+     * M15 登录态保活：同步调 pdd_listing.js --keep-alive，headed 静默访问后台刷 token 后退出。
+     * 与上新互斥（上新占用 profile 时跳过）。供 PddKeepAliveService 定时调用。
+     * 返回 true=已保活/已刷新，false=跳过或未登录/失败。
+     */
+    public boolean runKeepAlive() {
+        if (browserBusy.get()) { log.info("[保活] 上新进程占用浏览器，本次跳过"); return false; }
+        File scriptFile = resolvePlaywrightScript();
+        if (scriptFile == null || !scriptFile.exists()) { log.warn("[保活] 找不到 pdd_listing.js，跳过"); return false; }
+        String userDataDir = appProperties.getPaths().getUserDataDir();
+        if (userDataDir == null || userDataDir.isBlank()) userDataDir = System.getProperty("user.dir");
+        String cookiesPath = userDataDir + "/pdd_cookies.json";
+
+        if (!browserBusy.compareAndSet(false, true)) { log.info("[保活] 浏览器忙，跳过"); return false; }
+        Process proc = null;
+        try {
+            ProcessBuilder pb = new ProcessBuilder(resolveNodeExe(), scriptFile.getAbsolutePath(), "--keep-alive")
+                    .directory(scriptFile.getParentFile()).redirectErrorStream(true);
+            pb.environment().putAll(buildPlaywrightEnv(objectMapper.writeValueAsString(Map.of("cookiesPath", cookiesPath))));
+            proc = pb.start();
+            boolean kept = false;
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(proc.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.isBlank()) continue;
+                    log.info("[保活] {}", line);
+                    if (line.contains("kept_alive")) kept = true;
+                }
+            }
+            boolean finished = proc.waitFor(5, java.util.concurrent.TimeUnit.MINUTES);
+            if (!finished) { proc.destroyForcibly(); log.warn("[保活] 超时(5分钟)，强制结束"); return false; }
+            log.info("[保活] 完成，登录态刷新={}", kept);
+            return kept;
+        } catch (Exception e) {
+            log.warn("[保活] 异常(忽略): {}", e.getMessage());
+            return false;
+        } finally {
+            if (proc != null) try { proc.destroyForcibly(); } catch (Exception ignored) {}
+            browserBusy.set(false);
+        }
     }
 
     /** 仅触发登录流程（--login-only），保存 cookies 后退出。 */
@@ -153,6 +204,7 @@ public class ListingService {
 
         taskService.submit(task, () -> {
             Process proc = null;
+            browserBusy.set(true);   // M15：登录也占用 profile，保活跳过
             try {
                 ProcessBuilder pb = new ProcessBuilder(resolveNodeExe(), scriptFile.getAbsolutePath(), "--login-only")
                     .directory(projectRoot).redirectErrorStream(false);
@@ -176,6 +228,7 @@ public class ListingService {
                 task.addResult(Map.of("type", "error", "message", "登录失败: " + e.getMessage()));
             } finally {
                 if (proc != null) try { proc.destroyForcibly(); } catch (Exception ignored) {}
+                browserBusy.set(false);
             }
         });
         return task.getId();

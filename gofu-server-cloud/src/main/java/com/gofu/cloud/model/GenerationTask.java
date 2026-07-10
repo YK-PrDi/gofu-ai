@@ -3,13 +3,15 @@ package com.gofu.cloud.model;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class GenerationTask {
 
     private final String id;
     /** pending / running / done / stopped / error */
     private volatile String status = "pending";
-    private volatile int progress = 0;
+    // M14：并发生图下多线程递增，用 AtomicInteger 保证不丢增量（原 volatile int++ 非原子）。
+    private final AtomicInteger progress = new AtomicInteger(0);
     private volatile int total;
     private volatile boolean cancelled = false;
     private volatile String currentProduct = "";
@@ -24,8 +26,8 @@ public class GenerationTask {
     public String getId() { return id; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
-    public int getProgress() { return progress; }
-    public void incrementProgress() { this.progress++; }
+    public int getProgress() { return progress.get(); }
+    public void incrementProgress() { this.progress.incrementAndGet(); }
     public int getTotal() { return total; }
     public boolean isCancelled() { return cancelled; }
     public void cancel() { this.cancelled = true; }

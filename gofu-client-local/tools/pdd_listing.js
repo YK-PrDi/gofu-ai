@@ -279,13 +279,14 @@ async function main() {
     const args = process.argv.slice(2);
     const loginOnly = args.includes('--login-only');
     const dryRun = args.includes('--dry-run');
+    const keepAlive = args.includes('--keep-alive');   // M15：登录态保活（定时静默访问后台刷 token）
 
     // 读取配置
     let config = {};
     const envConfig = process.env.PDD_CONFIG;
     if (envConfig) {
         try { config = JSON.parse(envConfig); } catch (e) { error('PDD_CONFIG JSON 解析失败: ' + e.message); }
-    } else if (!loginOnly) {
+    } else if (!loginOnly && !keepAlive) {
         // 从 stdin 读取
         const rl = readline.createInterface({ input: process.stdin });
         let raw = '';
@@ -309,15 +310,21 @@ async function main() {
         viewport: { width: 1440, height: 900 },
     });
 
-    // 兼容旧版：若存在旧的 pdd_cookies.json 且持久化目录还没登录态，迁移一次（仅首次有效）
-    if (fs.existsSync(cookiesPath)) {
+    // 兼容旧版：若存在旧的 pdd_cookies.json 且持久化目录**还没**登录态，迁移一次（仅首次有效）。
+    // guard（M15）：持久化 profile 一旦有过登录态（Default/Network/Cookies 存在），就**不再**灌旧 cookie——
+    // 否则每次启动都把可能已过期的旧 pdd_cookies.json 叠加覆盖到活登录态上，反而缩短登录寿命。
+    const profileCookieDb = path.join(userDataDir, 'Default', 'Network', 'Cookies');
+    const profileHasLogin = fs.existsSync(profileCookieDb);
+    if (fs.existsSync(cookiesPath) && !profileHasLogin) {
         try {
             const cookies = JSON.parse(fs.readFileSync(cookiesPath, 'utf8'));
             await context.addCookies(cookies);
-            log('已从旧 pdd_cookies.json 迁移登录 cookies（之后由持久化目录维护）');
+            log('持久化目录无登录态，已从旧 pdd_cookies.json 迁移一次（之后由持久化目录维护）');
         } catch (e) {
             log('旧 cookies 迁移失败（忽略，将走登录）: ' + e.message);
         }
+    } else if (profileHasLogin) {
+        log('持久化目录已有登录态，跳过旧 cookie 重灌（M15 guard，避免旧cookie覆盖活登录态）');
     }
 
     const page = await context.newPage();
@@ -342,6 +349,31 @@ async function main() {
         });
 
         log(`当前URL: ${currentUrl}, 登录态: ${isLoggedIn}`);
+
+        // ── M15 保活分支：仅刷新 token，不做任何上新/登录操作 ──────────────
+        // 定时静默访问后台，让拼多多续期 session/token；已登录则回写 cookies 后退出，
+        // 未登录不弹登录页（保活不打扰）。整个过程只是一次访问，几秒内结束。
+        if (keepAlive) {
+            if (isLoggedIn) {
+                // 再多停留一会，确保后台 XHR 完成、token 完成续期
+                await page.waitForTimeout(4000);
+                try {
+                    const cookies = await context.cookies();
+                    fs.writeFileSync(cookiesPath, JSON.stringify(cookies, null, 2));
+                    log('保活成功：已访问后台刷新 token，cookies 已回写');
+                } catch (e) {
+                    log('保活回写 cookies 失败（忽略）: ' + e.message);
+                }
+                await context.close();
+                done('kept_alive');
+                return;
+            } else {
+                log('保活跳过：当前未登录（不弹登录，等用户手动登录）');
+                await context.close();
+                done('not_logged_in');
+                return;
+            }
+        }
 
         if (!isLoggedIn || loginOnly) {
             log('需要登录，请在弹出的浏览器窗口中完成拼多多商家后台登录...');

@@ -94,6 +94,9 @@ public class FlowController {
             int mainTotal = body.get("mainCount") instanceof Number n ? Math.max(1, n.intValue()) : 6;
             String mainAspect = normalizeAspect(body.get("mainAspect"));
             String customRequest = body.get("customRequest") instanceof String s ? s.trim() : "";   // M11:可选手输生图要求
+            // 07.09#2 改图风格：前端传 styleId(默认 random)，random 后端随机抽一种，整组主图统一风格。
+            String styleReq = resolveStylePrompt(body.get("styleId"));
+            if (!styleReq.isBlank()) customRequest = (customRequest + "\n" + styleReq).trim();
             Map<String, Object> planReq = new LinkedHashMap<>(body);
 
             // 07.08重构：布局(乐羽线/千问)与全部主图(羽刃线/白底图)互不依赖→并行跑，缩短总时长。
@@ -163,7 +166,8 @@ public class FlowController {
         List<String> segPrompts = new ArrayList<>();
         try {
             String req = (customRequest != null && !customRequest.isBlank()) ? customRequest : autoCustomRequest(ctx);
-            String raw = imageGen.analyzeCustomImagePrompts(req, List.of(new File(white)), mainTotal, false);
+            // 07.09#3 主图带画面卖点文案(withText=true)：羽刃主图有卖点标题/标签，本项目默认开启，自动化减人工。
+            String raw = imageGen.analyzeCustomImagePrompts(req, List.of(new File(white)), mainTotal, true);
             // 返回：1段【总分析】+ N段图 prompt，--- 分隔。丢掉总分析(首段)，取图 prompt。
             String[] parts = raw.split("(?m)^\\s*-{3,}\\s*$");
             for (int i = 1; i < parts.length; i++) {   // 跳过 parts[0] 总分析
@@ -180,25 +184,54 @@ public class FlowController {
         synchronized (ctx) { ctx.getVisual().getMainImages().clear(); }
         contextService.save(ctx);
 
+        // M14 并发：首图串行定基调（2~N 参考它），第 2~N 张并发生成（限流 GEN_CONC）。
+        // 结果按 index 收集保序（主图顺序=详情配对顺序，不能靠 add 顺序）。
+        String[] keys = new String[mainTotal];
+
+        // Phase 1：首图串行（i=0）——出来后作 firstRef 供 2~N 参考
         String firstRef = null;
-        for (int i = 0; i < mainTotal; i++) {
-            String out = new File(tmpOut, "main-" + i + ".jpg").getAbsolutePath();
-            // 每张用各自分析段；段数不足或分析失败则用静态模板兜底
-            String base = i < segPrompts.size() ? segPrompts.get(i) : fallbackBase;
-            String prompt = buildSeriesPrompt(base, i + 1, mainTotal);
-            // A1：白底产品图必须作为像素参考进 refs——GptImageAgent.generateMulti 会丢弃 whiteBgPath 参数，
-            // 只认 refImagePaths。对齐羽刃：首图 ref=白底图；2~N 张 ref=白底图+第1张AI结果（双锚定保产品一致）。
-            List<String> refs = new ArrayList<>();
-            refs.add(white);
-            if (firstRef != null) refs.add(firstRef);
-            if (genWithRetry(prompt, refs, white, out, mainAspect, 2)) {
-                String key = uploadIfCos(out);
-                synchronized (ctx) { ctx.getVisual().getMainImages().add(key); }
-                contextService.save(ctx);
-                if (firstRef == null) firstRef = localizeWhite(key);   // 首图出来后作后续参考
+        {
+            String out = new File(tmpOut, "main-0.jpg").getAbsolutePath();
+            String base = !segPrompts.isEmpty() ? segPrompts.get(0) : fallbackBase;
+            String prompt = buildSeriesPrompt(base, 1, mainTotal);
+            if (genWithRetry(prompt, List.of(white), white, out, mainAspect, 2)) {
+                keys[0] = uploadIfCos(out);
+                firstRef = localizeWhite(keys[0]);
             }
             task.incrementProgress();
         }
+
+        // Phase 2：第 2~N 张并发（refs=白底图+首图，双锚定）；首图失败则降级仅用白底图
+        final String fFirstRef = firstRef;
+        List<java.util.concurrent.CompletableFuture<Void>> futures = new ArrayList<>();
+        for (int i = 1; i < mainTotal; i++) {
+            final int idx = i;
+            futures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try {
+                    GEN_CONC.acquire();
+                    try {
+                        String out = new File(tmpOut, "main-" + idx + ".jpg").getAbsolutePath();
+                        String base = idx < segPrompts.size() ? segPrompts.get(idx) : fallbackBase;
+                        String prompt = buildSeriesPrompt(base, idx + 1, mainTotal);
+                        List<String> refs = new ArrayList<>();
+                        refs.add(white);
+                        if (fFirstRef != null) refs.add(fFirstRef);
+                        if (genWithRetry(prompt, refs, white, out, mainAspect, 2)) {
+                            keys[idx] = uploadIfCos(out);
+                        }
+                    } finally { GEN_CONC.release(); }
+                } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                catch (Exception e) { log.warn("主图 #{} 并发生成失败(跳过): {}", idx, e.getMessage()); }
+                finally { task.incrementProgress(); }
+            }, imageGen.getExecutor()));
+        }
+        java.util.concurrent.CompletableFuture.allOf(futures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
+
+        // 按 index 顺序回填（跳过失败的 null），保证主图顺序稳定
+        synchronized (ctx) {
+            for (String k : keys) if (k != null) ctx.getVisual().getMainImages().add(k);
+        }
+        contextService.save(ctx);
     }
 
     /** 自动生成"生图要求"（M11：零人工——按品类/卖点/主件名拼一句喂给视觉分析）。 */
@@ -213,9 +246,46 @@ public class FlowController {
                 + "多角度差异化拍摄，风格统一、高级、干净，适合拼多多主图。";
     }
 
+    /**
+     * 改图风格库（07.09#2，从羽刃 CUSTOM_IMAGE_STYLES 移植 9 种）。
+     * key=前端 styleId；value=拼进分析 request 的风格约束（参与 Gemini 分析+生图，产品主体仍以白底图为准）。
+     */
+    private static final Map<String, String> STYLE_PROMPTS = new LinkedHashMap<>() {{
+        put("original",      "【改图风格】以白底产品图为主体基准，不强行套用夸张风格；根据需求自然扩写场景、光影、材质和卖点表达，保持产品外形、颜色、结构细节高度一致。");
+        put("tech-blue",     "【改图风格·科技蓝】画面采用蓝白科技感背景、冷色调高光、玻璃/金属质感平台和精密商业棚拍布光，突出智能、高端、理性、专业。");
+        put("girl-pink",     "【改图风格·少女粉】画面采用柔和粉白色调、轻盈治愈氛围、圆润道具、细腻柔光和干净背景，突出亲和、精致、甜美但不过度幼稚。");
+        put("premium-gray",  "【改图风格·高级灰】画面采用浅灰到炭灰的层次背景、克制留白、柔和阴影和高端商业摄影质感，突出品质、专业、耐看和高客单价感。");
+        put("natural-green", "【改图风格·自然绿】画面采用低饱和植物绿、自然光、清爽生活方式场景、木质或石材细节，突出环保、健康、舒适和生活方式价值。");
+        put("sunset-orange", "【改图风格·暖阳橙】画面采用暖橙夕阳光感、温暖渐变、柔和高光和长阴影，突出活力、温度、生活幸福感和情绪感染力。");
+        put("khaki",         "【改图风格·卡其色】画面采用温暖土黄卡其色调、哑光质感背景和柔和自然光，突出自然耐看的户外生活感。");
+        put("light-yellow",  "【改图风格·淡黄色】画面采用柔和浅黄渐变背景、清新明快光效，突出活泼亲切的清爽氛围。");
+        put("beige",         "【改图风格·米黄色】画面采用奶油米白渐变、细腻柔光和温柔哑光背景，突出温暖高级的舒适质感。");
+    }};
+    private final java.util.Random styleRandom = new java.util.Random();
+
+    /**
+     * 解析前端 styleId → 风格约束文案。random/空 → 从 9 种里随机抽一种（整组统一），日志记录选中的风格。
+     * 未知 id 回退 original。
+     */
+    private String resolveStylePrompt(Object styleIdRaw) {
+        String id = styleIdRaw instanceof String s ? s.trim() : "";
+        if (id.isEmpty() || "random".equals(id)) {
+            List<String> keys = new ArrayList<>(STYLE_PROMPTS.keySet());
+            id = keys.get(styleRandom.nextInt(keys.size()));
+            log.info("07.09#2 改图风格 random → 选中 [{}]", id);
+        }
+        return STYLE_PROMPTS.getOrDefault(id, STYLE_PROMPTS.get("original"));
+    }
+
     /** 交错第二步的异步任务表（M10：step2 改异步，规避同步长请求 300s 超时）。 */
     private final java.util.concurrent.ConcurrentHashMap<String, GenerationTask> flowTasks =
             new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * M14 生图并发限流：线程池有 20，但生图并发度限到 8（对齐乐羽 CONC=8），
+     * 避免打爆 gpt-image 中转站触发大面积 429。主图 2~N / 详情 / SKU 三条并发循环共用此闸门。
+     */
+    private static final java.util.concurrent.Semaphore GEN_CONC = new java.util.concurrent.Semaphore(8);
 
     /**
      * 交错第二步（07.08重构：选定方案后才跑）。入参 {@code { contextId, planIndex, accWhiteImages?:[], genDetail?, genSku?, templateId? }}。
@@ -299,18 +369,35 @@ public class FlowController {
         if (genDetail) {
             // B1：重新生成前清空旧详情图，覆盖而非追加。
             ctx.getVisual().getDetailImages().clear();
-            for (int i = 0; i < mainImgs.size(); i++) {
-                String mainLocal = localizeWhite(mainImgs.get(i));
-                List<String> refs = mainLocal != null ? List.of(mainLocal) : (refMain.isBlank() ? List.of() : List.of(refMain));
-                String baseForDetail = mainLocal != null ? mainLocal : white;   // 优先用对应主图,兜底白底
-                String out = new File(tmpOut, "detail-" + i + ".jpg").getAbsolutePath();
-                String dp = "将所给的第 " + (i + 1) + " 张主图重新排版为 9:16 竖版电商详情图，"
-                        + "产品主体、颜色、角度与该主图保持一致，纵向铺陈场景与卖点信息，适合详情页竖版展示。";
-                if (baseForDetail != null && genWithRetry(dp, refs, baseForDetail, out, "9:16", 2)) {
-                    ctx.getVisual().getDetailImages().add(uploadIfCos(out));
-                }
-                task.incrementProgress(); contextService.save(ctx);
+            // M14 并发：每张详情只依赖对应主图、彼此独立→全并发（限流 GEN_CONC）。
+            // 结果按 index 收集保序（详情[i] 必须配对主图[i]），并发结束后统一回填+存一次。
+            int dTotal = mainImgs.size();
+            String[] dKeys = new String[dTotal];
+            List<java.util.concurrent.CompletableFuture<Void>> dFutures = new ArrayList<>();
+            for (int i = 0; i < dTotal; i++) {
+                final int idx = i;
+                dFutures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
+                    try {
+                        GEN_CONC.acquire();
+                        try {
+                            String mainLocal = localizeWhite(mainImgs.get(idx));
+                            List<String> refs = mainLocal != null ? List.of(mainLocal) : (refMain.isBlank() ? List.of() : List.of(refMain));
+                            String baseForDetail = mainLocal != null ? mainLocal : white;   // 优先用对应主图,兜底白底
+                            String out = new File(tmpOut, "detail-" + idx + ".jpg").getAbsolutePath();
+                            String dp = "将所给的第 " + (idx + 1) + " 张主图重新排版为 9:16 竖版电商详情图，"
+                                    + "产品主体、颜色、角度与该主图保持一致，纵向铺陈场景与卖点信息，适合详情页竖版展示。";
+                            if (baseForDetail != null && genWithRetry(dp, refs, baseForDetail, out, "9:16", 2)) {
+                                dKeys[idx] = uploadIfCos(out);
+                            }
+                        } finally { GEN_CONC.release(); }
+                    } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                    catch (Exception e) { log.warn("详情图 #{} 并发生成失败(跳过): {}", idx, e.getMessage()); }
+                    finally { task.incrementProgress(); }
+                }, imageGen.getExecutor()));
             }
+            java.util.concurrent.CompletableFuture.allOf(dFutures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
+            for (String k : dKeys) if (k != null) ctx.getVisual().getDetailImages().add(k);
+            contextService.save(ctx);
         }
 
         // SKU 图：乐羽成熟 generateSkuImage，对【选定方案】生。
@@ -335,12 +422,23 @@ public class FlowController {
             }
             if (bgStyle == null) bgStyle = "";
 
-            for (int i = 0; i < plan.getItems().size(); i++) {
-                var it = plan.getItems().get(i);
+            // M14 并发：每个 SKU 独立、写各自 plan item（隔离），全并发（限流 GEN_CONC）。
+            // bgStyle 已在循环外只分析一次（并发前置满足）；save 收敛到并发结束后一次。
+            final String fBgStyle = bgStyle;
+            final String fProductType = productType;
+            final String fBatch = batch;
+            final List<String> fAccImagePaths = accImagePaths;
+            List<java.util.concurrent.CompletableFuture<Void>> sFutures = new ArrayList<>();
+            var items = plan.getItems();
+            for (int i = 0; i < items.size(); i++) {
+                final int idx = i;
+                final var it = items.get(i);
                 String name = it.getSkuDisplayName() != null ? it.getSkuDisplayName() : it.getName();
                 String skuWhite = (it.getWhiteImgDir() != null && !it.getWhiteImgDir().isBlank())
                         ? localizeWhite(it.getWhiteImgDir()) : white;
                 if (skuWhite == null) { log.info("SKU「{}」无可用白底图，跳过", name); task.incrementProgress(); continue; }
+                final String fName = name;
+                final String fSkuWhite = skuWhite;
                 List<Map<String, Object>> accParts = new ArrayList<>();
                 if (it.getAccParts() != null) {
                     for (var ap : it.getAccParts()) {
@@ -349,18 +447,25 @@ public class FlowController {
                         accParts.add(m);
                     }
                 }
-                try {
-                    String path = lyImageGen.generateSkuImage(refMain, name, it.getSpec2(), productType,
-                            batch, i + 1, "", skuWhite, accImagePaths, "", bgStyle, it.getItemCode(), accParts, templateId);
-                    if (path != null) {
-                        // COS 上传走 uploadIfCos：失败(如账户欠费451)时回退本地路径，图不丢弃(07.08修)。
-                        it.setImgDir(uploadIfCos(path));
-                    }
-                } catch (Exception e) {
-                    log.warn("SKU「{}」生图失败(跳过): {}", name, e.getMessage());
-                }
-                task.incrementProgress(); contextService.save(ctx);
+                final List<Map<String, Object>> fAccParts = accParts;
+                sFutures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
+                    try {
+                        GEN_CONC.acquire();
+                        try {
+                            String path = lyImageGen.generateSkuImage(refMain, fName, it.getSpec2(), fProductType,
+                                    fBatch, idx + 1, "", fSkuWhite, fAccImagePaths, "", fBgStyle, it.getItemCode(), fAccParts, templateId);
+                            if (path != null) {
+                                // COS 上传走 uploadIfCos：失败(如账户欠费451)时回退本地路径，图不丢弃(07.08修)。
+                                it.setImgDir(uploadIfCos(path));
+                            }
+                        } finally { GEN_CONC.release(); }
+                    } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                    catch (Exception e) { log.warn("SKU「{}」生图失败(跳过): {}", fName, e.getMessage()); }
+                    finally { task.incrementProgress(); }
+                }, imageGen.getExecutor()));
             }
+            java.util.concurrent.CompletableFuture.allOf(sFutures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
+            contextService.save(ctx);
         }
     }
 
@@ -416,9 +521,13 @@ public class FlowController {
                 // 主图：走 M11 视觉分析出单段 prompt（与 genAllMains 一致，保证质量），以首图为参考保持系列一致
                 String mainAspect = normalizeAspect(body.get("mainAspect"));
                 String req = body.get("customRequest") instanceof String s && !s.isBlank() ? s.trim() : autoCustomRequest(ctx);
+                // 07.09#2 风格：重生也带 styleId（与初次一致）
+                String styleReq = resolveStylePrompt(body.get("styleId"));
+                if (!styleReq.isBlank()) req = (req + "\n" + styleReq).trim();
                 String base;
                 try {
-                    String raw = imageGen.analyzeCustomImagePrompts(req, List.of(new File(white)), 1, false);
+                    // 07.09#3 主图重生同样开画面文案(withText=true)
+                    String raw = imageGen.analyzeCustomImagePrompts(req, List.of(new File(white)), 1, true);
                     String[] parts = raw.split("(?m)^\\s*-{3,}\\s*$");
                     base = parts.length > 1 ? parts[1].trim() : buildMainPrompt(ctx);
                 } catch (Exception e) { base = buildMainPrompt(ctx); }
