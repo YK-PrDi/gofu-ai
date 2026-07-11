@@ -19,5 +19,5 @@ public class StructureContent {
     private List<SkuPlan> plans = new ArrayList<>();
 
     /** 当前选中的方案下标（预览页人工可切换），缺省 0。 */
-    private int selectedPlanIndex = 0;
+    private int selectedPlanIndex;
 }

@@ -15,6 +15,7 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -176,7 +177,7 @@ public class GptImageAgent implements ImageGeneratorAgent {
             }
 
             String boundary = "----GptImageBoundary" + Long.toHexString(System.currentTimeMillis());
-            URL url = new URL(baseUrl + "/v1/images/edits");
+            URL url = URI.create(baseUrl + "/v1/images/edits").toURL();
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
@@ -288,7 +289,7 @@ public class GptImageAgent implements ImageGeneratorAgent {
                                        String outputPath, String apiKey, String baseUrl, String size) {
         try {
             String boundary = "----GptImageBoundary" + Long.toHexString(System.currentTimeMillis());
-            URL url = new URL(baseUrl + "/v1/images/edits");
+            URL url = URI.create(baseUrl + "/v1/images/edits").toURL();
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
@@ -342,7 +343,7 @@ public class GptImageAgent implements ImageGeneratorAgent {
             );
 
             String jsonBody = mapper.writeValueAsString(payload);
-            URL url = new URL(baseUrl + "/v1/images/generations");
+            URL url = URI.create(baseUrl + "/v1/images/generations").toURL();
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
@@ -482,7 +483,7 @@ public class GptImageAgent implements ImageGeneratorAgent {
 
     private boolean downloadUrl(String imgUrl, String outputPath) {
         try {
-            HttpURLConnection conn = (HttpURLConnection) new URL(imgUrl).openConnection();
+            HttpURLConnection conn = (HttpURLConnection) URI.create(imgUrl).toURL().openConnection();
             conn.setConnectTimeout(15_000);
             conn.setReadTimeout(60_000);
             File parent = new File(outputPath).getParentFile();

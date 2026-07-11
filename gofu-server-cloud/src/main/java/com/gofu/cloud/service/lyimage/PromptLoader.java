@@ -64,7 +64,6 @@ public class PromptLoader {
     }
 
     /** 读 JSON 顶层 "_v" 整数版本号，无则 0。 */
-    @SuppressWarnings("unchecked")
     private static int readVersion(ObjectMapper om, String json) {
         try {
             Object v = om.readValue(json, Map.class).get("_v");

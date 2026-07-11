@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -112,8 +113,8 @@ public class KuaimaiService {
         }
         String secret = appProperties.getKuaimai().getAppSecret();
         Mac mac = Mac.getInstance("HmacMD5");
-        mac.init(new SecretKeySpec(secret.getBytes("UTF-8"), "HmacMD5"));
-        byte[] bytes = mac.doFinal(sb.toString().getBytes("UTF-8"));
+        mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacMD5"));
+        byte[] bytes = mac.doFinal(sb.toString().getBytes(StandardCharsets.UTF_8));
         StringBuilder hex = new StringBuilder();
         for (byte b : bytes) hex.append(String.format("%02x", b));
         return hex.toString();

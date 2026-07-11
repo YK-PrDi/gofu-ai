@@ -1,6 +1,5 @@
 package com.gofu.local.controller;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.springframework.http.HttpHeaders;
@@ -27,8 +26,6 @@ import java.util.*;
 @RestController
 @RequestMapping("/api/pricing")
 public class PricingController {
-
-    private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
      * POST /api/pricing/calculate

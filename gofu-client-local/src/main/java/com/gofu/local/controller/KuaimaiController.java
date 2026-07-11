@@ -212,7 +212,7 @@ public class KuaimaiController {
                     String ext = url.toLowerCase().contains(".png") ? ".png" : ".jpg";
                     java.io.File out = new java.io.File(whiteDir, safe + ext);
                     // 带超时的下载(避免慢链接无限阻塞 servlet 线程)
-                    java.net.URLConnection conn = new java.net.URL(url).openConnection();
+                    java.net.URLConnection conn = java.net.URI.create(url).toURL().openConnection();
                     conn.setConnectTimeout(10000);
                     conn.setReadTimeout(30000);
                     try (java.io.InputStream in = conn.getInputStream()) {
@@ -346,6 +346,14 @@ public class KuaimaiController {
                     int qty = Math.max(1, toInt(comp.getOrDefault("qty", 1)));
                     double unit = toDouble(comp.get("cost"));     // 材料价（核对后）
                     double w    = toDouble(comp.get("weight"));
+                    // 成本修复：滤芯类配件在 ERP 里以「整包」为单品存在，编码尾部 *N 即包装数
+                    // （如 052滤芯*15 采购价 3.9=15个整包价），而 qty 语义是"要几个"。
+                    // 整包价直接 ×qty 会把成本放大 ~N 倍，故先按 *N 折算成单个价再乘。
+                    int packSize = parsePackSize(code);
+                    if (packSize > 1) {
+                        unit /= packSize;
+                        w    /= packSize;
+                    }
                     // 成本异常保护：除首个主件外，配件若本身是「整支花洒/整机」（编码或名称含 单手喷/单花洒/整机）
                     // 说明被误当配件拼进了组合，记日志并不计入成本，避免拼单价离谱。
                     String cn = code + " " + String.valueOf(comp.getOrDefault("name", ""));
@@ -451,6 +459,23 @@ public class KuaimaiController {
 
     private double round2(double v) {
         return BigDecimal.valueOf(v).setScale(2, RoundingMode.HALF_UP).doubleValue();
+    }
+
+    /**
+     * 解析配件编码尾部的「整包数量」*N（如 052滤芯*15 → 15），无则返回 1。
+     * ERP 里滤芯等批量件以整包为单品、采购价是整包价，需据此把整包价折算成单个价。
+     * 只认末尾的 *N（组合码如 A+B*5 取最后一段的 *5），防止误伤中间的乘号。
+     */
+    static int parsePackSize(String code) {
+        if (code == null) return 1;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\*(\\d+)\\s*$").matcher(code.trim());
+        if (m.find()) {
+            try {
+                int n = Integer.parseInt(m.group(1));
+                return n > 0 ? n : 1;
+            } catch (NumberFormatException e) { return 1; }
+        }
+        return 1;
     }
 
     /** 搜索匹配优先级：精确匹配=0 > 前缀匹配=1 > 包含=2。 */

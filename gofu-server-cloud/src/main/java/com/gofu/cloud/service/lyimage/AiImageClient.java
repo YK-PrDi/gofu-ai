@@ -279,7 +279,7 @@ public class AiImageClient {
     String callGptImage2(OkHttpClient http, String baseUrl, String key, String model,
                          String prompt, List<File> refs) throws Exception {
         String boundary = "----GptImageBoundary" + Long.toHexString(System.currentTimeMillis());
-        java.net.URL url = new java.net.URL(baseUrl + "/v1/images/edits");
+        java.net.URL url = java.net.URI.create(baseUrl + "/v1/images/edits").toURL();
         java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
         conn.setRequestMethod("POST");
         conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
@@ -324,7 +324,7 @@ public class AiImageClient {
         Object imgUrl = item.get("url");
         if (imgUrl instanceof String && !((String) imgUrl).isBlank()) {
             // 下载转 b64
-            java.net.URL dl = new java.net.URL((String) imgUrl);
+            java.net.URL dl = java.net.URI.create((String) imgUrl).toURL();
             java.net.HttpURLConnection c2 = (java.net.HttpURLConnection) dl.openConnection();
             c2.setConnectTimeout(15_000);
             c2.setReadTimeout(60_000);
