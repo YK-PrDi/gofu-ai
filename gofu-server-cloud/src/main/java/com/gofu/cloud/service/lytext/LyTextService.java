@@ -59,7 +59,26 @@ public class LyTextService {
         + "即【加号开头 + 该型号实际加装的配件及数量】，逐一列清，禁止用「全配」「全套」「套装」概括。\n"
         + "- 批量件型号 specName 体现数量，如\"+10个S型挂钩\"\"+5个沥水篮\"\n"
         + "- 卖点词库(按品类真实功能选用)：稳固承重、免打孔、加厚防锈、大容量、多层收纳、防滑、易安装\n"
+        + "- **【最高优先级·配件真实性】components 只能取自下方【共享配件清单】【批量件清单】里真实列出的编码；"
+        + "若清单为空或写着「无独立配件/无批量件」，则所有型号 components 一律留空(models 只出\"单品/标准款\")，"
+        + "绝对禁止臆造配件、更禁止套用花洒配件(软管/滤芯/喷头等本品类没有的东西)**\n"
         + "- 每个 specName 控制在 6-15 字；绝不要把\"包装袋\"\"好评卡\"\"胶纸\"等包材写进任何 specName\n";
+
+    /** 花洒专属配件关键词：非花洒品类喂 LLM 前从配件/批量件清单剔除，防误配进成本。 */
+    private static final String[] SHOWER_ONLY_ACC = {"软管", "水管", "滤芯", "喷头", "手喷", "花洒", "增压"};
+
+    /** 逐行剔除含花洒专属配件关键词的清单行（保留其余行原样，含末尾换行）。 */
+    private static String stripShowerOnlyAcc(String lines) {
+        if (lines == null || lines.isBlank()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (String ln : lines.split("\n")) {
+            if (ln.isBlank()) continue;
+            boolean showerOnly = false;
+            for (String kw : SHOWER_ONLY_ACC) if (ln.contains(kw)) { showerOnly = true; break; }
+            if (!showerOnly) sb.append(ln).append("\n");
+        }
+        return sb.toString();
+    }
 
     private final LyImageProperties props;
     private final ImageGenService imageGenService;
@@ -211,6 +230,21 @@ public class LyTextService {
         // （架类主件本身带层数=一层/二层/三层，型号名再编"单层款/三层款"会与主件冲突→款式对不上）。
         boolean isShower = category != null && (category.contains("花洒") || category.contains("淋浴"));
         String namingSpec = isShower ? SHOWER_NAMING_SPEC : GENERIC_NAMING_SPEC;
+
+        // M19：非花洒品类误配花洒配件根治——从喂给 LLM 的配件/批量件清单里剔除花洒专属配件（软管/滤芯/喷头/手喷/花洒）。
+        // 根因：ERP 单品池或规则可能混入花洒配件，LLM 会把它们配到锅盖架/挂钩等架类型号上，
+        // 配件随 accParts 进 combo-cost 求和→非花洒品成本被误加。清单层拦掉，配不上就不进成本。
+        if (!isShower) {
+            int before = accLines.length() + batchLines.length();
+            String cleanedAcc = stripShowerOnlyAcc(accLines.toString());
+            String cleanedBatch = stripShowerOnlyAcc(batchLines.toString());
+            accLines.setLength(0);   accLines.append(cleanedAcc);
+            batchLines.setLength(0); batchLines.append(cleanedBatch);
+            if (accLines.length() == 0) accLines.append("（无独立配件，可只用主件单独成 SKU）\n");
+            if (batchLines.length() == 0) batchLines.append("（无批量件）\n");
+            if (before != accLines.length() + batchLines.length())
+                log.info("M19 非花洒品类[{}]已剔除花洒专属配件(软管/滤芯/喷头)，防误配进成本", category);
+        }
 
         String prompt = String.format(
             "你是拼多多电商运营专家。用户已选定主件款式和共享配件（来自ERP）。\n"

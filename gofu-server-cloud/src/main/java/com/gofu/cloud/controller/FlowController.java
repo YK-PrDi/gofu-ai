@@ -167,6 +167,8 @@ public class FlowController {
         String subjectLock = lyImageGen.ecSubjectLock(ctx.getCategory());
         String negative = lyImageGen.ecNegative(ctx.getCategory());
         String aspect = resolveAutoAspect(mainAspect, white);   // R3：auto→按白底图真实宽高吸附
+        // M19：细杆/框架类品类（架类/挂钩）——主图强制正面系 + 白底图强锁结构，防旋转臆造变形。
+        boolean structLock = isStructuralRigidCategory(ctx.getCategory());
         final String fStyleReq = styleReq;
         log.info("主图组装: aspect={}, subjectLock={}字, negative={}字, style={}", aspect,
                 subjectLock.length(), negative.length(), styleReq == null ? "" : styleReq);
@@ -186,6 +188,17 @@ public class FlowController {
                 String p = parts[i].trim();
                 if (!p.isBlank()) segPrompts.add(p);
             }
+            // M19-A1：段数<图数常因 LLM 漏写 --- 分隔符（把多张方案挤在一段里）导致降级。
+            // 兜底按【第 N 张方案】标题重新切分，把段数补到接近图数，尽量不触发降级。
+            if (segPrompts.size() < mainTotal) {
+                List<String> reSplit = splitByPlanHeader(raw);
+                if (reSplit.size() > segPrompts.size()) {
+                    log.info("M19-A1 段数不足({}<{}), 按【第N张方案】标题重解析得 {} 段",
+                            segPrompts.size(), mainTotal, reSplit.size());
+                    segPrompts.clear();
+                    segPrompts.addAll(reSplit);
+                }
+            }
             log.info("M11 自定义分析出 {} 段主图提示词，全局文案分配上下文长度 {}", segPrompts.size(), seriesPlan.length());
         } catch (Exception e) {
             log.warn("M11 自定义分析失败，降级静态模板: {}", e.getMessage());
@@ -203,9 +216,10 @@ public class FlowController {
         // Phase 1：首图串行（i=0）——出来后作 firstRef 供 2~N 参考
         String firstRef = null;
         {
+            task.setCurrentProduct("主图 1/" + mainTotal);
             String out = new File(tmpOut, "main-0.jpg").getAbsolutePath();
-            String base = !segPrompts.isEmpty() ? segPrompts.get(0) : buildMainPrompt(ctx, 1);
-            String prompt = buildSeriesPrompt(base, 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true);
+            String base = !segPrompts.isEmpty() ? segPrompts.get(0) : buildMainPrompt(ctx, 1, fSeriesPlan);
+            String prompt = buildSeriesPrompt(base, 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true, structLock);
             if (genWithRetry(prompt, List.of(white), white, out, aspect, 2)) {
                 keys[0] = uploadIfCos(out);
                 firstRef = localizeWhite(keys[0]);
@@ -226,9 +240,10 @@ public class FlowController {
                 try {
                     GEN_CONC.acquire();
                     try {
+                        task.setCurrentProduct("主图 " + (idx + 1) + "/" + mainTotal);
                         String out = new File(tmpOut, "main-" + idx + ".jpg").getAbsolutePath();
-                        String base = idx < segPrompts.size() ? segPrompts.get(idx) : buildMainPrompt(ctx, idx + 1);
-                        String prompt = buildSeriesPrompt(base, idx + 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true);
+                        String base = idx < segPrompts.size() ? segPrompts.get(idx) : buildMainPrompt(ctx, idx + 1, fSeriesPlan);
+                        String prompt = buildSeriesPrompt(base, idx + 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true, structLock);
                         List<String> refs = new ArrayList<>();
                         refs.add(white);
                         if (fFirstRef != null) refs.add(fFirstRef);
@@ -409,6 +424,7 @@ public class FlowController {
                     try {
                         GEN_CONC.acquire();
                         try {
+                            task.setCurrentProduct("详情图 " + (idx + 1) + "/" + dTotal);
                             String mainLocal = localizeWhite(mainImgs.get(idx));
                             List<String> refs = mainLocal != null ? List.of(mainLocal) : (refMain.isBlank() ? List.of() : List.of(refMain));
                             String baseForDetail = mainLocal != null ? mainLocal : white;   // 优先用对应主图,兜底白底
@@ -481,6 +497,7 @@ public class FlowController {
                     try {
                         GEN_CONC.acquire();
                         try {
+                            task.setCurrentProduct("SKU：" + fName);
                             String path = lyImageGen.generateSkuImage(refMain, fName, it.getSpec2(), fProductType,
                                     fBatch, idx + 1, "", fSkuWhite, fAccImagePaths, "", fBgStyle, it.getItemCode(), fAccParts, templateId);
                             if (path != null) {
@@ -508,6 +525,7 @@ public class FlowController {
         resp.put("status", t.getStatus());
         resp.put("progress", t.getProgress());
         resp.put("total", t.getTotal());
+        resp.put("currentProduct", t.getCurrentProduct());
         resp.put("results", t.getResults());
         return ResponseEntity.ok(resp);
     }
@@ -560,8 +578,8 @@ public class FlowController {
                     String raw = imageGen.analyzeCustomImagePrompts(req, List.of(new File(white)), 1, true);
                     String[] parts = raw.split("(?m)^\\s*-{3,}\\s*$");
                     if (parts.length > 1) { seriesPlan = parts[0].trim(); base = parts[1].trim(); }
-                    else base = buildMainPrompt(ctx, index + 1);
-                } catch (Exception e) { base = buildMainPrompt(ctx, index + 1); }
+                    else base = buildMainPrompt(ctx, index + 1, seriesPlan);
+                } catch (Exception e) { base = buildMainPrompt(ctx, index + 1, seriesPlan); }
                 List<String> mains = ctx.getVisual().getMainImages();
                 // A2：重生也包系列连贯性+角度约束（与 genAllMains 初次生成一致，避免重生比初次还散）
                 int total = Math.max(mains.size(), index + 1);
@@ -569,7 +587,8 @@ public class FlowController {
                 String subjectLock = lyImageGen.ecSubjectLock(ctx.getCategory());
                 String negative = lyImageGen.ecNegative(ctx.getCategory());
                 mainAspect = resolveAutoAspect(mainAspect, white);
-                String prompt = buildSeriesPrompt(base, index + 1, total, seriesPlan, subjectLock, negative, styleReq, true);
+                boolean structLock = isStructuralRigidCategory(ctx.getCategory());   // M19：重生与初次一致
+                String prompt = buildSeriesPrompt(base, index + 1, total, seriesPlan, subjectLock, negative, styleReq, true, structLock);
                 // A1：白底图进 refs（首图重生 ref=白底图；非首图 ref=白底图+第1张，双锚定保一致）
                 String firstRef = (index > 0 && !mains.isEmpty()) ? localizeWhite(mains.get(0)) : null;
                 List<String> refs = new ArrayList<>();
@@ -662,17 +681,54 @@ public class FlowController {
 
 
     /**
-     * 主图 prompt：品类+主件+本张卖点，落白底图产品到营销场景。
-     * 07.10#1 降级兜底也按序号取**单个**卖点(而非 join 全部)，避免所有卖点糊进一句导致重复/塞不下。
-     * @param index 本张序号(1-based)，用于从卖点列表按序取本张主打卖点
+     * M19-A1：按【第 N 张方案】标题重新切分原始分析文本（LLM 漏写 --- 分隔符时的兜底）。
+     * 从第一个【第1张方案】标题起，按后续每个【第N张方案】标题切段，丢弃标题前的【总分析】部分。
+     * 切不出（无标题）返回空 list，调用方保持原 --- 切分结果。
      */
-    private String buildMainPrompt(ProductContext ctx, int index) {
+    private List<String> splitByPlanHeader(String raw) {
+        List<String> out = new ArrayList<>();
+        if (raw == null || raw.isBlank()) return out;
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("【第\\s*\\d+\\s*张方案】").matcher(raw);
+        List<Integer> starts = new ArrayList<>();
+        while (m.find()) starts.add(m.start());
+        if (starts.size() < 2) return out;   // 少于2段不值得重切
+        for (int i = 0; i < starts.size(); i++) {
+            int s = starts.get(i);
+            int e = (i + 1 < starts.size()) ? starts.get(i + 1) : raw.length();
+            String seg = raw.substring(s, e).trim();
+            if (!seg.isBlank()) out.add(seg);
+        }
+        return out;
+    }
+
+    /**
+     * 主图 prompt：品类+主件+本张卖点，落白底图产品到营销场景。
+     * M19-A2：降级兜底不再盲取 sellingPoints[i]（会和 seriesPlan 系列文案规划的本张分配打架→重复），
+     * 改为：有 seriesPlan 时明确让模型**读取系列文案规划里分给第 index 张的卖点**并只渲染它、不与其他张重复；
+     * 无 seriesPlan 时才回退按序号取单个卖点。并补最小【画面文案】结构，避免降级张丢失卖点文字。
+     * @param index 本张序号(1-based)  @param seriesPlan 全局【总分析】(含系列文案规划)，可为空
+     */
+    private String buildMainPrompt(ProductContext ctx, int index, String seriesPlan) {
         String cat = ctx.getCategory() == null ? "" : ctx.getCategory();
         String leaf = cat.contains(">") ? cat.substring(cat.lastIndexOf('>') + 1).trim() : cat;
         java.util.List<String> sp = ctx.getVisual().getSellingPoints();
-        String point = sp.isEmpty() ? "" : sp.get((Math.max(1, index) - 1) % sp.size());
-        return "为电商主图生成营销场景：将白底图中的产品（" + leaf
-                + "）自然融入高级感场景，突出本图卖点：" + point + "。保持产品主体真实、居中、留白得当，适合电商主图。";
+        boolean hasPlan = seriesPlan != null && !seriesPlan.isBlank();
+        StringBuilder b = new StringBuilder();
+        b.append("为电商主图生成营销场景：将白底图中的产品（").append(leaf)
+         .append("）自然融入高级感场景，保持产品主体真实、居中、留白得当，适合电商主图。");
+        if (hasPlan) {
+            // A2 核心：不指定具体卖点，而是锚定到全局分配表的本张条目，杜绝与 seriesPlan 冲突
+            b.append("\n【本图卖点·必须服从全局分配】严格采用上文【系列文案规划】中分配给第 ")
+             .append(index).append(" 张的卖点，只渲染这一个卖点，禁止与其他张的卖点重复或混用。");
+        } else {
+            String point = sp.isEmpty() ? "" : sp.get((Math.max(1, index) - 1) % sp.size());
+            b.append("突出本图卖点：").append(point).append("。");
+        }
+        // A2：补最小【画面文案】结构，保证降级张也有可渲染的卖点文字（否则文字整个缺失）
+        b.append("\n【画面文案】把本图卖点做成：主标题(≤8字醒目大字)+副标题(≤15字一句解释)+2个卖点标签(≤6字/个)，"
+               + "排版整齐、与背景高对比、无错别字、不遮挡产品关键结构。");
+        return b.toString();
     }
 
     /** 生图带重试（bug1：主图/详情单张失败不静默丢，重试 maxRetry 次）。M10：撞 429 限流时指数退避后再重试。 */
@@ -709,6 +765,21 @@ public class FlowController {
     /** M18-P0-C：全项目统一的花洒品类判定（花洒 或 淋浴）。消除"只花洒/花洒||淋浴"多口径分裂。 */
     static boolean isShowerCategory(String category) {
         return category != null && (category.contains("花洒") || category.contains("淋浴"));
+    }
+
+    /**
+     * M19：刚性细杆/框架类品类判定（架类：锅盖架/挂钩/刀架/置物架/收纳架/沥水架等）。
+     * 这类产品是细钢丝/薄框结构，主图 2~N 张一旦按多角度序列大幅旋转，AI 会重新臆造三维几何 →
+     * 结构变形/穿模/违背物理（07.11 锅盖架"米奇耳朵红蝴蝶结"即此）。故对这类品类主图强制正面系 + 白底图强锁结构。
+     * 与 deriveProductTypeForGen 的 isShelf 判定同源，抽出复用。
+     */
+    static boolean isStructuralRigidCategory(String category) {
+        String c = normalizeCategory(category);
+        if (c.isBlank() || isShowerCategory(c)) return false;
+        String leaf = c.contains(">") ? c.substring(c.lastIndexOf('>') + 1).trim() : c;
+        return c.contains("厨房挂件") || c.contains("挂钩") || c.contains("锅盖架")
+            || c.contains("刀架") || c.contains("置物架") || c.contains("收纳架")
+            || c.contains("沥水") || leaf.contains("架");
     }
 
     /** M18-P0-C：category 分隔符归一化（全角＞/›/半角混用 → 统一半角 >），防叶子解析口径不一致。 */
@@ -754,13 +825,25 @@ public class FlowController {
      * 文字渲染指令(R1) → 品类negative。
      * @param seriesPlan 全局【总分析】(含系列文案规划)  @param subjectLock 品类主体一致性约束
      * @param negative 品类禁止项  @param styleReq 改图风格文案  @param withText 是否渲染画面文案
+     * @param structLock M19：刚性细杆/框架类品类——强制正面系角度 + 白底图强锁结构（防旋转臆造变形）
      */
     private String buildSeriesPrompt(String basePrompt, int currentIndex, int totalCount, String seriesPlan,
-                                     String subjectLock, String negative, String styleReq, boolean withText) {
+                                     String subjectLock, String negative, String styleReq, boolean withText,
+                                     boolean structLock) {
         String base = basePrompt == null ? "" : basePrompt.trim();
         StringBuilder sb = new StringBuilder();
         // R5：品类主体一致性约束前置（最高优先级锚点，锁产品结构/材质/logo/物理合理性）
         if (subjectLock != null && !subjectLock.isBlank()) sb.append(subjectLock.trim()).append("\n\n");
+        // M19：架类/挂钩等细杆框架结构，白底图强锁——最高优先级，紧跟 subjectLock，防AI旋转臆造把结构画变形。
+        // 关键：约束是"双向忠于白底图"——白底图有的造型件(如米奇耳朵/蝴蝶结/卡通脸/印字)必须1:1保留，
+        // 白底图没有的不要加；绝不是"一律删装饰件"(那会抹掉产品真实设计特征)。
+        if (structLock)
+            sb.append("【结构强锁·白底图为唯一结构依据·最高优先级】本产品是细杆/薄框金属结构，极易被误画变形。"
+                    + "产品主体的框架走线、杆件数量与走向、层数、挂位/卡位数量与位置、底座/接水盘形状、"
+                    + "以及白底图上已有的一切造型与装饰件（如顶部造型环/耳朵、蝴蝶结、卡通图案、面板印字/LOGO）、连接焊点、比例，"
+                    + "必须严格照所给白底产品图 1:1 复刻——白底图有什么就画什么、白底图什么样就画什么样，一件不多、一件不少、形状不变。"
+                    + "严禁改变或简化白底图已有的造型件、严禁新增白底图上没有的东西、严禁改变杆件几何走向、严禁增减层数/挂位、严禁把结构画成不能承物的形状。"
+                    + "被收纳物（锅盖/毛巾/衣物等）与产品的前后遮挡、支撑受力必须符合物理，不得穿模、不得悬空、不得违背重力。\n\n");
         // R4：【总分析】前置作产品物理识别 + 全局卖点分配强锚点（不再降级到末尾"勿渲染"）
         if (seriesPlan != null && !seriesPlan.isBlank())
             sb.append("【总分析·产品与系列规划】\n").append(seriesPlan.trim()).append("\n\n");
@@ -780,7 +863,7 @@ public class FlowController {
                 6. 禁止：场景类型切换、色调剧变、产品变形、产品原生文字错误/模糊、风格跳跃
                 7. 最终效果：同一场景不同角度/景别拍同一产品的连续镜头，每张用不同营销文案强调不同卖点
                 """.trim(), currentIndex, totalCount));
-        sb.append(buildAngleConstraint(currentIndex, totalCount));
+        sb.append(buildAngleConstraint(currentIndex, totalCount, structLock));
         // R1：文字渲染指令（补回画面文案）
         if (withText) sb.append("\n\n").append(TEXT_RENDER_INSTRUCTION);
         // 品类禁止项收尾
@@ -791,8 +874,10 @@ public class FlowController {
     /**
      * M18-R2 角度差异化约束（恢复羽刃真多角度 + 防变形约束的结合）：
      * 第1张正面基调，2~N张按 selectAngleSequence 走真实不同角度(侧/俯/45度)，但强约束"仅换机位、产品本体结构不变形"。
+     * M19：structLock（架类/挂钩细杆框架）时改走正面系微变化——大角度旋转对细杆结构=灾难(臆造变形)，
+     * 只靠景别(远近/特写)+轻微机位偏移区分各张，杜绝侧/俯/背大旋转。
      */
-    private String buildAngleConstraint(int currentIndex, int totalCount) {
+    private String buildAngleConstraint(int currentIndex, int totalCount, boolean structLock) {
         if (currentIndex == 1) {
             return """
 
@@ -801,6 +886,27 @@ public class FlowController {
                 这张图将作为后续图片的参考基准，必须完整呈现产品全貌。
                 **画面营销文案**：根据卖点设计本图营销文案（主标题、副标题、卖点标签），强调第1个核心卖点
                 """;
+        }
+        // M19：细杆框架类——正面系微变化序列，禁止大角度旋转
+        if (structLock) {
+            String[] flat = {
+                "正面平视中景（正对镜头，展示完整框架全貌，与第1张同视角但机位略拉远/换构图位置）",
+                "核心功能区正面近景特写（镜头拉近放大挂位/卡位/接水盘等功能部位，仍正面视角）",
+                "正面微侧≤15度（机位仅轻微偏移带一点立体感，产品本体结构/杆件走向不变形）",
+                "材质与细节正面特写（拉近展示金属表面质感/焊点/防滑处理，正面视角）"
+            };
+            String shot = flat[(currentIndex - 2) % flat.length];
+            return String.format("""
+
+                【第%d张·角度约束·细杆框架防变形·强制执行】
+                本图采用：%s。
+                - **产品必须正对镜头**，靠景别(远近/特写)与画面构图位置区分各张，**严禁侧视/俯视/仰视/背面等大角度旋转**
+                - 细杆/薄框结构在大角度下极易被AI臆造成变形几何，故本品类只做正面系微变化
+                - 产品本体的框架走线、杆件数量与走向、层数、挂位/卡位、底座/接水盘形状**严格照白底图不变**，不得因换景别而变形/拉伸/增减部件
+                - 保持产品主体完整可见、不被裁切；被收纳物与产品前后遮挡、支撑受力符合物理，不穿模不悬空
+                **产品原生文字**：参考第1张，产品本体文字/LOGO与第1张完全一致
+                **画面营销文案**：可与前面不同，设计新营销标题强调第%d个卖点
+                """, currentIndex, shot, currentIndex);
         }
         String[] angles = selectAngleSequence(totalCount);
         String currentShot = angles[(currentIndex - 2) % angles.length];
