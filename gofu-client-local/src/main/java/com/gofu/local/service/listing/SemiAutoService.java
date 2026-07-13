@@ -1,6 +1,7 @@
 package com.gofu.local.service.listing;
 
 import com.gofu.local.model.SemiAutoScan;
+import com.gofu.local.service.erp.KuaimaiService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -9,7 +10,9 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 半自动批量上新 · 文件夹扫描与两级遍历（P1）。
@@ -28,6 +31,12 @@ public class SemiAutoService {
     private static final Logger log = LoggerFactory.getLogger(SemiAutoService.class);
 
     private static final String IMG_EXT = ".*\\.(jpg|jpeg|png|webp|bmp|gif)$";
+
+    private final KuaimaiService kuaimaiService;
+
+    public SemiAutoService(KuaimaiService kuaimaiService) {
+        this.kuaimaiService = kuaimaiService;
+    }
 
     /** 扫单商品文件夹，按子目录名识别各角色目录（纯目录名约定，无内容识别）。 */
     public SemiAutoScan.Product scanProduct(File dir) {
@@ -104,6 +113,59 @@ public class SemiAutoService {
             for (File f : imgs) out.add(f.getAbsolutePath());
         }
         return out;
+    }
+
+    /**
+     * 从 SKU 图文件名提取编码候选：去扩展名、去前缀"数字_"序号、去空格后配件描述。
+     * ERP 编码含中文无固定分隔（如 GF-奶白-湿纸巾架、GF-灰花洒-820+1.5米软管），
+     * 故不按段切，取"主体串"作候选：去掉乐羽导出常见的"N_"前缀，空格前主体。
+     * 例：'1_GF-106-银色-1 喷头+1.5米防爆软管.jpg' → 'GF-106-银色-1'
+     */
+    static String codeFromFilename(String fileName) {
+        if (fileName == null) return "";
+        String s = fileName.replaceAll("\\.[^.]+$", "").trim();      // 去扩展名
+        s = s.replaceFirst("^\\d+[_\\-\\s]+", "");                   // 去前缀 "1_" / "1-" / "1 "
+        int sp = s.indexOf(' ');                                     // 空格后是配件描述，截主体
+        if (sp > 0) s = s.substring(0, sp);
+        return s.trim();
+    }
+
+    /**
+     * SKU 图反推：对一批 SKU 图文件名，逐个提编码 → 查快麦 ERP 缓存。
+     * 命中 → {matched:true, code, name, cost, weight}；
+     * 未命中(ERP无此编码=命名不规范) → {matched:false, code, file, error}。
+     * 接北极星：未命中不静默跳过，交由调用方明确提示用户规范命名。
+     */
+    public List<Map<String, Object>> reverseSkuFromImages(List<String> imagePaths, String productType) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (String path : imagePaths) {
+            File f = new File(path);
+            String code = codeFromFilename(f.getName());
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("file", path);
+            row.put("code", code);
+            Map<String, Object> cached = null;
+            if (!code.isBlank()) {
+                try { cached = kuaimaiService.getCachedItemByOuterId(code); } catch (Exception ignore) {}
+            }
+            if (cached != null) {
+                double cost = toD(cached.get("purchasePrice"));
+                row.put("matched", true);
+                row.put("name", String.valueOf(cached.getOrDefault("title", code)));
+                row.put("cost", cost);
+                row.put("weight", toD(cached.get("weight")));
+            } else {
+                row.put("matched", false);
+                row.put("error", "快麦 ERP 未找到编码「" + code + "」，请把该 SKU 图按 ERP 商品编码规范命名（如 GF-奶白-湿纸巾架.jpg）");
+            }
+            out.add(row);
+        }
+        return out;
+    }
+
+    private static double toD(Object v) {
+        if (v instanceof Number n) return n.doubleValue();
+        try { return v == null ? 0 : Double.parseDouble(v.toString()); } catch (Exception e) { return 0; }
     }
 
     /** 文件名自然排序：1 < 2 < 10（按文件名数字段比较，迁自乐羽）。 */

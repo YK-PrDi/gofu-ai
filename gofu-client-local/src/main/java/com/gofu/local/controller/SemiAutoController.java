@@ -54,4 +54,25 @@ public class SemiAutoController {
         List<String> imgs = semiAutoService.listImages(dir);
         return ResponseEntity.ok(Map.of("images", imgs, "count", imgs.size()));
     }
+
+    /**
+     * SKU 图反推（P2）：对某商品的 SKU 图目录，逐图从文件名提编码→查快麦 ERP。
+     * 入参 {@code { skuImgDir, productType? }}；出参 {@code { rows:[{file,code,matched,...}], unmatched:[...] }}。
+     * unmatched 非空即命名不规范，前端据此提示用户；接北极星，不静默跳过。
+     */
+    @SuppressWarnings("unchecked")
+    @PostMapping("/reverse-sku")
+    public ResponseEntity<?> reverseSku(@RequestBody Map<String, Object> body) {
+        String skuImgDir = body.get("skuImgDir") != null ? String.valueOf(body.get("skuImgDir")) : "";
+        String productType = body.get("productType") != null ? String.valueOf(body.get("productType")) : "架类";
+        if (skuImgDir.isBlank() || !new File(skuImgDir).isDirectory()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "skuImgDir 不是有效目录"));
+        }
+        List<String> imgs = semiAutoService.listImages(skuImgDir);
+        List<Map<String, Object>> rows = semiAutoService.reverseSkuFromImages(imgs, productType);
+        List<Map<String, Object>> unmatched = rows.stream()
+                .filter(r -> !Boolean.TRUE.equals(r.get("matched"))).toList();
+        return ResponseEntity.ok(Map.of("rows", rows, "unmatched", unmatched,
+                "allMatched", unmatched.isEmpty()));
+    }
 }

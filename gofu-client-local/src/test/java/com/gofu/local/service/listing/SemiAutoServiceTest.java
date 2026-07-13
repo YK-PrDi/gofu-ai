@@ -17,7 +17,8 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class SemiAutoServiceTest {
 
-    private final SemiAutoService svc = new SemiAutoService();
+    // 扫描/自然序不碰 ERP，传 null KuaimaiService 即可；反推逻辑的编码提取单独测 static 方法。
+    private final SemiAutoService svc = new SemiAutoService(null);
 
     private void mkImg(File dir, String name) throws IOException {
         assertTrue(dir.mkdirs() || dir.isDirectory());
@@ -94,5 +95,20 @@ class SemiAutoServiceTest {
     void listImages_非法目录返回空() {
         assertTrue(svc.listImages("").isEmpty());
         assertTrue(svc.listImages("/no/such/dir/xyz").isEmpty());
+    }
+
+    @Test
+    void codeFromFilename_去前缀序号与配件描述取编码主体() {
+        // 乐羽导出命名：'1_GF-106-银色-1 喷头+1.5米防爆软管.jpg' → 'GF-106-银色-1'
+        assertEquals("GF-106-银色-1", SemiAutoService.codeFromFilename("1_GF-106-银色-1 喷头+1.5米防爆软管.jpg"));
+        // 纯编码文件名（用户按规范命名）
+        assertEquals("GF-奶白-湿纸巾架", SemiAutoService.codeFromFilename("GF-奶白-湿纸巾架.jpg"));
+        // 前缀数字+短横
+        assertEquals("GF-枪灰-湿纸巾架", SemiAutoService.codeFromFilename("2-GF-枪灰-湿纸巾架.png"));
+        // 含 + 的编码，无空格则整体保留
+        assertEquals("GF-灰花洒-820+1.5米软管", SemiAutoService.codeFromFilename("GF-灰花洒-820+1.5米软管.jpg"));
+        // 边界
+        assertEquals("", SemiAutoService.codeFromFilename(null));
+        assertEquals("", SemiAutoService.codeFromFilename(".jpg"));
     }
 }
