@@ -215,12 +215,13 @@ public class ShowerCompositor {
     }
 
     /**
-     * 架类多件组合主件框：在 AI 底图右下区贴一个【放大的主件白底图】+ 右上角「×N」红圆角标，
-     * 直观表达"这是 N 件装"。与配件框(drawAccCard 平铺)不同——主件不平铺，放大单张 + 数量角标。
+     * 架类多件组合主件框：在 AI 底图右下区贴一张白卡，卡内【按数量摆 N 个真实产品】——
+     * 位置够就排成一行或一列，放不下就分行叠放(网格)；再加右上角「×N」红圆角标兜底表达件数。
+     * (07.13 测试修正：原来只贴 1 个放大缩略图+角标，用户要求真实呈现 N 个产品。)
      * mainQty<=1 时不贴（单件 SKU 不需要），直接返回原图。
      *
      * @param baseImg  AI 生成的单主件场景底图
-     * @param mainImg  主件白底图（抠白底后放大贴入）
+     * @param mainImg  主件白底图（抠白底后按数量平铺贴入）
      * @param mainQty  主件数量 N（>1 才画）
      */
     File compositeMainQtyCardAt(File baseImg, File mainImg, int mainQty,
@@ -249,10 +250,28 @@ public class ShowerCompositor {
         g.fillRoundRect(cx + sh, cy + sh, cardW, cardH, arc, arc);
         g.setColor(Color.WHITE);
         g.fillRoundRect(cx, cy, cardW, cardH, arc, arc);
-        // 放大的主件图填卡（留 8% 内边距）
-        drawImageFit(g, prod, cx + (int)(cardW * 0.08), cy + (int)(cardH * 0.08),
-                     (int)(cardW * 0.84), (int)(cardH * 0.84));
-        // 右上角「×N」红圆角标
+        // 卡内可用区（留 8% 内边距）
+        int areaX = cx + (int)(cardW * 0.08), areaY = cy + (int)(cardH * 0.08);
+        int areaW = (int)(cardW * 0.84), areaH = (int)(cardH * 0.84);
+        // 按数量选网格：够就排一行(横长产品)/一列，多则近似方阵；放不下自然缩小(格内 fit)。
+        int n = Math.min(mainQty, 9);   // 上限 9，超过靠角标表达，避免糊成一团
+        boolean landscape = prod.getWidth() >= prod.getHeight();
+        int cols, rows;
+        if (n <= 3) {
+            // 1~3 个：横长产品排一列(上下叠)、竖长产品排一行——让单个产品尽量大
+            if (landscape) { cols = 1; rows = n; } else { cols = n; rows = 1; }
+        } else {
+            cols = (int)Math.ceil(Math.sqrt(n));
+            rows = (int)Math.ceil((double) n / cols);
+        }
+        int cellW = areaW / cols, cellH = areaH / rows;
+        for (int i = 0; i < n; i++) {
+            int r = i / cols, c = i % cols;
+            // 格内留 6% 间距，fit 保持比例；格不够大时自动缩小(即"放不下就叠放/缩排")
+            drawImageFit(g, prod, areaX + c * cellW + (int)(cellW * 0.06), areaY + r * cellH + (int)(cellH * 0.06),
+                         (int)(cellW * 0.88), (int)(cellH * 0.88));
+        }
+        // 右上角「×N」红圆角标（件数兜底，尤其 N>9 时）
         drawQtyBadge(g, cx + cardW, cy, (int)(Math.min(cardW, cardH) * 0.28), mainQty);
 
         g.dispose();
