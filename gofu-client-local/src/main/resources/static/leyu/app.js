@@ -639,7 +639,7 @@ async function siGenerate() {
             const s = lstSkuItems[i];
             const reqBody = JSON.stringify({
                 refImagePath: ref, productType, bagImagePath, accImagePaths, waterImagePath, bgStyle, templateId, batch: batchId,
-                skus: [{ idx: i, name: siSkuFullName(s), compDesc: siSkuFullName(s), itemCode: s.itemCode || '', accParts: s.accParts || [], whiteImgPath: s.whiteImgDir || '' }]
+                skus: [{ idx: i, name: siSkuFullName(s), compDesc: siSkuFullName(s), itemCode: s.itemCode || '', accParts: s.accParts || [], whiteImgPath: s.whiteImgDir || '', mainQty: mainQtyOf(s, s.spec2 || s.skuDisplayName || '') }]
             });
             let lastErr = '失败';
             for (let attempt = 1; attempt <= RETRY; attempt++) {
@@ -840,7 +840,7 @@ async function siRegenOne(idx) {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 refImagePath: ref, productType, bagImagePath, accImagePaths, waterImagePath, bgStyle, templateId: siPickBatchTemplate(),
-                skus: [{ idx, name: siSkuFullName(s), compDesc: siSkuFullName(s), itemCode: s.itemCode || '', accParts: s.accParts || [], whiteImgPath: s.whiteImgDir || '' }]
+                skus: [{ idx, name: siSkuFullName(s), compDesc: siSkuFullName(s), itemCode: s.itemCode || '', accParts: s.accParts || [], whiteImgPath: s.whiteImgDir || '', mainQty: mainQtyOf(s, s.spec2 || s.skuDisplayName || '') }]
             })
         });
         const data = await resp.json();
