@@ -259,19 +259,23 @@ public class LyTextService {
             + "【批量件清单（编码 | 名称）——可按不同数量打包成不同型号】\n%s\n"
             + "【方案结构】每套方案含两个维度：\n"
             + "- mainItems：全部主件，每个给 itemCode 和 specName（颜色/款式简名）\n"
-            + "- models：一组型号（所有主件共享），每个给 specName 和 components。"
+            + "- models：一组型号（所有主件共享），每个给 specName、components 和 mainQty。"
             + "components 只列【配件/批量件】编码及数量（不含主件本身）。型号按\"配件由少到多\"阶梯排列，第一个通常是\"单品\"（components 为空）。\n"
+            + "- **mainQty（主件数量/几件装）**：整数，表示该型号是同一主件卖【几个】(单件装=1，两件装=2，三件装=3…)。"
+            + "绝大多数型号是 1；只有做\"多件装\"档位时才 >1。**mainQty 与 components 是正交两维**："
+            + "mainQty 管主件卖几个、components 管加装了哪些配件，不要混淆。做多件装档时 specName 用固定格式\"N件装\"(如\"三件装\")，"
+            + "并把 mainQty 设为对应整数；单件档 mainQty 省略或填 1。**严禁把主件数量写进 components(那是配件)。**\n"
             + "【硬约束】components 里的 itemCode 只能取自【共享配件清单】和【批量件清单】，绝对禁止放入整支花洒/喷头主体/整机。\n"
             + "【多套方案差异化策略】\n"
             + "- 精简款：3-4个型号，主推单品和热门组合\n"
             + "- 全阶梯款：单品→+配件1→+配件2→+全配件，覆盖所有价格带\n"
             + "- 套餐款：突出高配组合（多配件/多滤芯打包），拉高客单价\n"
-            + "- 数量档位测试款：同一主件配批量件的不同数量（1/3/5/10个装），铺多档跑需求数据\n"
+            + "- 数量档位测试款：同一主件卖不同【件数】(单件装/两件装/三件装…)，每档用 mainQty 标注件数(1/2/3)、specName 写\"N件装\"，铺多档跑需求数据\n"
             + "%s"
             + "【输出格式】严格按JSON，不要其他内容：\n"
             + "{\"plans\":[{\"planName\":\"方案名\",\"description\":\"30字内策略说明\","
             + "\"mainItems\":[{\"itemCode\":\"主件编码\",\"specName\":\"银色\"}],"
-            + "\"models\":[{\"specName\":\"单品\",\"components\":[]},{\"specName\":\"+配件\",\"components\":[{\"itemCode\":\"配件编码\",\"qty\":1}]}]}]}\n"
+            + "\"models\":[{\"specName\":\"单品\",\"mainQty\":1,\"components\":[]},{\"specName\":\"+配件\",\"mainQty\":1,\"components\":[{\"itemCode\":\"配件编码\",\"qty\":1}]},{\"specName\":\"三件装\",\"mainQty\":3,\"components\":[]}]}]}\n"
             + "itemCode 必须用清单里的真实编码，不要编造。",
             planCount, mainCount, planCount, planCount, sellingBlock,
             category, productName, brand, material, mainLines, accLines, batchLines, namingSpec);
@@ -327,11 +331,15 @@ public class LyTextService {
         String modelSpec = String.valueOf(model.getOrDefault("specName", ""));
         List<Map<String, Object>> comps = asMapList(model.get("components"));
 
+        // 主件数量（几件装）：LLM 结构化输出的 mainQty 整数，缺省/非法回退 1。
+        int mainQty = model.get("mainQty") instanceof Number n ? Math.max(1, n.intValue()) : 1;
+
         SkuItem item = new SkuItem();
         item.setName(mainSpec);
         item.setSkuDisplayName(mainSpec + (modelSpec.isBlank() ? "" : "-" + modelSpec));
         item.setSpec1(mainSpec);
         item.setSpec2(modelSpec);
+        item.setMainQty(mainQty);
         item.setRole(SkuRole.MAIN);
 
         StringBuilder code = new StringBuilder(mainCode);

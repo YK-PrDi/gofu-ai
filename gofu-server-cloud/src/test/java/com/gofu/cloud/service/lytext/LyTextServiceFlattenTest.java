@@ -80,4 +80,26 @@ class LyTextServiceFlattenTest {
         assertTrue(svc.flattenPlans(Map.of()).isEmpty());
         assertTrue(svc.flattenPlans(Map.of("plans", "not-a-list")).isEmpty());
     }
+
+    @Test
+    void flatten_mainQty_多件档取值_缺省与非法回退1() {
+        // 型号带 mainQty=3(三件装)、一个不带(默认1)、一个非法(回退1)
+        Map<String, Object> llm = Map.of("plans", List.of(Map.of(
+            "planName", "数量档位测试款",
+            "mainItems", List.of(Map.of("itemCode", "GF-挂钩", "specName", "红色挂钩")),
+            "models", List.of(
+                Map.of("specName", "单品", "components", List.of()),                       // 无 mainQty → 1
+                Map.of("specName", "三件装", "mainQty", 3, "components", List.of()),        // mainQty=3
+                Map.of("specName", "乱值", "mainQty", "x", "components", List.of()),        // 非法 → 1
+                Map.of("specName", "零值", "mainQty", 0, "components", List.of())           // 0 → 回退 1
+            )
+        )));
+        List<SkuPlan> plans = svc.flattenPlans(llm);
+        List<SkuItem> items = plans.get(0).getItems();
+        assertEquals(4, items.size());
+        assertEquals(1, items.get(0).getMainQty(), "无 mainQty 默认 1");
+        assertEquals(3, items.get(1).getMainQty(), "三件装取 3");
+        assertEquals(1, items.get(2).getMainQty(), "非法值回退 1");
+        assertEquals(1, items.get(3).getMainQty(), "0 回退 1(Math.max)");
+    }
 }

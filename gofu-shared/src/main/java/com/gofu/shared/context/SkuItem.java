@@ -32,6 +32,13 @@ public class SkuItem {
     private String spec2;
 
     /**
+     * 主件数量（几件装）。默认 1=单件；多件档(如"三件装")由 LLM 结构化输出，
+     * 下游成本按 mainQty×主件单价、SKU 图按 mainQty 贴 N 个主件框。
+     * 老数据/未设置天然为 1，不断链（雷区 4）。取代前端 mainQtyFromSpec 正则猜文本。
+     */
+    private int mainQty = 1;
+
+    /**
      * 组合规格编码，格式 `主件码+配件码*N`（如 "GF-099-灰+052底座*1+088滤芯*5"）。
      * ⚠️ 格式错误会导致配件白底图匹配失败、上架被拒（雷区 5）。
      */
