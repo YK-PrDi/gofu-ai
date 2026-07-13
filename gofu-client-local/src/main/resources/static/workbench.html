@@ -401,7 +401,7 @@
             </div></td>
             <td>{{ it.skuDisplayName || it.name }}</td>
             <td>{{ it.spec1 }}</td>
-            <td>{{ it.spec2 || '无' }}</td>
+            <td>{{ (it.accParts && it.accParts.length) ? it.spec2 : '无' }}</td>
             <td class="num">{{ fmt(it.cost) }}</td>
             <td class="num"><input type="number" class="price-in" :class="{edited:it.__edited}" v-model.number="it.groupPrice" min="0" step="0.1" @input="onPrice(idx)" /></td>
           </tr>
@@ -513,6 +513,19 @@
   </div>
 </div>
 <script>
+// 从型号名解析主品数量："单品"→1、"双件组合"→2、"三件组合"→3、"N件组合/N件套"→N。
+// 锚定"件组合/件套"或"单品"，避免误匹配主件名里的"单品"字样。返回≥1。
+function mainQtyFromSpec(spec) {
+  const s = String(spec || '');
+  const m = s.match(/([0-9]+|[一二两三四五六七八九十]+)\s*件\s*(?:组合|套)/);
+  if (m) {
+    const cn = { 一:1, 二:2, 两:2, 三:3, 四:4, 五:5, 六:6, 七:7, 八:8, 九:9, 十:10 };
+    const t = m[1];
+    const n = /^[0-9]+$/.test(t) ? parseInt(t, 10) : (cn[t] || 1);
+    return Math.max(1, n);
+  }
+  return 1; // 单品/标准款/无匹配 → 1
+}
 const { createApp } = Vue;
 createApp({
   data() {
@@ -1006,7 +1019,8 @@ createApp({
     async fillCostAndPrice() {
       const plans = this.plans;
       if (!plans.length) return;
-      const productType = this.cat.path.join('>').includes('花洒') ? '花洒' : '架类';
+      const cp = this.cat.path.join('>');
+      const productType = cp.includes('花洒') ? '花洒' : (cp.includes('代发') ? '代发' : '架类');
       try {
         for (const plan of plans) {
           await this.fillOnePlan(plan.items || [], productType);
@@ -1021,6 +1035,9 @@ createApp({
       if (!items.length) return;
       // 主件码 = itemCode 去掉 "+配件*N" 后缀（组合码首段）
       const mainCodeOf = it => (it.itemCode || '').split('+')[0];
+      // 主品数量：从型号名(spec2)解析"单品/双件组合/三件组合/N件组合"→1/2/3/N。
+      // 数量档位策略下同一主品出多档，主件成本须×数量（否则1/2/3件成本相同=bug）。
+      const parseMainQty = it => mainQtyFromSpec(it.spec2 || it.skuDisplayName || '');
       // ① 收集所有编码（主件+配件）批量查单码成本/重量
       const codes = new Set();
       items.forEach(it => {
@@ -1040,7 +1057,7 @@ createApp({
       const comboSkus = items.map(it => {
         const comps = [];
         const mc = mainCodeOf(it);
-        if (mc) comps.push({ itemCode: mc, qty: 1, name: it.spec1, cost: costMap[mc]?.cost || 0, weight: costMap[mc]?.weight || 0 });
+        if (mc) comps.push({ itemCode: mc, qty: parseMainQty(it), name: it.spec1, cost: costMap[mc]?.cost || 0, weight: costMap[mc]?.weight || 0 });
         (it.accParts || []).forEach(a => comps.push({ itemCode: a.code, qty: a.qty || 1, cost: costMap[a.code]?.cost || 0, weight: costMap[a.code]?.weight || 0 }));
         return { name: it.skuDisplayName || it.name || '', components: comps };
       });

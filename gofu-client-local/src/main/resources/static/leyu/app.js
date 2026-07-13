@@ -1,5 +1,19 @@
 // ── LY-Automation 上新模式前端逻辑 ──
 
+// 从型号名解析主品数量："单品"→1、"双件组合"→2、"三件组合"→3、"N件组合/N件套"→N。
+// 数量档位策略下同一主品出多档，主件成本须×数量（否则1/2/3件成本相同=bug）。
+function mainQtyFromSpec(spec) {
+    const s = String(spec || '');
+    const m = s.match(/([0-9]+|[一二两三四五六七八九十]+)\s*件\s*(?:组合|套)/);
+    if (m) {
+        const cn = { 一:1, 二:2, 两:2, 三:3, 四:4, 五:5, 六:6, 七:7, 八:8, 九:9, 十:10 };
+        const t = m[1];
+        const n = /^[0-9]+$/.test(t) ? parseInt(t, 10) : (cn[t] || 1);
+        return Math.max(1, n);
+    }
+    return 1;
+}
+
 // HTML 属性转义
 function ecEscAttr(str) {
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -973,7 +987,7 @@ async function lyAutoRun() {
                     itemCode: codeStr, accParts: parts, stock: 8888, groupPrice: 0, singlePrice: 0, imgDir: ''
                 });
                 // 组件清单（主件+配件）供成本计算
-                const comps = [{ itemCode: main.itemCode, qty: 1, cost: mc.cost, weight: mc.weight }]
+                const comps = [{ itemCode: main.itemCode, qty: mainQtyFromSpec(ld.name), cost: mc.cost, weight: mc.weight }]
                     .concat(parts.map(p => {
                         const pc = costMap[p.code] || { cost: 0, weight: 0 };
                         return { itemCode: p.code, qty: p.qty, cost: pc.cost, weight: pc.weight };
@@ -1342,13 +1356,29 @@ function spIsFilter(name) {
     return typeof name === 'string' && name.includes('滤芯');
 }
 
-// 组合层运费：花洒固定3；架类按组合总重阶梯；总重0则0
+// 组合层运费：花洒固定3；代发走鹏盛阶梯；其他300g=2.3每满100g+0.15；总重0则0。
+// 与后端 KuaimaiController.calcFreight 保持一致（用克整数避免浮点漂移）。
 function spFreight(totalWeight) {
     if (erpProductType === '花洒') return 3.0;
     const w = parseFloat(totalWeight) || 0;
+    if (erpProductType === '代发') return spPengshengFreight(w);
     if (w <= 0) return 0;
-    const over = Math.ceil(Math.max(0, w - 0.3) / 0.1);
-    return Math.round((2.4 + over * 0.15) * 100) / 100;
+    const grams = Math.round(w * 1000);
+    const over = Math.max(0, Math.ceil((grams - 300) / 100));
+    return Math.round((2.3 + over * 0.15) * 100) / 100;
+}
+
+// 鹏盛代发阶梯：就近取档、落两档中点向上取贵档（<2.5取2kg价、≥2.5取3kg价）；超3kg封顶6.2。
+function spPengshengFreight(weight) {
+    const w = parseFloat(weight) || 0;
+    if (w <= 0) return 0;
+    const tiers = [[0.3,2.0],[0.5,2.3],[1.0,2.9],[1.5,4.1],[2.0,4.8],[3.0,6.2]];
+    for (let i = 0; i < tiers.length; i++) {
+        const next = (i + 1 < tiers.length) ? tiers[i + 1][0] : Infinity;
+        const splitUp = next === Infinity ? Infinity : (tiers[i][0] + next) / 2;
+        if (w < splitUp) return tiers[i][1];
+    }
+    return tiers[tiers.length - 1][1];
 }
 
 // 计算单个组合SKU的预览成本：材料(组件×数量) + 固定包材 + 组合层运费(按总重一次)
@@ -1402,7 +1432,7 @@ function spRenderTable(idx) {
 
     // 单个格子成本 = 主件 + 该型号配件 + 固定成本 + 运费（复用 spComboCost）
     const cellCost = (mainCode, model) => {
-        const comps = [{ itemCode: mainCode, qty: 1 }, ...(model.components || [])];
+        const comps = [{ itemCode: mainCode, qty: mainQtyFromSpec(model.specName) }, ...(model.components || [])];
         return spComboCost(comps);
     };
 
@@ -1498,7 +1528,7 @@ async function spConfirm() {
             .map(s => ({ itemCode: s.itemCode, cost: parseFloat(s.cost) || 0 }));
 
         // 矩阵笛卡尔积展平：每个 {主件 × 型号} = 一个格子 SKU
-        const cellComp = (mainCode, model) => [{ itemCode: mainCode, qty: 1 }, ...(model.components || [])]
+        const cellComp = (mainCode, model) => [{ itemCode: mainCode, qty: mainQtyFromSpec(model.specName) }, ...(model.components || [])]
             .map(c => {
                 const item = spItemByCode(c.itemCode);
                 return {
@@ -2064,7 +2094,8 @@ function erpSortByUsage(rows) {
 function openErpModal() {
     if (!lstCatPath.length) { alert('请先选择商品品类再进行选品'); return; }
     const catStr = lstCatPath.join('');
-    erpProductType = (catStr.includes('花洒') || catStr.includes('淋浴')) ? '花洒' : '架类';
+    erpProductType = (catStr.includes('花洒') || catStr.includes('淋浴')) ? '花洒'
+                   : (catStr.includes('代发') ? '代发' : '架类');
     erpPage = 1; erpKeyword = ''; erpSelectedSkus = [];
     erpAllSkuRows = []; erpTotalItems = 0;
     document.getElementById('erpSearchInput').value = '';
