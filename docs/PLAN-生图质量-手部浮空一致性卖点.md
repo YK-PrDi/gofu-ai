@@ -1,7 +1,11 @@
 # PLAN：生图质量四条（手部违和 / 锅盖浮空 / 一致性+卖点文案 / 优化羽刃分析）
 
-> 状态：**待开工**。来自用户 07.12 反馈，本 session 未碰，仅记录避免丢上下文。
-> 全在 gofu-server-cloud 生图侧（FlowController / ImageGenerationService / lyimage）。
+> 状态：**#1#2 已改待实机验证；#3卖点=非prompt问题(查日志)；#3一致性/#4 暂缓**（07.13）。
+> - #1 手部违和：强化 ImageGenerationService:518 手部范例(逻辑自洽/宁可不加手)。已改。
+> - #2 锅盖浮空：真因是架类SKU走 image-shelf-main.txt、缺收纳物防浮空约束(structLock只在主图流)。已补【收纳物·物理支撑·严禁浮空】。
+> - #3 卖点文案缺失：排查 withText 开关正常(硬编码true)、字段完整→非prompt bug，属降级本地兜底(有warn日志)或模型渲染，需实机看日志。
+> - #3 一致性 / #4 羽刃分析：约束已饱和(8维物理约束/卖点→画面已一一对应)，堆字会稀释，等 #1#2 实机效果再决定。
+> 全在 gofu-server-cloud 生图侧。
 
 ## Context（为什么做）
 用户对比羽刃(yuren=全生图参考)后指出我们主图/SKU 图仍有质量问题。羽刃 6 条卖点样例：
