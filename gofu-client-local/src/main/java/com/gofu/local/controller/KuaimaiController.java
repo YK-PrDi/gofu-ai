@@ -316,7 +316,7 @@ public class KuaimaiController {
      * POST /api/erp/calc-combo-cost
      * 入参: { productType, fixedAccessories:[{itemCode,cost}], skus:[{name, components:[{itemCode,qty,cost,weight}]}] }
      * 规则: 材料成本=Σ(组件cost×qty)+Σ固定项cost；总重=Σ(组件weight×qty)；
-     *       运费=花洒?3:(总重<=0?0:阶梯)；SKU成本=材料+运费
+     *       运费=按品类(花洒+3 / 代发鹏盛阶梯 / 其他300g=2.3每100g+0.15)算一次；SKU成本=材料+运费
      */
     @PostMapping("/calc-combo-cost")
     @SuppressWarnings("unchecked")
@@ -373,16 +373,8 @@ public class KuaimaiController {
                     breakdown.add(b);
                 }
 
-                // 运费：组合层算一次
-                double freight;
-                if ("花洒".equals(productType)) {
-                    freight = 3.0;
-                } else if (totalWeight <= 0) {
-                    freight = 0;
-                } else {
-                    long over = (long) Math.ceil(Math.max(0, totalWeight - 0.3) / 0.1);
-                    freight = round2(2.4 + over * 0.15);
-                }
+                // 运费：组合层按品类算一次
+                double freight = calcFreight(productType, totalWeight);
 
                 double cost = round2(materialCost + accessoryCost + freight);
 
@@ -476,6 +468,47 @@ public class KuaimaiController {
             } catch (NumberFormatException e) { return 1; }
         }
         return 1;
+    }
+
+    /**
+     * 鹏盛代发阶梯运费表：{档位重量kg, 运费元}。0.2kg/2.5kg 在原表中为空列，不是档位。
+     * 取档规则（用户口径）：按总重就近取档，落在两相邻档中点时向上取贵的那档——
+     * 如 2~3kg 之间，<2.5kg 取 2kg 价(4.8)，≥2.5kg 取 3kg 价(6.2)。超 3kg 暂封顶 6.2。
+     */
+    private static final double[][] PENGSHENG_TIERS = {
+        {0.3, 2.0}, {0.5, 2.3}, {1.0, 2.9}, {1.5, 4.1}, {2.0, 4.8}, {3.0, 6.2}
+    };
+
+    static double pengshengFreight(double weight) {
+        if (weight <= 0) return 0;
+        for (int i = 0; i < PENGSHENG_TIERS.length; i++) {
+            double tierW = PENGSHENG_TIERS[i][0];
+            double nextW = (i + 1 < PENGSHENG_TIERS.length) ? PENGSHENG_TIERS[i + 1][0] : Double.MAX_VALUE;
+            double splitUp = (nextW == Double.MAX_VALUE) ? Double.MAX_VALUE : (tierW + nextW) / 2.0;
+            if (weight < splitUp) return PENGSHENG_TIERS[i][1];
+        }
+        return PENGSHENG_TIERS[PENGSHENG_TIERS.length - 1][1]; // 兜底：>3kg 封顶
+    }
+
+    /**
+     * 其他品类（非花洒非代发）基础运费：300g=2.3，之后每满 100g +0.15（不足 100g 向上取整）。
+     * 用克整数运算，避免 0.4-0.3≠0.1 这类浮点漂移把档位算多一级。
+     */
+    static double otherFreight(double weight) {
+        if (weight <= 0) return 0;
+        long grams = Math.round(weight * 1000);
+        long over  = Math.max(0, (long) Math.ceil((grams - 300) / 100.0));
+        return 2.3 + over * 0.15;
+    }
+
+    /**
+     * 按品类算运费（组合层算一次）。
+     * 花洒：固定 +3；代发：加鹏盛阶梯运费（按总重查表）；其他：基础递增（otherFreight）。
+     */
+    double calcFreight(String productType, double totalWeight) {
+        if ("花洒".equals(productType)) return 3.0;
+        if ("代发".equals(productType)) return round2(pengshengFreight(totalWeight));
+        return round2(otherFreight(totalWeight));
     }
 
     /** 搜索匹配优先级：精确匹配=0 > 前缀匹配=1 > 包含=2。 */

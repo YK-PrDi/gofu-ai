@@ -54,4 +54,41 @@ class KuaimaiControllerTest {
         // 对照错误算法（放大 15 倍）
         assertEquals(19.5, packPrice * qty, 0.001);
     }
+
+    @Test
+    void 鹏盛阶梯_档位命中取对应价() {
+        assertEquals(2.0, KuaimaiController.pengshengFreight(0.3), 0.001);
+        assertEquals(2.3, KuaimaiController.pengshengFreight(0.5), 0.001);
+        assertEquals(2.9, KuaimaiController.pengshengFreight(1.0), 0.001);
+        assertEquals(4.1, KuaimaiController.pengshengFreight(1.5), 0.001);
+        assertEquals(4.8, KuaimaiController.pengshengFreight(2.0), 0.001);
+        assertEquals(6.2, KuaimaiController.pengshengFreight(3.0), 0.001);
+    }
+
+    @Test
+    void 鹏盛阶梯_中点向上取贵档() {
+        // 用户口径：2~3kg 间 <2.5 取 2kg 价(4.8)，≥2.5 取 3kg 价(6.2)
+        assertEquals(4.8, KuaimaiController.pengshengFreight(2.49), 0.001);
+        assertEquals(6.2, KuaimaiController.pengshengFreight(2.5),  0.001);
+        // 其余相邻档中点同规则：0.5↔1.0 中点 0.75
+        assertEquals(2.3, KuaimaiController.pengshengFreight(0.74), 0.001);
+        assertEquals(2.9, KuaimaiController.pengshengFreight(0.75), 0.001);
+    }
+
+    @Test
+    void 鹏盛阶梯_边界与超重兜底() {
+        assertEquals(0,   KuaimaiController.pengshengFreight(0),   0.001); // 无重量→0
+        assertEquals(2.0, KuaimaiController.pengshengFreight(0.1), 0.001); // 低于最小档→最小档价
+        assertEquals(6.2, KuaimaiController.pengshengFreight(5.0), 0.001); // 超 3kg→封顶
+    }
+
+    @Test
+    void 其他品类运费_基础300g等于2point3且克整数无浮点漂移() {
+        // 其他（非花洒非代发）：300g=2.3，之后每满 100g +0.15
+        assertEquals(2.30, KuaimaiController.otherFreight(0.3), 0.001);
+        assertEquals(2.45, KuaimaiController.otherFreight(0.4), 0.001); // 曾因 0.4-0.3≠0.1 误算成 2.6
+        assertEquals(2.60, KuaimaiController.otherFreight(0.5), 0.001);
+        assertEquals(2.45, KuaimaiController.otherFreight(0.35), 0.001); // 不足100g向上取整
+        assertEquals(0,    KuaimaiController.otherFreight(0),   0.001);
+    }
 }
