@@ -22,13 +22,16 @@ public class SemiAutoController {
     private final SemiAutoService semiAutoService;
     private final com.gofu.local.service.listing.StoreService storeService;
     private final com.gofu.local.service.listing.ListingService listingService;
+    private final com.gofu.local.service.listing.SemiAutoOrchestrator orchestrator;
 
     public SemiAutoController(SemiAutoService semiAutoService,
                               com.gofu.local.service.listing.StoreService storeService,
-                              com.gofu.local.service.listing.ListingService listingService) {
+                              com.gofu.local.service.listing.ListingService listingService,
+                              com.gofu.local.service.listing.SemiAutoOrchestrator orchestrator) {
         this.semiAutoService = semiAutoService;
         this.storeService = storeService;
         this.listingService = listingService;
+        this.orchestrator = orchestrator;
     }
 
     /**
@@ -155,5 +158,45 @@ public class SemiAutoController {
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(Map.of("error", "登录启动失败：" + e.getMessage()));
         }
+    }
+
+    // ── 编排（P5）──────────────────────────────────────────────
+
+    /** 预检：扫描+按店匹配+完整性校验，不真上新。入参 {@code { rootPath, skusByProduct? }}。 */
+    @PostMapping("/preflight")
+    public ResponseEntity<?> preflight(@RequestBody Map<String, Object> body) {
+        String rootPath = String.valueOf(body.getOrDefault("rootPath", ""));
+        if (rootPath.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "rootPath 不能为空"));
+        return ResponseEntity.ok(Map.of("outcomes", orchestrator.preflight(rootPath, parseSkusByProduct(body))));
+    }
+
+    /** 正式批量上新：预检通过的商品串行错开上新。入参同 preflight。 */
+    @PostMapping("/run")
+    public ResponseEntity<?> run(@RequestBody Map<String, Object> body) {
+        String rootPath = String.valueOf(body.getOrDefault("rootPath", ""));
+        if (rootPath.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "rootPath 不能为空"));
+        return ResponseEntity.ok(Map.of("outcomes", orchestrator.run(rootPath, parseSkusByProduct(body))));
+    }
+
+    /** 解析 {@code skusByProduct: { 商品名: [{name,imgPath,price}] }}。 */
+    @SuppressWarnings("unchecked")
+    private Map<String, List<com.gofu.local.model.SemiAutoScan.SkuCheck>> parseSkusByProduct(Map<String, Object> body) {
+        Map<String, List<com.gofu.local.model.SemiAutoScan.SkuCheck>> out = new java.util.LinkedHashMap<>();
+        Object raw = body.get("skusByProduct");
+        if (!(raw instanceof Map)) return out;
+        for (var e : ((Map<String, Object>) raw).entrySet()) {
+            if (!(e.getValue() instanceof List)) continue;
+            List<com.gofu.local.model.SemiAutoScan.SkuCheck> list = new java.util.ArrayList<>();
+            for (Object o : (List<Object>) e.getValue()) {
+                if (!(o instanceof Map)) continue;
+                Map<String, Object> m = (Map<String, Object>) o;
+                list.add(new com.gofu.local.model.SemiAutoScan.SkuCheck(
+                        m.get("name") == null ? "" : String.valueOf(m.get("name")),
+                        m.get("imgPath") == null ? "" : String.valueOf(m.get("imgPath")),
+                        m.get("price") instanceof Number n ? n.doubleValue() : parseD(m.get("price"))));
+            }
+            out.put(e.getKey(), list);
+        }
+        return out;
     }
 }

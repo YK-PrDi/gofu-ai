@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>半自动批量上新</title>
+  <script src="https://unpkg.com/vue@3.4.38/dist/vue.global.prod.js"></script>
+  <style>
+    :root{--bd:#d0d3d9;--dim:#888;--pri:#2563eb;--ok:#16a34a;--err:#dc2626;--warn:#d97706}
+    *{box-sizing:border-box}
+    body{font-family:system-ui,"Microsoft YaHei",sans-serif;margin:0;padding:16px;color:#222;background:#f7f8fa;font-size:14px}
+    h2{margin:0 0 12px}h3{margin:16px 0 8px;font-size:15px}
+    .card{background:#fff;border:1px solid var(--bd);border-radius:8px;padding:14px;margin-bottom:14px}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    input[type=text]{flex:1;min-width:280px;padding:7px 10px;border:1px solid var(--bd);border-radius:6px;font-size:13px}
+    button{padding:7px 14px;border:1px solid var(--pri);background:var(--pri);color:#fff;border-radius:6px;cursor:pointer;font-size:13px}
+    button.ghost{background:#fff;color:var(--pri)}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{border:1px solid #eee;padding:6px 8px;text-align:left;vertical-align:top}
+    th{background:#fafbfc}
+    .tag{display:inline-block;padding:1px 7px;border-radius:4px;font-size:12px}
+    .t-ok{background:#f0fdf4;color:var(--ok)}.t-err{background:#fef2f2;color:var(--err)}
+    .t-warn{background:#fffbeb;color:var(--warn)}.t-dim{background:#f3f4f6;color:var(--dim)}
+    .miss{color:var(--err);font-size:12px;margin:2px 0}
+    .msg{font-size:12px}.msg.ok{color:var(--ok)}.msg.err{color:var(--err)}
+  </style>
+</head>
+<body>
+<div id="app">
+  <h2>半自动批量上新</h2>
+
+  <!-- 店铺登录面板 -->
+  <div class="card">
+    <h3>店铺（{{ stores.length }}）</h3>
+    <div class="row" style="margin-bottom:8px">
+      <input type="text" v-model="newStore.name" placeholder="店铺名（同大文件夹一级子目录名）">
+      <input type="text" v-model="newStore.profile" placeholder="profile（如 store_13）" style="min-width:140px;flex:0">
+      <button class="ghost" @click="addStore" :disabled="!newStore.name||!newStore.profile">新增店铺</button>
+    </div>
+    <table v-if="stores.length">
+      <thead><tr><th>店铺名</th><th>profile</th><th>登录态</th><th>操作</th></tr></thead>
+      <tbody>
+        <tr v-for="s in stores" :key="s.profile">
+          <td>{{ s.name }}</td><td>{{ s.profile }}</td>
+          <td><span class="tag" :class="s.loggedIn?'t-ok':'t-dim'">{{ s.loggedIn?'已登录':'未登录' }}</span></td>
+          <td><button class="ghost" @click="loginStore(s)">登录/重登</button></td>
+        </tr>
+      </tbody>
+    </table>
+    <span v-else class="msg">还没有店铺，先新增并登录。</span>
+  </div>
+
+  <!-- 选大文件夹 -->
+  <div class="card">
+    <h3>素材大文件夹</h3>
+    <div class="row">
+      <input type="text" v-model="rootPath" placeholder="粘贴大文件夹绝对路径（内含 店铺名/商品/主图·详情·sku）">
+      <button @click="preflight" :disabled="!rootPath||busy">预检</button>
+      <button @click="run" :disabled="!canRun||busy">开始批量上新</button>
+    </div>
+    <p class="msg" :class="msgType">{{ msg }}</p>
+    <p class="msg" style="color:var(--dim)">约定：大文件夹 → 店铺名子目录 → 商品文件夹 → 主图/详情/(sku可选，缺则需先用生图流补)。缺一不上（完整性强校验）。</p>
+  </div>
+
+  <!-- 预检/上新结果 -->
+  <div class="card" v-if="outcomes.length">
+    <h3>结果（{{ readyCount }} 齐全 / {{ outcomes.length }} 商品）</h3>
+    <table>
+      <thead><tr><th>店铺</th><th>商品</th><th>状态</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr v-for="(o,i) in outcomes" :key="i">
+          <td>{{ o.shopName }}</td><td>{{ o.productName }}</td>
+          <td><span class="tag" :class="statusClass(o.status)">{{ statusText(o.status) }}</span>
+            <div v-if="o.taskId" style="font-size:11px;color:var(--dim)">{{ o.taskId }}</div></td>
+          <td><div v-for="(m,j) in (o.missing||[])" :key="j" class="miss">· {{ m }}</div></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const { createApp } = Vue;
+createApp({
+  data() {
+    return {
+      stores: [], rootPath: '', outcomes: [], busy: false,
+      msg: '', msgType: '', canRun: false,
+      newStore: { name: '', profile: '' },
+    };
+  },
+  computed: {
+    readyCount() {
+      return this.outcomes.filter(o => o.status === 'ready' || o.status === 'listing_started').length;
+    },
+  },
+  mounted() { this.loadStores(); },
+  methods: {
+    async api(url, body) {
+      const r = await fetch(url, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body||{}) });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || ('HTTP '+r.status));
+      return d;
+    },
+    async loadStores() {
+      try { const d = await (await fetch('/api/semi-auto/stores')).json(); this.stores = d.stores || []; }
+      catch (e) { this.setMsg('加载店铺失败：'+e.message, 'err'); }
+    },
+    async addStore() {
+      try {
+        await this.api('/api/semi-auto/stores', { name: this.newStore.name.trim(), profile: this.newStore.profile.trim() });
+        this.newStore = { name:'', profile:'' };
+        await this.loadStores();
+        this.setMsg('店铺已保存', 'ok');
+      } catch (e) { this.setMsg('保存店铺失败：'+e.message, 'err'); }
+    },
+    async loginStore(s) {
+      try { await this.api('/api/semi-auto/stores/login', { profile: s.profile });
+        this.setMsg('已启动「'+s.name+'」登录，请在弹出的浏览器完成扫码，完成后刷新登录态', 'ok');
+        setTimeout(() => this.loadStores(), 15000);
+      } catch (e) { this.setMsg('登录启动失败：'+e.message, 'err'); }
+    },
+    async preflight() {
+      this.busy = true; this.canRun = false;
+      try {
+        const d = await this.api('/api/semi-auto/preflight', { rootPath: this.rootPath.trim() });
+        this.outcomes = d.outcomes || [];
+        this.canRun = this.readyCount > 0;
+        this.setMsg('预检完成：'+this.readyCount+' 个商品齐全可上新，其余见下方说明', this.canRun?'ok':'err');
+      } catch (e) { this.setMsg('预检失败：'+e.message, 'err'); }
+      finally { this.busy = false; }
+    },
+    async run() {
+      if (!confirm('确认对预检齐全的商品批量上新？将逐店逐商品串行操作真实商家后台。')) return;
+      this.busy = true;
+      try {
+        const d = await this.api('/api/semi-auto/run', { rootPath: this.rootPath.trim() });
+        this.outcomes = d.outcomes || [];
+        const started = this.outcomes.filter(o => o.status==='listing_started').length;
+        this.setMsg('已启动 '+started+' 个商品的上新（各自 taskId 见下方，进度在商家后台/日志）', 'ok');
+      } catch (e) { this.setMsg('批量上新失败：'+e.message, 'err'); }
+      finally { this.busy = false; }
+    },
+    setMsg(m, t) { this.msg = m; this.msgType = t||''; },
+    statusText(s) {
+      return { ready:'齐全待上', listing_started:'已启动上新', blocked:'缺素材·已拦',
+               shop_unmatched:'店铺未匹配', not_logged_in:'店铺未登录' }[s] || s;
+    },
+    statusClass(s) {
+      if (s==='ready'||s==='listing_started') return 't-ok';
+      if (s==='blocked') return 't-err';
+      return 't-warn';
+    },
+  },
+}).mount('#app');
+</script>
+</body>
+</html>
