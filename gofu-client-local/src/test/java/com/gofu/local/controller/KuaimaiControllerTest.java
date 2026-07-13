@@ -83,12 +83,14 @@ class KuaimaiControllerTest {
     }
 
     @Test
-    void 其他品类运费_基础300g等于2point3且克整数无浮点漂移() {
-        // 其他（非花洒非代发）：300g=2.3，之后每满 100g +0.15
-        assertEquals(2.30, KuaimaiController.otherFreight(0.3), 0.001);
-        assertEquals(2.45, KuaimaiController.otherFreight(0.4), 0.001); // 曾因 0.4-0.3≠0.1 误算成 2.6
-        assertEquals(2.60, KuaimaiController.otherFreight(0.5), 0.001);
-        assertEquals(2.45, KuaimaiController.otherFreight(0.35), 0.001); // 不足100g向上取整
-        assertEquals(0,    KuaimaiController.otherFreight(0),   0.001);
+    void 其他品类运费_满100g才加_不满不算() {
+        // 其他（非花洒非代发）：300g=2.3，之后【满100g才+0.15】，不满不加（07.13修正）
+        assertEquals(2.30, KuaimaiController.otherFreight(0.3),  0.001); // 300g 基础
+        assertEquals(2.30, KuaimaiController.otherFreight(0.35), 0.001); // 350g 不满100g→不加
+        assertEquals(2.30, KuaimaiController.otherFreight(0.399),0.001); // 399g 仍不满→2.3
+        assertEquals(2.45, KuaimaiController.otherFreight(0.4),  0.001); // 400g 满1个100g→+0.15
+        assertEquals(2.45, KuaimaiController.otherFreight(0.499),0.001); // 499g 仍只满1个
+        assertEquals(2.60, KuaimaiController.otherFreight(0.5),  0.001); // 500g 满2个
+        assertEquals(0,    KuaimaiController.otherFreight(0),    0.001);
     }
 }

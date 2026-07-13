@@ -491,13 +491,14 @@ public class KuaimaiController {
     }
 
     /**
-     * 其他品类（非花洒非代发）基础运费：300g=2.3，之后每满 100g +0.15（不足 100g 向上取整）。
-     * 用克整数运算，避免 0.4-0.3≠0.1 这类浮点漂移把档位算多一级。
+     * 其他品类（非花洒非代发）基础运费：300g=2.3，之后【每满 100g】才 +0.15，不满 100g 不加。
+     * 用克整数 + floor：如 350g→满0个100g→2.3；400g→满1个→2.45；399g→仍2.3。
+     * （07.13 测试修正：原 ceil 会把不满 100g 也进一级，多算钱。）
      */
     static double otherFreight(double weight) {
         if (weight <= 0) return 0;
         long grams = Math.round(weight * 1000);
-        long over  = Math.max(0, (long) Math.ceil((grams - 300) / 100.0));
+        long over  = Math.max(0, (grams - 300) / 100);   // 整数除法=floor，满100g才进一级
         return 2.3 + over * 0.15;
     }
 
