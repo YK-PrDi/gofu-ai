@@ -46,4 +46,26 @@ public final class SemiAutoScan {
             List<ShopGroup> shops,
             List<String> warnings // 全局警告（如某店铺名未匹配 stores.json）
     ) {}
+
+    /** 一个待上新 SKU 的完整性输入：图/名/价三要素。 */
+    public record SkuCheck(
+            String name,      // SKU 名
+            String imgPath,   // SKU 图路径（空=缺）
+            double price      // 售价（元，<=0 视为缺）
+    ) {}
+
+    /**
+     * 商品上新前完整性校验结果（P3 北极星）。
+     * ready=true 才允许上新；否则 missing 明确列出缺什么，绝不静默上残图。
+     */
+    public record Completeness(
+            String productName,
+            boolean ready,
+            boolean hasMain,       // 主图目录非空
+            boolean hasDetail,     // 详情目录非空
+            int skuTotal,
+            int skuMissingImg,     // 缺图的 SKU 数
+            int skuMissingInfo,    // 缺名/价的 SKU 数
+            List<String> missing   // 人类可读的缺失清单（拒绝上新时展示）
+    ) {}
 }

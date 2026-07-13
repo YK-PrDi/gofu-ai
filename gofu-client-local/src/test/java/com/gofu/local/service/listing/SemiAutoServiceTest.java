@@ -98,6 +98,55 @@ class SemiAutoServiceTest {
     }
 
     @Test
+    void checkCompleteness_齐全则ready(@TempDir Path tmp) throws IOException {
+        File main = tmp.resolve("主图").toFile(); mkImg(main, "1.jpg");
+        File detail = tmp.resolve("详情").toFile(); mkImg(detail, "1.jpg");
+        File sku = tmp.resolve("sku1.jpg").toFile(); assertTrue(sku.createNewFile());
+        var skus = List.of(new SemiAutoScan.SkuCheck("银色", sku.getAbsolutePath(), 39.9));
+        SemiAutoScan.Completeness c = svc.checkCompleteness("商品A",
+                main.getAbsolutePath(), detail.getAbsolutePath(), skus);
+        assertTrue(c.ready(), "齐全应 ready，缺失=" + c.missing());
+        assertTrue(c.missing().isEmpty());
+    }
+
+    @Test
+    void checkCompleteness_缺主图缺价_明确报缺(@TempDir Path tmp) throws IOException {
+        File detail = tmp.resolve("详情").toFile(); mkImg(detail, "1.jpg");
+        File sku = tmp.resolve("sku1.jpg").toFile(); assertTrue(sku.createNewFile());
+        // 主图目录不存在；SKU 价=0
+        var skus = List.of(new SemiAutoScan.SkuCheck("银色", sku.getAbsolutePath(), 0));
+        SemiAutoScan.Completeness c = svc.checkCompleteness("商品B",
+                tmp.resolve("不存在主图").toString(), detail.getAbsolutePath(), skus);
+        assertFalse(c.ready());
+        assertFalse(c.hasMain());
+        assertTrue(c.hasDetail());
+        assertEquals(1, c.skuMissingInfo(), "价=0 算缺信息");
+        assertTrue(c.missing().stream().anyMatch(m -> m.contains("缺主图")));
+        assertTrue(c.missing().stream().anyMatch(m -> m.contains("缺名或价")));
+    }
+
+    @Test
+    void checkCompleteness_无SKU_报缺() {
+        SemiAutoScan.Completeness c = svc.checkCompleteness("商品C", "", "", List.of());
+        assertFalse(c.ready());
+        assertEquals(0, c.skuTotal());
+        assertTrue(c.missing().stream().anyMatch(m -> m.contains("没有任何 SKU")));
+    }
+
+    @Test
+    void checkCompleteness_缺SKU图(@TempDir Path tmp) throws IOException {
+        File main = tmp.resolve("主图").toFile(); mkImg(main, "1.jpg");
+        File detail = tmp.resolve("详情").toFile(); mkImg(detail, "1.jpg");
+        // SKU 有名有价但无图（走 AI 补）
+        var skus = List.of(new SemiAutoScan.SkuCheck("银色", "", 39.9));
+        SemiAutoScan.Completeness c = svc.checkCompleteness("商品D",
+                main.getAbsolutePath(), detail.getAbsolutePath(), skus);
+        assertFalse(c.ready());
+        assertEquals(1, c.skuMissingImg());
+        assertTrue(c.missing().stream().anyMatch(m -> m.contains("缺图")));
+    }
+
+    @Test
     void codeFromFilename_去前缀序号与配件描述取编码主体() {
         // 乐羽导出命名：'1_GF-106-银色-1 喷头+1.5米防爆软管.jpg' → 'GF-106-银色-1'
         assertEquals("GF-106-银色-1", SemiAutoService.codeFromFilename("1_GF-106-银色-1 喷头+1.5米防爆软管.jpg"));

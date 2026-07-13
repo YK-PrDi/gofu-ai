@@ -168,6 +168,42 @@ public class SemiAutoService {
         try { return v == null ? 0 : Double.parseDouble(v.toString()); } catch (Exception e) { return 0; }
     }
 
+    /**
+     * 商品上新前完整性强校验（P3 北极星）。
+     * 齐全条件：主图目录非空 + 详情目录非空 + ≥1 个 SKU 且每个 SKU 图/名/价(>0)俱全。
+     * 不齐 → ready=false + missing 明确列出缺什么，供调用方补齐或拒绝上新，绝不静默上残图。
+     *
+     * @param mainImgDir   主图目录（扫描得，空/无图=缺）
+     * @param detailImgDir 详情目录
+     * @param skus         待上新 SKU（图/名/价），来自 P2 反推或 AI 方案
+     */
+    public SemiAutoScan.Completeness checkCompleteness(String productName, String mainImgDir,
+                                                       String detailImgDir, List<SemiAutoScan.SkuCheck> skus) {
+        List<String> missing = new ArrayList<>();
+
+        boolean hasMain = !listImages(mainImgDir).isEmpty();
+        if (!hasMain) missing.add("缺主图（主图目录为空或不存在）");
+        boolean hasDetail = !listImages(detailImgDir).isEmpty();
+        if (!hasDetail) missing.add("缺详情图（详情目录为空或不存在）");
+
+        int skuTotal = skus == null ? 0 : skus.size();
+        int missImg = 0, missInfo = 0;
+        if (skuTotal == 0) {
+            missing.add("没有任何 SKU（需选品/AI 出方案或导入 SKU 图反推）");
+        } else {
+            for (SemiAutoScan.SkuCheck s : skus) {
+                String tag = (s.name() == null || s.name().isBlank()) ? "(未命名SKU)" : s.name();
+                boolean noImg = s.imgPath() == null || s.imgPath().isBlank() || !new File(s.imgPath()).isFile();
+                boolean noInfo = s.name() == null || s.name().isBlank() || s.price() <= 0;
+                if (noImg) { missImg++; missing.add("SKU「" + tag + "」缺图（可走 AI 生成补齐）"); }
+                if (noInfo) { missInfo++; missing.add("SKU「" + tag + "」缺名或价（价须>0）"); }
+            }
+        }
+        boolean ready = missing.isEmpty();
+        return new SemiAutoScan.Completeness(productName, ready, hasMain, hasDetail,
+                skuTotal, missImg, missInfo, missing);
+    }
+
     /** 文件名自然排序：1 < 2 < 10（按文件名数字段比较，迁自乐羽）。 */
     static int naturalCompare(String a, String b) {
         String na = a.replaceAll("\\.[^.]+$", "").replaceAll("\\D", "");

@@ -75,4 +75,30 @@ public class SemiAutoController {
         return ResponseEntity.ok(Map.of("rows", rows, "unmatched", unmatched,
                 "allMatched", unmatched.isEmpty()));
     }
+
+    /**
+     * 商品上新前完整性强校验（P3 北极星）。上新编排前必过此关。
+     * 入参 {@code { productName, mainImgDir, detailImgDir, skus:[{name,imgPath,price}] }}；
+     * 出参 {@link com.gofu.local.model.SemiAutoScan.Completeness}（ready + 缺失清单）。
+     */
+    @SuppressWarnings("unchecked")
+    @PostMapping("/check-completeness")
+    public ResponseEntity<?> checkCompleteness(@RequestBody Map<String, Object> body) {
+        String productName = String.valueOf(body.getOrDefault("productName", ""));
+        String mainImgDir = String.valueOf(body.getOrDefault("mainImgDir", ""));
+        String detailImgDir = String.valueOf(body.getOrDefault("detailImgDir", ""));
+        List<Map<String, Object>> raw = (List<Map<String, Object>>) body.getOrDefault("skus", List.of());
+        List<com.gofu.local.model.SemiAutoScan.SkuCheck> skus = raw.stream()
+                .map(m -> new com.gofu.local.model.SemiAutoScan.SkuCheck(
+                        m.get("name") == null ? "" : String.valueOf(m.get("name")),
+                        m.get("imgPath") == null ? "" : String.valueOf(m.get("imgPath")),
+                        m.get("price") instanceof Number n ? n.doubleValue()
+                                : parseD(m.get("price"))))
+                .toList();
+        return ResponseEntity.ok(semiAutoService.checkCompleteness(productName, mainImgDir, detailImgDir, skus));
+    }
+
+    private static double parseD(Object v) {
+        try { return v == null ? 0 : Double.parseDouble(v.toString()); } catch (Exception e) { return 0; }
+    }
 }
