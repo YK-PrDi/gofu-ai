@@ -1943,6 +1943,7 @@ function openPricingModal(skus) {
         stock:    parseInt(s.stock) || 8888,
         spec1:    s.spec1 || '',
         spec2:    s.spec2 || '',
+        mainQty:  s.mainQty || 1,   // 保留结构化主件数量，别在定价环节丢字段退回正则
         accParts: s.accParts || []
     }));
     pmRatio = 0.35;
@@ -2059,6 +2060,7 @@ async function pmApply() {
         itemCode:    s.itemCode || '',
         spec1:       pmSkus[i]?.spec1 || '',
         spec2:       pmSkus[i]?.spec2 || '',
+        mainQty:     pmSkus[i]?.mainQty || 1,   // 结构化主件数量透传到 lstSkuItems，供生图带给云端
         accParts:    pmSkus[i]?.accParts || [],
         cost:        s.cost || 0
     }));

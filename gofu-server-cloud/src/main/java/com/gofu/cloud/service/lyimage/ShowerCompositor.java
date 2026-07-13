@@ -224,7 +224,7 @@ public class ShowerCompositor {
      * @param mainQty  主件数量 N（>1 才画）
      */
     File compositeMainQtyCardAt(File baseImg, File mainImg, int mainQty,
-                                String batch, int seq, String skuName, String colorName) throws Exception {
+                                String batch, int seq, String skuName) throws Exception {
         if (mainQty <= 1 || mainImg == null || !mainImg.isFile()) return baseImg;
         BufferedImage base = ImageIO.read(baseImg);
         if (base == null) throw new RuntimeException("主件框合成读底图失败");

@@ -441,7 +441,7 @@ public class ImageGenService {
                     // 多件档(mainQty>1)：AI 底图上贴放大主件框 + ×N 角标（复用白底主件图）
                     if (mainQty > 1 && hasWhiteBg) {
                         try {
-                            File framed = compositor.compositeMainQtyCardAt(shelfOut, whiteBgRef, mainQty, batch, seq, skuName, colorOnly);
+                            File framed = compositor.compositeMainQtyCardAt(shelfOut, whiteBgRef, mainQty, batch, seq, skuName);
                             return framed.getAbsolutePath();
                         } catch (Exception fe) {
                             log.warn("架类多件主件框合成失败，返回纯AI底图: {}", fe.getMessage());
