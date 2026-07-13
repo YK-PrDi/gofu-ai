@@ -1,10 +1,10 @@
 // ── LY-Automation 上新模式前端逻辑 ──
 
-// 从型号名解析主品数量："单品"→1、"双件组合"→2、"三件组合"→3、"N件组合/N件套"→N。
-// 数量档位策略下同一主品出多档，主件成本须×数量（否则1/2/3件成本相同=bug）。
+// 主品数量：优先读后端结构化字段 mainQty；缺失才回退从型号名正则猜(兜底老数据)。
+// 正则认"N件装/N件组合/N件套"(如"三件装"→3)。结构化字段见 SkuItem.mainQty。
 function mainQtyFromSpec(spec) {
     const s = String(spec || '');
-    const m = s.match(/([0-9]+|[一二两三四五六七八九十]+)\s*件\s*(?:组合|套)/);
+    const m = s.match(/([0-9]+|[一二两三四五六七八九十]+)\s*件\s*(?:装|组合|套)/);
     if (m) {
         const cn = { 一:1, 二:2, 两:2, 三:3, 四:4, 五:5, 六:6, 七:7, 八:8, 九:9, 十:10 };
         const t = m[1];
@@ -12,6 +12,13 @@ function mainQtyFromSpec(spec) {
         return Math.max(1, n);
     }
     return 1;
+}
+// 优先结构化 mainQty(obj.mainQty)，无效才回退正则解析 specText。
+function mainQtyOf(obj, specText) {
+    const q = obj && obj.mainQty;
+    if (typeof q === 'number' && q >= 1) return Math.floor(q);
+    if (typeof q === 'string' && /^\d+$/.test(q) && +q >= 1) return +q;
+    return mainQtyFromSpec(specText);
 }
 
 // HTML 属性转义
@@ -916,6 +923,7 @@ async function lyAutoRun() {
             // 把 AI 的 models 转成 ladder 结构（components.itemCode → 通用 match）
             ladders = plan.models.map(md => ({
                 name: md.specName || '型号',
+                mainQty: parseInt(md.mainQty) || 1,   // 携带主件数量(几件装)供成本×N
                 components: (md.components || []).map(c => ({
                     match: codeToType[c.itemCode] || c.itemCode, qty: parseInt(c.qty) || 1
                 }))
@@ -984,10 +992,11 @@ async function lyAutoRun() {
                 items.push({
                     name: `${main.productName || main.itemCode} ${ld.name}`.trim(),
                     spec1: main.productName || main.itemCode, spec2: ld.name,
+                    mainQty: mainQtyOf(ld, ld.name),   // 主件数量随 item 落库
                     itemCode: codeStr, accParts: parts, stock: 8888, groupPrice: 0, singlePrice: 0, imgDir: ''
                 });
                 // 组件清单（主件+配件）供成本计算
-                const comps = [{ itemCode: main.itemCode, qty: mainQtyFromSpec(ld.name), cost: mc.cost, weight: mc.weight }]
+                const comps = [{ itemCode: main.itemCode, qty: mainQtyOf(ld, ld.name), cost: mc.cost, weight: mc.weight }]
                     .concat(parts.map(p => {
                         const pc = costMap[p.code] || { cost: 0, weight: 0 };
                         return { itemCode: p.code, qty: p.qty, cost: pc.cost, weight: pc.weight };
@@ -1432,7 +1441,7 @@ function spRenderTable(idx) {
 
     // 单个格子成本 = 主件 + 该型号配件 + 固定成本 + 运费（复用 spComboCost）
     const cellCost = (mainCode, model) => {
-        const comps = [{ itemCode: mainCode, qty: mainQtyFromSpec(model.specName) }, ...(model.components || [])];
+        const comps = [{ itemCode: mainCode, qty: mainQtyOf(model, model.specName) }, ...(model.components || [])];
         return spComboCost(comps);
     };
 
@@ -1528,7 +1537,7 @@ async function spConfirm() {
             .map(s => ({ itemCode: s.itemCode, cost: parseFloat(s.cost) || 0 }));
 
         // 矩阵笛卡尔积展平：每个 {主件 × 型号} = 一个格子 SKU
-        const cellComp = (mainCode, model) => [{ itemCode: mainCode, qty: mainQtyFromSpec(model.specName) }, ...(model.components || [])]
+        const cellComp = (mainCode, model) => [{ itemCode: mainCode, qty: mainQtyOf(model, model.specName) }, ...(model.components || [])]
             .map(c => {
                 const item = spItemByCode(c.itemCode);
                 return {
@@ -1568,6 +1577,7 @@ async function spConfirm() {
                     itemCode: specCode,
                     spec1: m.specName || m.itemCode,
                     spec2: md.specName || '默认',
+                    mainQty: mainQtyOf(md, md.specName),   // 主件数量随 item 落库，供下游读字段
                     name: `${m.specName||m.itemCode} ${md.specName||''}`.trim(),
                     stock: 8888,
                     components: cellComp(m.itemCode, mdFixed)

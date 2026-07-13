@@ -258,10 +258,10 @@
 </div>
 
 <script>
-// 从型号名解析主品数量："单品"→1、"双件组合"→2、"三件组合"→3、"N件组合/N件套"→N。
+// 主品数量：优先后端结构化 mainQty，缺失才回退正则(认"N件装/组合/套")。
 function mainQtyFromSpec(spec) {
   const s = String(spec || '');
-  const m = s.match(/([0-9]+|[一二两三四五六七八九十]+)\s*件\s*(?:组合|套)/);
+  const m = s.match(/([0-9]+|[一二两三四五六七八九十]+)\s*件\s*(?:装|组合|套)/);
   if (m) {
     const cn = { 一:1, 二:2, 两:2, 三:3, 四:4, 五:5, 六:6, 七:7, 八:8, 九:9, 十:10 };
     const t = m[1];
@@ -269,6 +269,12 @@ function mainQtyFromSpec(spec) {
     return Math.max(1, n);
   }
   return 1;
+}
+function mainQtyOf(obj, specText) {
+  const q = obj && obj.mainQty;
+  if (typeof q === 'number' && q >= 1) return Math.floor(q);
+  if (typeof q === 'string' && /^\d+$/.test(q) && +q >= 1) return +q;
+  return mainQtyFromSpec(specText);
 }
 const { createApp } = Vue;
 createApp({
@@ -471,7 +477,7 @@ createApp({
         const comboSkus = items.map(it => {
           const comps = [];
           const mc = mainCodeOf(it);
-          if (mc) comps.push({ itemCode: mc, qty: mainQtyFromSpec(it.spec2 || it.skuDisplayName || ''), name: it.spec1,
+          if (mc) comps.push({ itemCode: mc, qty: mainQtyOf(it, it.spec2 || it.skuDisplayName || ''), name: it.spec1,
             cost: costMap[mc]?.cost || 0, weight: costMap[mc]?.weight || 0 });
           (it.accParts || []).forEach(a => comps.push({ itemCode: a.code, qty: a.qty || 1,
             cost: costMap[a.code]?.cost || 0, weight: costMap[a.code]?.weight || 0 }));

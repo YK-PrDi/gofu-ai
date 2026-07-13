@@ -513,11 +513,10 @@
   </div>
 </div>
 <script>
-// 从型号名解析主品数量："单品"→1、"双件组合"→2、"三件组合"→3、"N件组合/N件套"→N。
-// 锚定"件组合/件套"或"单品"，避免误匹配主件名里的"单品"字样。返回≥1。
+// 主品数量：优先后端结构化 mainQty，缺失才回退正则(认"N件装/组合/套")。
 function mainQtyFromSpec(spec) {
   const s = String(spec || '');
-  const m = s.match(/([0-9]+|[一二两三四五六七八九十]+)\s*件\s*(?:组合|套)/);
+  const m = s.match(/([0-9]+|[一二两三四五六七八九十]+)\s*件\s*(?:装|组合|套)/);
   if (m) {
     const cn = { 一:1, 二:2, 两:2, 三:3, 四:4, 五:5, 六:6, 七:7, 八:8, 九:9, 十:10 };
     const t = m[1];
@@ -525,6 +524,12 @@ function mainQtyFromSpec(spec) {
     return Math.max(1, n);
   }
   return 1; // 单品/标准款/无匹配 → 1
+}
+function mainQtyOf(obj, specText) {
+  const q = obj && obj.mainQty;
+  if (typeof q === 'number' && q >= 1) return Math.floor(q);
+  if (typeof q === 'string' && /^\d+$/.test(q) && +q >= 1) return +q;
+  return mainQtyFromSpec(specText);
 }
 const { createApp } = Vue;
 createApp({
@@ -1037,7 +1042,7 @@ createApp({
       const mainCodeOf = it => (it.itemCode || '').split('+')[0];
       // 主品数量：从型号名(spec2)解析"单品/双件组合/三件组合/N件组合"→1/2/3/N。
       // 数量档位策略下同一主品出多档，主件成本须×数量（否则1/2/3件成本相同=bug）。
-      const parseMainQty = it => mainQtyFromSpec(it.spec2 || it.skuDisplayName || '');
+      const parseMainQty = it => mainQtyOf(it, it.spec2 || it.skuDisplayName || '');
       // ① 收集所有编码（主件+配件）批量查单码成本/重量
       const codes = new Set();
       items.forEach(it => {
