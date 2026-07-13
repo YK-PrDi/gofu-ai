@@ -156,7 +156,7 @@ public class ImageGenService {
                                    String productType, String batch, int seq, String bagImagePath,
                                    String whiteImgPath, List<String> accImagePaths,
                                    String waterImagePath, String bgStyleOverride, String itemCode,
-                                   List<Map<String, Object>> accParts, String templateId) throws Exception {
+                                   List<Map<String, Object>> accParts, String templateId, int mainQty) throws Exception {
         LyImageProperties.GptImage cfg = appProperties.getGptImage();
         List<String> keys = cfg.keyList();
         if (keys.isEmpty()) throw new RuntimeException("生图密钥未配置");
@@ -437,7 +437,17 @@ public class ImageGenService {
                     String b64 = shelfRefs.isEmpty()
                         ? aiClient.callGptImage2TextOnly(http, baseUrl, key, model, shelfPrompt)
                         : aiClient.callGptImage2(http, baseUrl, key, model, shelfPrompt, shelfRefs);
-                    return aiClient.saveAsJpg(b64, batch, seq, skuName).getAbsolutePath();
+                    File shelfOut = aiClient.saveAsJpg(b64, batch, seq, skuName);
+                    // 多件档(mainQty>1)：AI 底图上贴放大主件框 + ×N 角标（复用白底主件图）
+                    if (mainQty > 1 && hasWhiteBg) {
+                        try {
+                            File framed = compositor.compositeMainQtyCardAt(shelfOut, whiteBgRef, mainQty, batch, seq, skuName, colorOnly);
+                            return framed.getAbsolutePath();
+                        } catch (Exception fe) {
+                            log.warn("架类多件主件框合成失败，返回纯AI底图: {}", fe.getMessage());
+                        }
+                    }
+                    return shelfOut.getAbsolutePath();
                 } catch (Exception e) {
                     lastShelf = e;
                     String msg = e.getMessage() == null ? "" : e.getMessage();

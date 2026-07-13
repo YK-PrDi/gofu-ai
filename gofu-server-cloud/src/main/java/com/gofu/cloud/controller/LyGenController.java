@@ -90,9 +90,10 @@ public class LyGenController {
                     String itemCode = String.valueOf(s.getOrDefault("itemCode", ""));
                     List<Map<String, Object>> accParts = (List<Map<String, Object>>) s.getOrDefault("accParts", List.of());
                     log.info("[LY生图配件] seq={} idx={} name=「{}」 accParts={}", seq, idx, name, accParts);
+                    int mainQty = s.get("mainQty") instanceof Number mn ? Math.max(1, mn.intValue()) : 1;
                     String path = imageGenService.generateSkuImage(refImagePath, name, comp, productType,
                             batch, seq, bagImagePath, whiteImgPath, accImagePaths, waterImagePath,
-                            bgStyle, itemCode, accParts, templateId);
+                            bgStyle, itemCode, accParts, templateId, mainQty);
                     item.put("path", path);
                     // M5d：配 COS 则存永久 key（ADR-008）写回 context.visual.mainImages；否则存本地路径
                     if (ctx != null) {

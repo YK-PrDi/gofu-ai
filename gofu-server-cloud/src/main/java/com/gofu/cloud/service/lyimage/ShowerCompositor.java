@@ -215,6 +215,62 @@ public class ShowerCompositor {
     }
 
     /**
+     * 架类多件组合主件框：在 AI 底图右下区贴一个【放大的主件白底图】+ 右上角「×N」红圆角标，
+     * 直观表达"这是 N 件装"。与配件框(drawAccCard 平铺)不同——主件不平铺，放大单张 + 数量角标。
+     * mainQty<=1 时不贴（单件 SKU 不需要），直接返回原图。
+     *
+     * @param baseImg  AI 生成的单主件场景底图
+     * @param mainImg  主件白底图（抠白底后放大贴入）
+     * @param mainQty  主件数量 N（>1 才画）
+     */
+    File compositeMainQtyCardAt(File baseImg, File mainImg, int mainQty,
+                                String batch, int seq, String skuName, String colorName) throws Exception {
+        if (mainQty <= 1 || mainImg == null || !mainImg.isFile()) return baseImg;
+        BufferedImage base = ImageIO.read(baseImg);
+        if (base == null) throw new RuntimeException("主件框合成读底图失败");
+        BufferedImage prod = whiteToTransparent(ImageIO.read(mainImg));
+        if (prod == null) return baseImg;
+
+        int W = base.getWidth(), H = base.getHeight();
+        Graphics2D g = base.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+
+        // 主件框：右下区圆角白卡（宽 W*0.30、4:3），避开顶部文字带和底部通栏
+        int cardW = (int)(W * 0.30);
+        int cardH = (int)(cardW * 3.0 / 4.0);
+        int cx = W - cardW - (int)(W * 0.05);
+        int cy = (int)(H * 0.86) - cardH;         // 卡底不压底部通栏(86%线)
+        if (cy < (int)(H * 0.34)) cy = (int)(H * 0.34);
+        int arc = (int)(Math.min(cardW, cardH) * 0.10);
+        int sh  = (int)(Math.min(cardW, cardH) * 0.025);
+        g.setColor(new Color(0, 0, 0, 45));
+        g.fillRoundRect(cx + sh, cy + sh, cardW, cardH, arc, arc);
+        g.setColor(Color.WHITE);
+        g.fillRoundRect(cx, cy, cardW, cardH, arc, arc);
+        // 放大的主件图填卡（留 8% 内边距）
+        drawImageFit(g, prod, cx + (int)(cardW * 0.08), cy + (int)(cardH * 0.08),
+                     (int)(cardW * 0.84), (int)(cardH * 0.84));
+        // 右上角「×N」红圆角标
+        drawQtyBadge(g, cx + cardW, cy, (int)(Math.min(cardW, cardH) * 0.28), mainQty);
+
+        g.dispose();
+        return writeJpg(base, batch, seq, skuName);
+    }
+
+    /** 「×N」红圆角标：以 (bx,by) 为圆心区右上角画红圆 + 白色"×N"文字。仿 drawAccCard 红「+」圆。 */
+    private void drawQtyBadge(Graphics2D g, int bx, int by, int d, int n) {
+        int cx = bx - d / 2, cy = by - d / 2;     // 骑在卡右上角
+        int sh = Math.max(2, (int)(d * 0.10));
+        g.setColor(new Color(0, 0, 0, 45));
+        g.fillOval(cx + sh, cy + sh, d, d);
+        g.setColor(new Color(0xE0, 0x2B, 0x20));
+        g.fillOval(cx, cy, d, d);
+        drawFitText(g, "×" + n, cx, cy, d, d, (int)(d * 0.5), Color.WHITE);
+    }
+
+    /**
      * 底部胶囊通栏：横跨底部，左右两色块拼接。左块用花洒色加深、右块用花洒色，写文字。
      * 文字用 drawFitText 约束在各自半区内，不超框、留缝隙。
      */

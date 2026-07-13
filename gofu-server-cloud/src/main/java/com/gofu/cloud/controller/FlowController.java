@@ -499,7 +499,7 @@ public class FlowController {
                         try {
                             task.setCurrentProduct("SKU：" + fName);
                             String path = lyImageGen.generateSkuImage(refMain, fName, it.getSpec2(), fProductType,
-                                    fBatch, idx + 1, "", fSkuWhite, fAccImagePaths, "", fBgStyle, it.getItemCode(), fAccParts, templateId);
+                                    fBatch, idx + 1, "", fSkuWhite, fAccImagePaths, "", fBgStyle, it.getItemCode(), fAccParts, templateId, it.getMainQty());
                             if (path != null) {
                                 // COS 上传走 uploadIfCos：失败(如账户欠费451)时回退本地路径，图不丢弃(07.08修)。
                                 it.setImgDir(uploadIfCos(path));
