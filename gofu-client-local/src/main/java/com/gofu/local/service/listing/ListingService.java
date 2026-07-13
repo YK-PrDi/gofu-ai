@@ -62,9 +62,11 @@ public class ListingService {
 
         String userDataDir = appProperties.getPaths().getUserDataDir();
         if (userDataDir == null || userDataDir.isBlank()) userDataDir = System.getProperty("user.dir");
+        // 多店：config 已带 cookiesPath/userDataDir(P5 编排按 store 注入)则尊重之；否则回退单店默认。
         if (config.getCookiesPath() == null || config.getCookiesPath().isBlank()) {
             config.setCookiesPath(userDataDir + "/pdd_cookies.json");
         }
+        // userDataDir 为空时不填：pdd_listing.js 默认放 cookie 同目录的 pdd_browser_profile（保持单店旧行为）。
 
         String configJson = objectMapper.writeValueAsString(config);
         File projectRoot = scriptFile.getParentFile();
@@ -151,19 +153,29 @@ public class ListingService {
      * 返回 true=已保活/已刷新，false=跳过或未登录/失败。
      */
     public boolean runKeepAlive() {
+        String userDataDir = appProperties.getPaths().getUserDataDir();
+        if (userDataDir == null || userDataDir.isBlank()) userDataDir = System.getProperty("user.dir");
+        return runKeepAlive(userDataDir + "/pdd_cookies.json", null);
+    }
+
+    /**
+     * 保活指定店铺（多店，P4）：按 store 的 cookie/profile 路径刷 token。
+     * @param cookiesPath 该店 cookie 路径  @param storeUserDataDir 该店 user-data-dir（null=脚本默认）
+     */
+    public boolean runKeepAlive(String cookiesPath, String storeUserDataDir) {
         if (browserBusy.get()) { log.info("[保活] 上新进程占用浏览器，本次跳过"); return false; }
         File scriptFile = resolvePlaywrightScript();
         if (scriptFile == null || !scriptFile.exists()) { log.warn("[保活] 找不到 pdd_listing.js，跳过"); return false; }
-        String userDataDir = appProperties.getPaths().getUserDataDir();
-        if (userDataDir == null || userDataDir.isBlank()) userDataDir = System.getProperty("user.dir");
-        String cookiesPath = userDataDir + "/pdd_cookies.json";
 
         if (!browserBusy.compareAndSet(false, true)) { log.info("[保活] 浏览器忙，跳过"); return false; }
         Process proc = null;
         try {
             ProcessBuilder pb = new ProcessBuilder(resolveNodeExe(), scriptFile.getAbsolutePath(), "--keep-alive")
                     .directory(scriptFile.getParentFile()).redirectErrorStream(true);
-            pb.environment().putAll(buildPlaywrightEnv(objectMapper.writeValueAsString(Map.of("cookiesPath", cookiesPath))));
+            Map<String, Object> cfg = new java.util.HashMap<>();
+            cfg.put("cookiesPath", cookiesPath);
+            if (storeUserDataDir != null && !storeUserDataDir.isBlank()) cfg.put("userDataDir", storeUserDataDir);
+            pb.environment().putAll(buildPlaywrightEnv(objectMapper.writeValueAsString(cfg)));
             proc = pb.start();
             boolean kept = false;
             try (BufferedReader reader = new BufferedReader(
@@ -188,19 +200,28 @@ public class ListingService {
         }
     }
 
-    /** 仅触发登录流程（--login-only），保存 cookies 后退出。 */
+    /** 仅触发登录流程（--login-only），保存 cookies 后退出。单店默认路径。 */
     public String runLoginOnly() throws Exception {
+        String userDataDir = appProperties.getPaths().getUserDataDir();
+        if (userDataDir == null || userDataDir.isBlank()) userDataDir = System.getProperty("user.dir");
+        return runLoginOnly(userDataDir + "/pdd_cookies.json", null);
+    }
+
+    /**
+     * 仅登录指定店铺（多店，P4）：按 store 的 cookie/profile 路径登录，反风控脚本一行不动。
+     * @param cookiesPath  该店 cookie 路径（StoreService.cookiesPathOf）
+     * @param storeUserDataDir 该店独立 user-data-dir（StoreService.userDataDirOf；null=脚本默认）
+     */
+    public String runLoginOnly(String cookiesPath, String storeUserDataDir) throws Exception {
         File scriptFile = resolvePlaywrightScript();
         if (scriptFile == null || !scriptFile.exists()) {
             throw new RuntimeException("找不到 pdd_listing.js");
         }
-        String userDataDir = appProperties.getPaths().getUserDataDir();
-        if (userDataDir == null || userDataDir.isBlank()) userDataDir = System.getProperty("user.dir");
-        String cookiesPath = userDataDir + "/pdd_cookies.json";
 
         GenerationTask task = taskService.createTask(2);
         File projectRoot = scriptFile.getParentFile();
         final String cp = cookiesPath;
+        final String udd = storeUserDataDir;
 
         taskService.submit(task, () -> {
             Process proc = null;
@@ -208,7 +229,10 @@ public class ListingService {
             try {
                 ProcessBuilder pb = new ProcessBuilder(resolveNodeExe(), scriptFile.getAbsolutePath(), "--login-only")
                     .directory(projectRoot).redirectErrorStream(false);
-                pb.environment().putAll(buildPlaywrightEnv(objectMapper.writeValueAsString(Map.of("cookiesPath", cp))));
+                Map<String, Object> cfg = new java.util.HashMap<>();
+                cfg.put("cookiesPath", cp);
+                if (udd != null && !udd.isBlank()) cfg.put("userDataDir", udd);
+                pb.environment().putAll(buildPlaywrightEnv(objectMapper.writeValueAsString(cfg)));
                 proc = pb.start();
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(proc.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {

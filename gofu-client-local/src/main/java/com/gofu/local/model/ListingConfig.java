@@ -42,6 +42,12 @@ public class ListingConfig {
     /** cookies 文件路径（Playwright 登录态，为空时触发首次登录） */
     private String cookiesPath;
 
+    /** 浏览器 user-data-dir（多店隔离：每店独立 profile 目录，为空时 pdd_listing.js 默认 cookie 同目录） */
+    private String userDataDir;
+
+    public String getUserDataDir() { return userDataDir; }
+    public void setUserDataDir(String userDataDir) { this.userDataDir = userDataDir; }
+
     public String getProductType() { return productType; }
     public void setProductType(String productType) { this.productType = productType; }
     public String getMaterial() { return material; }
