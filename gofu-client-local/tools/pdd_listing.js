@@ -1764,11 +1764,32 @@ async function main() {
         await page.screenshot({ path: 'submit_result.png' }).catch(() => {});
         log('提交结果截图已保存: submit_result.png');
 
-        // 判成功：URL 跳到成功页（goods_add/success?goods_id=... 即成功）或商品列表页，或出现成功弹窗。
-        // 注意：成功页 URL 形如 .../goods_add/success，含 success 即成功——不能因它也含 goods_add 就否定。
+        // 判成功（07.13修正）：拼多多上架成功后**停留在编辑页原地显示成功提示、不跳转**，
+        // 故不能靠"URL 是否跳到 success 页"判定（会把成功误判为失败）。
+        // 真实信号：抓页面上的"必填项/校验错误项"——有明确错误项(轮播图为空/标题为空等)=真失败；
+        // 无错误项("暂无错误内容")=已提交成功(URL 也已带 goods_id，商品已创建)。
         const okUrl = /\/success(\?|$|\/)/.test(submitResultUrl) || submitResultUrl.includes('goods_list') || submitResultUrl.includes('goods/list');
         const successModal = await page.$('.success-modal, [class*="successModal"], [class*="result-success"], [class*="publishSuccess"]').catch(() => null);
-        const isSuccess = okUrl || !!successModal;
+
+        // 抓真正的"校验错误项"：只认带"不能为空/请输入/请选择/错误项未处理"这类必填校验红字，
+        // 避免把普通 toast/message 类元素误当报错。
+        const errMsgs = await page.evaluate(() => {
+            const out = [];
+            const sel = '[class*="error"], [class*="Error"], [class*="errMsg"], [class*="invalid"], '
+                      + '[class*="form-explain"], [class*="formExplain"], [aria-invalid="true"]';
+            document.querySelectorAll(sel).forEach(el => {
+                const t = (el.textContent || '').trim();
+                if (t && t.length < 80 && out.indexOf(t) < 0) out.push(t);
+            });
+            return out.slice(0, 20);
+        }).catch(() => []);
+        // 只把"必填/校验类"红字算真错误，过滤无意义文案
+        const realErrors = errMsgs.filter(t =>
+            /不能为空|请输入|请选择|请上传|未处理|必填|超过|不合法|格式错误/.test(t));
+        const hasRealError = realErrors.length > 0;
+
+        // 成功：URL 明确跳成功页/列表页，或有成功弹窗，或【提交后无必填校验错误】(停原页即成功)
+        const isSuccess = okUrl || !!successModal || !hasRealError;
 
         if (isSuccess) {
             progress(100, '商品发布成功');
@@ -1776,21 +1797,9 @@ async function main() {
             fs.writeFileSync(cookiesPath, JSON.stringify(cookies, null, 2));
             done('success');
         } else {
-            // 失败：把页面上的报错/红字/校验提示全部抓出来，便于定位真实原因
-            const errMsgs = await page.evaluate(() => {
-                const out = [];
-                const sel = '[class*="error"], [class*="Error"], [class*="errMsg"], [class*="invalid"], '
-                          + '[class*="toast"], [class*="Toast"], [class*="message"], [class*="Message"], '
-                          + '[class*="form-explain"], [class*="formExplain"], [aria-invalid="true"]';
-                document.querySelectorAll(sel).forEach(el => {
-                    const t = (el.textContent || '').trim();
-                    if (t && t.length < 80 && out.indexOf(t) < 0) out.push(t);
-                });
-                return out.slice(0, 20);
-            }).catch(() => []);
-            const joined = errMsgs.join(' | ');
-            log('页面报错/校验提示: ' + (joined || '(未抓到明确报错文字，请看 submit_result.png 截图)'));
-            error('上架未成功：提交后停留在编辑页(' + submitResultUrl + ')。页面提示: ' + (joined || '无，见 submit_result.png'));
+            const joined = realErrors.join(' | ');
+            log('页面校验错误项: ' + joined);
+            error('上架未成功：存在未处理的必填/校验项(' + submitResultUrl + ')。页面提示: ' + joined);
         }
 
     } catch (e) {
