@@ -67,6 +67,28 @@ function log(msg) {
     console.log(`LOG:${msg}`);
 }
 
+/**
+ * 带重试的页面跳转：应对偶发网络/代理抖动（ERR_PROXY_CONNECTION_FAILED、超时、连接重置）。
+ * 首次失败不立即放弃——退避后重试（默认 3 次）。这是"多试几次"的健壮性，非反风控逻辑改动。
+ * 全部失败才抛出，交由上层报错。
+ */
+async function gotoWithRetry(page, url, opts, retries = 3) {
+    let lastErr;
+    for (let i = 0; i < retries; i++) {
+        try {
+            await page.goto(url, opts);
+            return;
+        } catch (e) {
+            lastErr = e;
+            const msg = (e && e.message) ? e.message : String(e);
+            log(`页面跳转失败(第 ${i + 1}/${retries} 次): ${msg.split('\n')[0]}`);
+            // 网络/代理类瞬时错误才重试；其它错误也重试（退避），最后一次不等待。
+            if (i < retries - 1) await page.waitForTimeout(2000 + i * 2000);
+        }
+    }
+    throw lastErr;
+}
+
 /** 强制设置 React 受控输入框的值（避免追加 bug） */
 async function setInputValue(page, selector, value) {
     await page.evaluate(({ sel, val }) => {
@@ -332,7 +354,7 @@ async function main() {
     try {
         // ── STEP 0：检查登录态 ──────────────────────────────────────────
         progress(5, '检查登录状态');
-        await page.goto('https://mms.pinduoduo.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await gotoWithRetry(page, 'https://mms.pinduoduo.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
         await page.waitForTimeout(3000);
 
         // 可靠的登录态判断：已登录时后台会有导航菜单或跳转到 dashboard 路径
@@ -380,7 +402,7 @@ async function main() {
             progress(6, '等待用户登录');
             // 确保在登录页
             if (!currentUrl.includes('login') && !currentUrl.includes('passport')) {
-                await page.goto('https://mms.pinduoduo.com/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
+                await gotoWithRetry(page, 'https://mms.pinduoduo.com/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
             }
             // 等待用户登录成功：URL 变成后台页面（含 /home 或 /goods 或 /dashboard，且不含 login/passport）
             await page.waitForFunction(
@@ -468,14 +490,14 @@ async function main() {
         }
 
         // 先尝试直接进品类选择页
-        await page.goto('https://mms.pinduoduo.com/goods/category', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await gotoWithRetry(page, 'https://mms.pinduoduo.com/goods/category', { waitUntil: 'domcontentloaded', timeout: 30000 });
         await page.waitForTimeout(2000);
 
         const currentPageUrl = page.url();
         const isOnCategoryPage = currentPageUrl.includes('category') || currentPageUrl.includes('goods_add') || currentPageUrl.includes('add_goods');
         if (!isOnCategoryPage) {
             log('跳转失败，当前页面: ' + currentPageUrl + '，尝试从商品列表点击"发布新商品"');
-            await page.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await gotoWithRetry(page, 'https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded', timeout: 30000 });
             await page.waitForTimeout(2000);
             const addLink = await page.$('a[href*="category"], a:has-text("发布新商品")');
             if (addLink) {

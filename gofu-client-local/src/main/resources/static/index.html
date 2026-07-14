@@ -234,7 +234,8 @@
               <td>{{ o.shopName }}</td>
               <td>{{ o.productName }}</td>
               <td>
-                <span class="store-tag" :class="batchStatusClass(o.status)">{{ batchStatusText(o.status) }}</span>
+                <span class="store-tag" :class="o.taskStatus==='done'?'tag-ok':(o.taskStatus==='error'?'tag-err':batchStatusClass(o.status))">{{ batchStatusText(o.status) }}</span>
+                <div v-if="o.taskMsg" style="font-size:12px;margin-top:2px" :class="o.taskStatus==='error'?'batch-miss':''">{{ o.taskMsg }}</div>
                 <div v-if="o.taskId" style="font-size:11px;color:var(--text-faint)">{{ o.taskId }}</div>
               </td>
               <td><div v-for="(m,j) in (o.missing||[])" :key="j" class="batch-miss">· {{ m }}</div></td>

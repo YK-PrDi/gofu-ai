@@ -57,12 +57,36 @@ window.BatchMixin = {
         const d = await this.batchApi('/api/semi-auto/run', { rootPath: this.batch.rootPath.trim() });
         this.batch.outcomes = d.outcomes || [];
         const started = this.batch.outcomes.filter(o => o.status === 'listing_started').length;
-        this.batchMsg('已启动 ' + started + ' 个商品的上新（taskId 见下方，进度在商家后台/日志）', 'ok');
+        this.batchMsg('已启动 ' + started + ' 个商品的上新，实时进度见下方（每个任务独立轮询）', 'ok');
+        // A：对每个已启动上新的商品轮询其 taskId，把进度/成败回填到结果表(progress/taskStatus/taskMsg)。
+        this.batch.outcomes.forEach((o, i) => { if (o.taskId && o.status === 'listing_started') this.batchPollTask(i); });
       } catch (e) {
         this.batchMsg('批量上新失败：' + e.message, 'err');
       } finally {
         this.batch.busy = false;
       }
+    },
+    // 轮询单个商品的上新任务(复用 /api/task/{id})，进度/成败写回该 outcome。最多 20 分钟。
+    async batchPollTask(idx, tries) {
+      tries = tries || 0;
+      const o = this.batch.outcomes[idx];
+      if (!o || !o.taskId) return;
+      if (tries > 800) { o.taskMsg = '轮询超时'; return; }   // 800×1.5s=20分钟
+      try {
+        const r = await fetch('/api/task/' + o.taskId);
+        if (r.ok) {
+          const t = await r.json();
+          o.progress = t.total > 0 ? t.progress + '/' + t.total : '' + t.progress;
+          if (t.status === 'done') { o.taskStatus = 'done'; o.taskMsg = '✓ 上新成功'; return; }
+          if (t.status === 'error') {
+            o.taskStatus = 'error';
+            o.taskMsg = '✗ ' + ((t.results || []).filter(x => x.type === 'error').map(x => x.message).join('；') || '上新失败');
+            return;
+          }
+          o.taskMsg = '上新中… ' + o.progress;
+        }
+      } catch (e) { /* 网络抖动忽略，继续轮询 */ }
+      setTimeout(() => this.batchPollTask(idx, tries + 1), 1500);
     },
     batchMsg(m, t) {
       this.batch.msg = m;
