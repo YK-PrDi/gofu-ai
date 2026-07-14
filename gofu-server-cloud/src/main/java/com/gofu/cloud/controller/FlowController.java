@@ -398,7 +398,99 @@ public class FlowController {
         return ResponseEntity.ok(resp);
     }
 
-    /** step2 后台工作体（07.08重构）：配对详情图(每张主图→一张9:16) + 选定方案 SKU 图。主图已在 step1 出。 */
+    /**
+     * 风格迁移（②，独立能力）：对当前商品**已有成品图**（主图+详情）做 image2image 换基调，
+     * 保持产品/构图/文案不变，只换风格。换完覆盖回写 context.visual（能接着上新，A/A/B 方案）。
+     * 入参 {@code {contextId, styleId}}；styleId 取自 STYLE_PROMPTS（tech-blue/girl-pink…）。
+     * 复用：STYLE_PROMPTS + genWithRetry(图生图) + uploadIfCos + 异步任务 + /task 轮询。
+     */
+    @PostMapping("/style-transfer")
+    public ResponseEntity<Map<String, Object>> styleTransfer(@RequestBody Map<String, Object> body) {
+        String contextId = (String) body.get("contextId");
+        if (contextId == null || contextId.isBlank())
+            return ResponseEntity.badRequest().body(Map.of("error", "contextId 不能为空"));
+        ProductContext ctx = contextService.findById(contextId);
+        if (ctx == null) return ResponseEntity.status(404).body(Map.of("error", "context 不存在"));
+
+        String styleId = body.get("styleId") instanceof String s ? s.trim() : "";
+        if (styleId.isBlank() || "random".equals(styleId))
+            return ResponseEntity.badRequest().body(Map.of("error", "请指定具体风格 styleId（风格迁移不用随机）"));
+        String stylePrompt = STYLE_PROMPTS.get(styleId);
+        if (stylePrompt == null)
+            return ResponseEntity.badRequest().body(Map.of("error", "未知风格 styleId=" + styleId));
+
+        List<String> mains = new ArrayList<>(ctx.getVisual().getMainImages());
+        List<String> details = new ArrayList<>(ctx.getVisual().getDetailImages());
+        if (mains.isEmpty() && details.isEmpty())
+            return ResponseEntity.badRequest().body(Map.of("error", "当前商品没有成品图（主图/详情），无法做风格迁移"));
+
+        String taskId = "style-" + System.nanoTime();
+        GenerationTask task = new GenerationTask(taskId, mains.size() + details.size());
+        task.setStatus("running");
+        flowTasks.put(taskId, task);
+        File tmpOut = new File(appProperties.getPaths().getTempOutputDir(), taskId);
+        tmpOut.mkdirs();
+
+        final String fStylePrompt = stylePrompt;
+        imageGen.getExecutor().submit(() -> {
+            try {
+                // 换风格但保内容：成品图当唯一参考，prompt 强调只换基调、产品/构图/文案不动。
+                String prompt = fStylePrompt + "\n\n【风格迁移·硬约束】这是对一张已完成的电商成品图换视觉基调："
+                        + "产品主体的外形/颜色/结构、画面构图版式、已有的文案文字与位置，全部保持与所给原图一致，"
+                        + "只改变背景色调、光影氛围、材质质感等风格层面；不得改动产品本身、不得挪动或改写文案、不得增删元素。";
+                String[] newMains = transferList(mains, prompt, tmpOut, "st-main", task);
+                String[] newDetails = transferList(details, prompt, tmpOut, "st-detail", task);
+                // 覆盖回写（换风格后的图直接进 visual，能接着上新）。任一张失败则保留原图不动。
+                synchronized (ctx) {
+                    ctx.getVisual().getMainImages().clear();
+                    for (int i = 0; i < newMains.length; i++)
+                        ctx.getVisual().getMainImages().add(newMains[i] != null ? newMains[i] : mains.get(i));
+                    ctx.getVisual().getDetailImages().clear();
+                    for (int i = 0; i < newDetails.length; i++)
+                        ctx.getVisual().getDetailImages().add(newDetails[i] != null ? newDetails[i] : details.get(i));
+                }
+                contextService.save(ctx);
+                log.info("[风格迁移] contextId={} style={} 主图{}张 详情{}张 完成", ctx.getId(), styleId, newMains.length, newDetails.length);
+                task.setStatus("done");
+            } catch (Exception e) {
+                log.error("风格迁移失败: {}", e.getMessage(), e);
+                task.addResult(Map.of("type", "error", "message", "风格迁移失败：" + e.getMessage()));
+                task.setStatus("error");
+            }
+        });
+
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("taskId", taskId);
+        resp.put("total", mains.size() + details.size());
+        resp.put("contextId", ctx.getId());
+        return ResponseEntity.ok(resp);
+    }
+
+    /** 对一组成品图逐张 image2image 换风格，按序号返回新 COS key（失败位为 null，调用方回退原图）。并发受 imageGen 执行器控制。 */
+    private String[] transferList(List<String> imgs, String prompt, File tmpOut, String prefix, GenerationTask task) {
+        String[] out = new String[imgs.size()];
+        List<java.util.concurrent.CompletableFuture<Void>> fs = new ArrayList<>();
+        for (int i = 0; i < imgs.size(); i++) {
+            final int idx = i;
+            fs.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try {
+                    String local = localizeWhite(imgs.get(idx));   // COS key/URL → 本地文件
+                    if (local == null) return;
+                    String outPath = new File(tmpOut, prefix + "-" + idx + ".jpg").getAbsolutePath();
+                    task.setCurrentProduct("风格迁移 " + prefix + " " + (idx + 1));
+                    if (genWithRetry(prompt, List.of(local), local, outPath, "auto", 2))
+                        out[idx] = uploadIfCos(outPath);
+                } catch (Exception e) {
+                    log.warn("风格迁移单张失败(保留原图) {}#{}: {}", prefix, idx, e.getMessage());
+                } finally {
+                    task.incrementProgress();
+                }
+            }, imageGen.getExecutor()));
+        }
+        java.util.concurrent.CompletableFuture.allOf(fs.toArray(new java.util.concurrent.CompletableFuture[0])).join();
+        return out;
+    }
+
     private void runStep2(ProductContext ctx, GenerationTask task,
                           boolean genDetail, boolean genSku, String templateId, List<String> accWhiteRefs,
                           int planIndex) {

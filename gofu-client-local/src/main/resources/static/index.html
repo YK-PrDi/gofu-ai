@@ -399,6 +399,22 @@
         </template>
       </div>
 
+      <!-- 🎨 风格迁移：对当前商品已有成品图(主图+详情)换基调，保内容只换风格，覆盖回写(能接着上新) -->
+      <div v-if="ctx && (ctx.visual.mainImages.length || ctx.visual.detailImages.length)" class="section" style="background:#faf5ff;border:1px solid #e9d5ff">
+        <h2 style="color:#7c3aed">🎨 风格迁移</h2>
+        <div class="hint" style="margin-bottom:8px">对当前商品已有主图/详情整套换视觉基调（产品/构图/文案不变，只换风格）。换完覆盖回写，可接着上新。</div>
+        <div class="field" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select v-model="styleTransfer.styleId" style="flex:1;min-width:160px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)">
+            <option value="">选择目标风格…</option>
+            <option v-for="s in styleOptions.filter(o=>o.id!=='random')" :key="s.id" :value="s.id">{{ s.name }}</option>
+          </select>
+          <button class="btn btn-primary" @click="runStyleTransfer" :disabled="!styleTransfer.styleId||styleTransfer.running">
+            {{ styleTransfer.running ? '迁移中…' : '整套换风格' }}
+          </button>
+        </div>
+        <div class="gmsg" :class="styleTransfer.msgType" style="margin-top:6px">{{ styleTransfer.msg }}</div>
+      </div>
+
       <div v-if="ctx" class="section">
       <h2><span class="num">3</span> 结果预览</h2>
       <div class="field">
@@ -675,6 +691,7 @@ createApp({
       erpRefreshing: false,
       listingDryRun: true, listingRunning: false, listingMsg: '', listingMsgType: '', listingLog: '',
       settings: { reviewImages: true, confirmBeforeListing: true },
+      styleTransfer: { styleId: '', running: false, msg: '', msgType: '' },   // 🎨 风格迁移
     };
   },
   computed: {
@@ -1305,6 +1322,29 @@ createApp({
         return ids.length ? ids[Math.floor(Math.random() * ids.length)] : '';
       }
       return this.genOpts.templateId || '';
+    },
+
+    // ── 🎨 风格迁移：对当前商品整套成品图换基调，覆盖回写后刷新预览 ──
+    async runStyleTransfer() {
+      if (!this.ctx || !this.styleTransfer.styleId) return;
+      const n = (this.ctx.visual.mainImages||[]).length + (this.ctx.visual.detailImages||[]).length;
+      if (!confirm('将对当前商品 ' + n + ' 张成品图整套换风格，换完覆盖原图（可接着上新）。继续？')) return;
+      this.styleTransfer.running = true;
+      this.styleTransfer.msg = '风格迁移中…'; this.styleTransfer.msgType = '';
+      try {
+        const r = await fetch('/api/flow/style-transfer', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contextId: this.contextId.trim(), styleId: this.styleTransfer.styleId }) });
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        if (!d.taskId) throw new Error('未返回 taskId');
+        await this.pollFlowTask(d.taskId, d.total || 0, 5, 98);
+        await this.loadContext();   // 拉回覆盖后的图，预览刷新
+        this.styleTransfer.msg = '✓ 风格迁移完成，预览已更新'; this.styleTransfer.msgType = 'ok';
+      } catch (e) {
+        this.styleTransfer.msg = '风格迁移失败：' + e.message; this.styleTransfer.msgType = 'err';
+      } finally {
+        this.styleTransfer.running = false;
+      }
     },
 
     // ── 上新 ──
