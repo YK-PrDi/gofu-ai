@@ -294,6 +294,9 @@
             </template>
             <template v-else>📦 从快麦 ERP 选品（主件/配件）</template>
           </div>
+          <div v-if="categoryMismatch" style="margin-top:6px;padding:6px 10px;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;font-size:12px;color:#b45309">
+            ⚠️ {{ categoryMismatch }}
+          </div>
         </div>
         <div class="field">
           <label>生图模型</label>
@@ -728,6 +731,32 @@ createApp({
     mainItemName() { const m = this.entry.skus.find(s => s.role === 'main'); return m ? m.name : ''; },
     mainCodes() { return this.entry.skus.filter(s => s.role === 'main').map(s => s.itemCode); },
     canGenerate() { return this.cat.path.length && this.entry.skus.length && this.entry.whites.length; },
+    // 主件与品类一致性软校验（问题1）：按名称关键词判定，不一致给提示、不阻断。
+    // 品类叶子/路径含某品类关键词，但主件名不含对应关键词、却含另一品类关键词 → 疑似选错品类。
+    categoryMismatch() {
+      const mains = this.entry.skus.filter(s => s.role === 'main');
+      if (!mains.length || !this.cat.path.length) return '';
+      const catText = this.cat.path.join('');   // 如 家装主材卫浴配件花洒配件花洒喷头
+      // 品类关键词组：命中品类文本即认为"该商品应属此类"
+      const groups = [
+        { key: '花洒', words: ['花洒', '喷头', '淋浴', '软管', '增压'] },
+        { key: '挂钩', words: ['挂钩', '挂架', '吸盘挂'] },
+        { key: '锅盖架', words: ['锅盖架', '锅盖'] },
+        { key: '置物架', words: ['置物架', '收纳架', '沥水架', '转角架'] },
+        { key: '刀架', words: ['刀架', '刀座'] },
+      ];
+      const catGroup = groups.find(g => g.words.some(w => catText.includes(w)));
+      if (!catGroup) return '';   // 品类不在已知组，不判定
+      // 主件名命中了「别的组」而没命中当前品类组 → 提示
+      const bad = mains.filter(m => {
+        const nm = m.name || '';
+        const hitCur = catGroup.words.some(w => nm.includes(w));
+        const hitOther = groups.some(g => g.key !== catGroup.key && g.words.some(w => nm.includes(w)));
+        return !hitCur && hitOther;
+      });
+      if (!bad.length) return '';
+      return '主件「' + bad.map(m => m.name).join('、') + '」看起来不属于所选品类「' + this.cat.path[this.cat.path.length-1] + '」，请核对品类是否选错（配件搭配会按品类来，选错会配错配件）。';
+    },
     // 级联当前展示的列：按已选路径逐级展开
     cascCols() {
       const tree = window.EC_CATEGORY_TREE || [];

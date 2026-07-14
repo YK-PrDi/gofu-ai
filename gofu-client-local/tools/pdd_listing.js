@@ -143,6 +143,19 @@ async function uploadImagesToArea(page, areaIndex, imgDir) {
             await refreshed[areaIndex].setInputFiles(files[i]);
             await page.waitForTimeout(1800);
         }
+        // 诊断（只读）：本张传完后，数一下页面上已出现的图片缩略图数量，判断是"累加"还是"覆盖"。
+        // 若 count 不随 i 递增(始终1或不增)，说明 setInputFiles 单张互相覆盖 → 详情只上到最后几张的根因。
+        try {
+            const thumbCnt = await page.evaluate(() => {
+                // 上传区常见缩略图容器：含 preview/thumb/img-item/uploaded 的元素，或上传列表里的 img
+                const sels = ['[class*="uploadList"] img', '[class*="preview"] img', '[class*="thumb"] img',
+                              '[class*="img-item"]', '[class*="uploaded"] img', '.beast-core-image img'];
+                let max = 0;
+                for (const s of sels) { const n = document.querySelectorAll(s).length; if (n > max) max = n; }
+                return max;
+            });
+            log(`详情图诊断: 已传第 ${i + 1}/${files.length} 张，页面当前缩略图约 ${thumbCnt} 个`);
+        } catch (_) {}
     }
     return files.length;
 }

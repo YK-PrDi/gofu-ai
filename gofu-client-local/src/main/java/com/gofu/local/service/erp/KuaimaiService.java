@@ -425,6 +425,15 @@ public class KuaimaiService {
         }
         if (itemOuterId == null) throw new RuntimeException("快麦缓存中找不到编码 " + outerId + "（先刷新缓存）");
 
+        // 诊断（问题2）：打印匹配到的 item 结构，定位"商品单品不能为空[20143]"——
+        // 看是走了商品级 picPath 还是 sku 级、该 item 的 skus 真实样子。据此再定安全修法(不猜着写线上)。
+        Map<String, Object> matchedItem = getCachedItemByOuterId(itemOuterId);
+        Object skusRaw = matchedItem == null ? null : matchedItem.get("skus");
+        log.info("[回传诊断] 入参outerId={} → itemOuterId={} skuOuterId={} title={} 匹配级别={} skus={}",
+                outerId, itemOuterId, skuOuterId, itemTitle,
+                skuOuterId != null ? "SKU级" : "商品级",
+                skusRaw == null ? "null" : (skusRaw instanceof List ? "共" + ((List<?>) skusRaw).size() + "个:" + skusRaw : skusRaw));
+
         Map<String, String> biz = new LinkedHashMap<>();
         biz.put("outerId", itemOuterId);
         biz.put("title", itemTitle);
@@ -435,6 +444,7 @@ public class KuaimaiService {
             // 商品级预览图
             biz.put("picPath", picUrl);
         }
+        log.info("[回传诊断] 发快麦 biz={}", biz);
         return call("item.general.addorupdate", biz);
     }
 }
