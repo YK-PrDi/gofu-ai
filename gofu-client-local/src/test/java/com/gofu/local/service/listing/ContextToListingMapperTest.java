@@ -19,7 +19,7 @@ class ContextToListingMapperTest {
     private ContextToListingMapper mapper() {
         AppProperties props = new AppProperties();
         // ListingService 仅用于取品类预设属性（无 xlsx 时返回空、不抛错），构造用假 TaskService
-        ListingService listingService = new ListingService(props, new TaskService(props));
+        ListingService listingService = new ListingService(props, new TaskService(props), new StoreService(props));
         return new ContextToListingMapper("http://localhost:5020", props, listingService);
     }
 
