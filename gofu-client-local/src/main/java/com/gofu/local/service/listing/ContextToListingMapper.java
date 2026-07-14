@@ -185,10 +185,17 @@ public class ContextToListingMapper {
             String key = keys.get(i);
             if (key == null || key.isBlank()) continue;
             try {
-                String url = sign(key);
-                // 已是本地文件（COS 未启用时 sign 原样返回 key），直接拷贝
-                File localSrc = new File(url);
                 File out = new File(targetDir, String.format("%02d.jpg", i + 1));
+                // key 是本地绝对路径(如 C:\...\erp-white\...png)：直接判存在，不去 sign/HTTP 下载
+                // （本地缓存换机/清理后会不存在，当 URL 下载注定 404 且误导）。
+                if (isLocalPath(key)) {
+                    File localSrc = new File(key);
+                    if (localSrc.isFile()) { Files.copy(localSrc.toPath(), out.toPath(), StandardCopyOption.REPLACE_EXISTING); ok++; }
+                    else log.warn("白底图本地缓存缺失，跳过(不影响主图/详情，仅回传快麦少这张): {}", key);
+                    continue;
+                }
+                String url = sign(key);
+                File localSrc = new File(url);
                 if (localSrc.isFile()) {
                     Files.copy(localSrc.toPath(), out.toPath(), StandardCopyOption.REPLACE_EXISTING);
                 } else {
@@ -206,6 +213,12 @@ public class ContextToListingMapper {
     private String downloadOne(String key, File out) {
         try {
             out.getParentFile().mkdirs();
+            if (isLocalPath(key)) {
+                File localSrc = new File(key);
+                if (localSrc.isFile()) { Files.copy(localSrc.toPath(), out.toPath(), StandardCopyOption.REPLACE_EXISTING); return out.getAbsolutePath(); }
+                log.warn("SKU 图本地缓存缺失，跳过: {}", key);
+                return null;
+            }
             String url = sign(key);
             File localSrc = new File(url);
             if (localSrc.isFile()) {
@@ -218,6 +231,13 @@ public class ContextToListingMapper {
             log.warn("下载 SKU 图失败 key={}: {}", key, e.getMessage());
             return null;
         }
+    }
+
+    /** key 是否本地绝对路径（Windows 盘符 C:\ / 或 Unix 绝对路径 /），区别于 COS key / http URL。 */
+    private boolean isLocalPath(String key) {
+        if (key == null) return false;
+        if (key.startsWith("http://") || key.startsWith("https://")) return false;
+        return key.matches("^[A-Za-z]:[\\\\/].*") || key.startsWith("/") || key.contains("\\");
     }
 
     /** 调云端把永久 key 换成签名 URL（ADR-008）。 */

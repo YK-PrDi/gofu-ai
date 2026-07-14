@@ -23,15 +23,36 @@ public class SemiAutoController {
     private final com.gofu.local.service.listing.StoreService storeService;
     private final com.gofu.local.service.listing.ListingService listingService;
     private final com.gofu.local.service.listing.SemiAutoOrchestrator orchestrator;
+    private final com.gofu.local.service.listing.StyleImportService styleImportService;
 
     public SemiAutoController(SemiAutoService semiAutoService,
                               com.gofu.local.service.listing.StoreService storeService,
                               com.gofu.local.service.listing.ListingService listingService,
-                              com.gofu.local.service.listing.SemiAutoOrchestrator orchestrator) {
+                              com.gofu.local.service.listing.SemiAutoOrchestrator orchestrator,
+                              com.gofu.local.service.listing.StyleImportService styleImportService) {
         this.semiAutoService = semiAutoService;
         this.storeService = storeService;
         this.listingService = listingService;
         this.orchestrator = orchestrator;
+        this.styleImportService = styleImportService;
+    }
+
+    /**
+     * 导入外部成品图文件夹 → 建云端 context（风格迁移②/上新用）。
+     * 入参 {@code {folderPath, productName?, category?}}；出参 {@code {contextId, mainCount, detailCount, warnings}}。
+     * 文件夹需含 主图/详情 子目录（复用 scanProduct 角色识别）。
+     */
+    @PostMapping("/import-to-context")
+    public ResponseEntity<?> importToContext(@RequestBody Map<String, Object> body) {
+        String folderPath = String.valueOf(body.getOrDefault("folderPath", ""));
+        if (folderPath.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "folderPath 不能为空"));
+        String productName = body.get("productName") != null ? String.valueOf(body.get("productName")) : "";
+        String category = body.get("category") != null ? String.valueOf(body.get("category")) : "";
+        try {
+            return ResponseEntity.ok(styleImportService.importToContext(folderPath, productName, category));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", "导入失败：" + e.getMessage()));
+        }
     }
 
     /**

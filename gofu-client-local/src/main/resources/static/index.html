@@ -208,6 +208,30 @@
       </div>
     </div>
 
+    <!-- 导入外部成品图 → 建商品(可接着风格迁移/上新)。后端 /api/semi-auto/import-to-context -->
+    <div class="section batch-sec" style="padding:14px 20px">
+      <div class="head" @click="imp.open = !imp.open">
+        <span class="subhead" style="margin:0">📥 导入成品图（做风格迁移/上新）</span>
+        <span style="font-size:12px;color:var(--text-faint)">{{ imp.open ? '▲ 收起' : '▼ 展开（导入已做好的主图/详情 → 建商品）' }}</span>
+      </div>
+      <div v-show="imp.open" style="margin-top:10px">
+        <div class="hint" style="margin-bottom:8px">
+          导入外部已做好的成品图 → 建成商品，然后可在右侧「🎨风格迁移」换基调、或直接上新。
+          文件夹需含 <b>主图</b>/<b>详情</b> 子目录（命名含"主图""详情"）。
+        </div>
+        <div class="field" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input type="text" v-model="imp.folderPath" placeholder="粘贴商品文件夹绝对路径（内含 主图/ 详情/ 子目录）"
+                 style="flex:1;min-width:300px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)" />
+          <input type="text" v-model="imp.productName" placeholder="商品名（选填，默认取文件夹名）"
+                 style="width:180px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)" />
+          <button class="btn btn-primary" @click="runImport" :disabled="!imp.folderPath||imp.running">
+            {{ imp.running ? '导入中…' : '导入并建商品' }}
+          </button>
+        </div>
+        <div class="gmsg" :class="imp.msgType" style="margin-top:6px">{{ imp.msg }}</div>
+      </div>
+    </div>
+
     <!-- 文件夹批量上新（独立区块，可折叠）：多套图→多店，按文件夹名识别，串行连续。后端 /api/semi-auto/preflight、/run -->
     <div class="section batch-sec" style="padding:14px 20px">
       <div class="head" @click="batch.open = !batch.open">
@@ -692,6 +716,7 @@ createApp({
       listingDryRun: true, listingRunning: false, listingMsg: '', listingMsgType: '', listingLog: '',
       settings: { reviewImages: true, confirmBeforeListing: true },
       styleTransfer: { styleId: '', running: false, msg: '', msgType: '' },   // 🎨 风格迁移
+      imp: { open: false, folderPath: '', productName: '', running: false, msg: '', msgType: '' },   // 📥 导入成品图建商品
     };
   },
   computed: {
@@ -1322,6 +1347,28 @@ createApp({
         return ids.length ? ids[Math.floor(Math.random() * ids.length)] : '';
       }
       return this.genOpts.templateId || '';
+    },
+
+    // ── 📥 导入外部成品图 → 建商品 → 自动加载(接着可风格迁移/上新) ──
+    async runImport() {
+      if (!this.imp.folderPath.trim()) return;
+      this.imp.running = true;
+      this.imp.msg = '导入中（读图→上传云端→建商品）…'; this.imp.msgType = '';
+      try {
+        const r = await fetch('/api/semi-auto/import-to-context', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ folderPath: this.imp.folderPath.trim(), productName: this.imp.productName.trim() }) });
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        if (!d.contextId) throw new Error('未返回 contextId');
+        this.imp.msg = '✓ 已导入：主图 ' + d.mainCount + ' 张、详情 ' + d.detailCount + ' 张。已加载，可在右侧「🎨风格迁移」换风格或直接上新。';
+        this.imp.msgType = 'ok';
+        this.contextId = d.contextId;
+        await this.loadContext();   // 加载新建商品，右栏出现成品图 + 风格迁移区块
+      } catch (e) {
+        this.imp.msg = '导入失败：' + e.message; this.imp.msgType = 'err';
+      } finally {
+        this.imp.running = false;
+      }
     },
 
     // ── 🎨 风格迁移：对当前商品整套成品图换基调，覆盖回写后刷新预览 ──
