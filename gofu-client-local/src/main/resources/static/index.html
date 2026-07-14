@@ -7,6 +7,7 @@
   <script src="https://unpkg.com/vue@3.4.38/dist/vue.global.prod.js"></script>
   <script src="data/categories.js"></script>
   <script src="stores.js"></script>
+  <script src="batch.js"></script>
   <style>
     /* ── 设计系统 ── */
     :root {
@@ -59,7 +60,14 @@
     .stepper .arr { color: var(--text-faint); }
     /* 店铺登录态 tag */
     .tag-ok { background: var(--ok-soft); color: var(--ok); }
+    .tag-err { background: #fef2f2; color: var(--danger); }
+    .tag-warn { background: #fffbeb; color: #d97706; }
     .store-tag { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 12px; }
+    .batch-miss { color: var(--danger); font-size: 12px; margin: 2px 0; }
+    .batch-sec .head { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+    .batch-sec table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+    .batch-sec th, .batch-sec td { border-bottom: 1px solid #f3f4f6; padding: 6px 8px; text-align: left; vertical-align: top; }
+    .batch-sec th { background: #fafbfc; border-bottom: 1px solid #eee; }
     .grow { flex: 1; }
     .gmsg { font-size: 13px; }
     .gmsg.ok { color: var(--ok); } .gmsg.err { color: var(--danger); }
@@ -197,6 +205,45 @@
           {{ (c.visual&&c.visual.title? c.visual.title.slice(0,14): c.mainItem||c.id.slice(0,8)) }}
           <span style="color:#9ca3af"> · {{ c.status }}</span>
         </button>
+      </div>
+    </div>
+
+    <!-- 文件夹批量上新（独立区块，可折叠）：多套图→多店，按文件夹名识别，串行连续。后端 /api/semi-auto/preflight、/run -->
+    <div class="section batch-sec" style="padding:14px 20px">
+      <div class="head" @click="batch.open = !batch.open">
+        <span class="subhead" style="margin:0">📁 文件夹批量上新</span>
+        <span style="font-size:12px;color:var(--text-faint)">{{ batch.open ? '▲ 收起' : '▼ 展开（多套图→多店，按文件夹名连续上新）' }}</span>
+      </div>
+      <div v-show="batch.open" style="margin-top:10px">
+        <div class="hint" style="margin-bottom:8px">
+          目录约定：大文件夹 → 店铺名子目录（匹配「🏪店铺」里的店铺名）→ 商品文件夹 → 主图/详情/(sku可选)。
+          缺一不上（完整性强校验）。先在「🏪店铺」登录好对应店铺。
+        </div>
+        <div class="field" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input type="text" v-model="batch.rootPath" placeholder="粘贴大文件夹绝对路径（内含 店铺名/商品/主图·详情）"
+                 style="flex:1;min-width:340px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)" />
+          <button class="btn btn-ghost" @click="batchPreflight" :disabled="!batch.rootPath||batch.busy">预检</button>
+          <button class="btn btn-primary" @click="batchRun" :disabled="!batch.canRun||batch.busy">开始批量上新</button>
+        </div>
+        <div class="gmsg" :class="batch.msgType" style="margin-top:6px">{{ batch.msg }}</div>
+
+        <table v-if="batch.outcomes.length">
+          <thead><tr><th>店铺</th><th>商品</th><th>状态</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr v-for="(o,i) in batch.outcomes" :key="i">
+              <td>{{ o.shopName }}</td>
+              <td>{{ o.productName }}</td>
+              <td>
+                <span class="store-tag" :class="batchStatusClass(o.status)">{{ batchStatusText(o.status) }}</span>
+                <div v-if="o.taskId" style="font-size:11px;color:var(--text-faint)">{{ o.taskId }}</div>
+              </td>
+              <td><div v-for="(m,j) in (o.missing||[])" :key="j" class="batch-miss">· {{ m }}</div></td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="batch.outcomes.length" class="hint" style="margin-top:6px">
+          齐全 {{ batchReadyCount }} / 共 {{ batch.outcomes.length }} 商品。
+        </div>
       </div>
     </div>
 
@@ -587,7 +634,7 @@ function mainQtyOf(obj, specText) {
 }
 const { createApp } = Vue;
 createApp({
-  mixins: [window.StoreMixin],   // 多店铺管理（逻辑在 stores.js）
+  mixins: [window.StoreMixin, window.BatchMixin],   // 多店铺管理(stores.js) + 文件夹批量上新(batch.js)
   data() {
     return {
       contextId: '', ctx: null, ctxList: [], signed: {}, selectedPlan: 0,
