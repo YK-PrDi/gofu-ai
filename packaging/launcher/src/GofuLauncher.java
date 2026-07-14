@@ -29,7 +29,7 @@ public class GofuLauncher {
 
     private static final int CLOUD_PORT = 5020;
     private static final int LOCAL_PORT = 5021;
-    private static final String WORKBENCH = "http://localhost:" + LOCAL_PORT + "/workbench.html";
+    private static final String WORKBENCH = "http://localhost:" + LOCAL_PORT + "/";
 
     private static final List<Process> children = new ArrayList<>();
 

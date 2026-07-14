@@ -397,7 +397,36 @@ async function main() {
             const cookies = await context.cookies();
             fs.writeFileSync(cookiesPath, JSON.stringify(cookies, null, 2));
             log('登录成功，cookies 已保存到: ' + cookiesPath);
-            if (loginOnly) { await context.close(); done('login_saved'); return; }
+            if (loginOnly) {
+                // 登录成功后「尽力」抓店铺名回填（只读，不碰登录/反风控逻辑）。
+                // 不同店铺后台布局不一，抓不到不影响登录成功——Java 侧回退占位名。
+                try {
+                    const shopName = await page.evaluate(() => {
+                        const clean = (t) => (t || '').replace(/\s+/g, '').trim();
+                        // 1) 顶栏商家昵称常见容器（多套 class 命名，逐个尝试）
+                        const sels = [
+                            '[class*="mallName"]', '[class*="shopName"]', '[class*="mall-name"]',
+                            '[class*="userName"]', '[class*="nickname"]', '[class*="storeName"]',
+                        ];
+                        for (const s of sels) {
+                            const el = document.querySelector(s);
+                            const t = clean(el && el.textContent);
+                            if (t && t.length >= 2 && t.length <= 40) return t;
+                        }
+                        // 2) 兜底：全局注入的商家信息对象
+                        try {
+                            const g = window.__GLOBAL__ || window.rawData || {};
+                            const nm = g.mallName || (g.mallInfo && g.mallInfo.mallName) || (g.userInfo && g.userInfo.mallName);
+                            if (nm) return clean(nm);
+                        } catch (e) {}
+                        return '';
+                    });
+                    if (shopName) console.log('SHOPNAME:' + shopName);
+                } catch (e) { /* 抓不到店铺名不影响登录 */ }
+                await context.close();
+                done('login_saved');
+                return;
+            }
         }
 
         // ── STEP 1：进入发布新商品页 ────────────────────────────────────

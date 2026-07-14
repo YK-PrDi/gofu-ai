@@ -47,6 +47,9 @@ packaging/launcher/build/
 gofu-client-local/tools/pdd_browser_profile/
 # ERP 拉取的白底图 / 生成的 SKU 图（运行时产物）
 erp-white/
+# 多店铺运行时数据（stores.json 含店铺名映射，stores/ 含每店独立 cookie/profile，绝不提交）
+stores.json
+stores/
 sku-gen/
 # 备份文件
 *.bak-*

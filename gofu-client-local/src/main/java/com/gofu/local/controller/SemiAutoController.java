@@ -127,23 +127,40 @@ public class SemiAutoController {
         return ResponseEntity.ok(Map.of("stores", rows));
     }
 
-    /** 新增/更新店铺（按 profile upsert）。入参 {@code { name, profile }}。 */
+    /**
+     * 新增/更新店铺。入参 {@code { name, profile? }}。
+     * profile 缺省时系统自动分配 store_N（运营只填店铺名即可），返回分配的 profile 供前端接着扫码登录。
+     */
     @PostMapping("/stores")
     public ResponseEntity<?> upsertStore(@RequestBody Map<String, Object> body) {
         String name = String.valueOf(body.getOrDefault("name", "")).trim();
         String profile = String.valueOf(body.getOrDefault("profile", "")).trim();
-        if (name.isEmpty() || profile.isEmpty()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "name 和 profile 不能为空"));
+        if (name.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "店铺名不能为空"));
         }
         try {
             var stores = new java.util.ArrayList<>(storeService.loadStores());
-            stores.removeIf(s -> profile.equals(s.getProfile()));
-            stores.add(new com.gofu.local.model.Store(name, profile));
+            if (profile.isEmpty()) profile = nextProfile(stores);   // 自动分配 store_N
+            final String p = profile;
+            stores.removeIf(s -> p.equals(s.getProfile()));
+            stores.add(new com.gofu.local.model.Store(name, p));
             storeService.saveStores(stores);
-            return ResponseEntity.ok(Map.of("ok", true, "count", stores.size()));
+            return ResponseEntity.ok(Map.of("ok", true, "count", stores.size(), "profile", p));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(Map.of("error", "保存店铺失败：" + e.getMessage()));
         }
+    }
+
+    /** 下一个可用 store_N（取现有 store_ 编号最大值+1，从 1 起）。 */
+    private String nextProfile(java.util.List<com.gofu.local.model.Store> stores) {
+        int max = 0;
+        for (var s : stores) {
+            String p = s.getProfile();
+            if (p != null && p.startsWith("store_")) {
+                try { max = Math.max(max, Integer.parseInt(p.substring(6))); } catch (NumberFormatException ignore) {}
+            }
+        }
+        return "store_" + (max + 1);
     }
 
     /** 登录指定店铺（按 profile 用独立 cookie/profile 路径触发 --login-only）。入参 {@code { profile }}。 */
@@ -153,7 +170,7 @@ public class SemiAutoController {
         if (profile.isEmpty()) return ResponseEntity.badRequest().body(Map.of("error", "profile 不能为空"));
         try {
             String taskId = listingService.runLoginOnly(
-                    storeService.cookiesPathOf(profile), storeService.userDataDirOf(profile));
+                    storeService.cookiesPathOf(profile), storeService.userDataDirOf(profile), profile);
             return ResponseEntity.ok(Map.of("taskId", taskId));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(Map.of("error", "登录启动失败：" + e.getMessage()));

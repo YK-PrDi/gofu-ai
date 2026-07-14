@@ -18,7 +18,7 @@ public class StartupUrlPrinter implements ApplicationListener<WebServerInitializ
         String base = "http://localhost:" + port;
         System.out.println("\n" +
             "  ==== GOFU 本地客户端已启动 ====\n" +
-            "  统一工作台(点这个): " + base + "/workbench.html\n" +
+            "  统一工作台(点这个): " + base + "/\n" +
             "  ===============================\n");
     }
 }

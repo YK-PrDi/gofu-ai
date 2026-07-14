@@ -37,9 +37,12 @@ public class ListingService {
     private final java.util.concurrent.atomic.AtomicBoolean browserBusy =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
-    public ListingService(AppProperties appProperties, TaskService taskService) {
+    private final StoreService storeService;
+
+    public ListingService(AppProperties appProperties, TaskService taskService, StoreService storeService) {
         this.appProperties = appProperties;
         this.taskService = taskService;
+        this.storeService = storeService;
     }
 
     public boolean isBrowserBusy() { return browserBusy.get(); }
@@ -213,6 +216,14 @@ public class ListingService {
      * @param storeUserDataDir 该店独立 user-data-dir（StoreService.userDataDirOf；null=脚本默认）
      */
     public String runLoginOnly(String cookiesPath, String storeUserDataDir) throws Exception {
+        return runLoginOnly(cookiesPath, storeUserDataDir, null);
+    }
+
+    /**
+     * 仅登录 + 尽力回填店铺名（多店）。登录成功后脚本抓到 SHOPNAME: 时，按 profile 更新 stores.json 的店铺名。
+     * @param profile 该店 profile（用于回填店铺名；null 则不回填）
+     */
+    public String runLoginOnly(String cookiesPath, String storeUserDataDir, String profile) throws Exception {
         File scriptFile = resolvePlaywrightScript();
         if (scriptFile == null || !scriptFile.exists()) {
             throw new RuntimeException("找不到 pdd_listing.js");
@@ -222,6 +233,7 @@ public class ListingService {
         File projectRoot = scriptFile.getParentFile();
         final String cp = cookiesPath;
         final String udd = storeUserDataDir;
+        final String prof = profile;
 
         taskService.submit(task, () -> {
             Process proc = null;
@@ -238,7 +250,15 @@ public class ListingService {
                         new InputStreamReader(proc.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = reader.readLine()) != null) {
-                        if (!line.isBlank()) task.addResult(Map.of("type", "log", "message", line));
+                        if (line.startsWith("SHOPNAME:") && prof != null && !prof.isBlank()) {
+                            String shopName = line.substring("SHOPNAME:".length()).trim();
+                            if (!shopName.isBlank()) {
+                                try { storeService.renameStore(prof, shopName); } catch (Exception ignore) {}
+                                task.addResult(Map.of("type", "log", "message", "已识别店铺名：" + shopName));
+                            }
+                        } else if (!line.isBlank()) {
+                            task.addResult(Map.of("type", "log", "message", line));
+                        }
                     }
                 }
                 boolean finished = proc.waitFor(10, java.util.concurrent.TimeUnit.MINUTES);
@@ -264,7 +284,16 @@ public class ListingService {
             File f = new File(resourcesPath, "tools/pdd_listing.js");
             if (f.exists()) return f;
         }
-        return new File(System.getProperty("user.dir"), "tools/pdd_listing.js");
+        // 多候选：无论从仓库根、模块目录还是打包态启动都能定位（修"找不到 pdd_listing.js"）。
+        String userDir = System.getProperty("user.dir");
+        File[] candidates = {
+            new File(userDir, "tools/pdd_listing.js"),                        // 工作目录=模块目录
+            new File(userDir, "gofu-client-local/tools/pdd_listing.js"),      // 工作目录=仓库根
+        };
+        for (File f : candidates) {
+            if (f.exists()) return f;
+        }
+        return candidates[0];   // 都没有则返回首选（上层据 exists() 报错提示）
     }
 
     /**

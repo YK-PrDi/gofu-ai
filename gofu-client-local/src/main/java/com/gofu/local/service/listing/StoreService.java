@@ -68,6 +68,17 @@ public class StoreService {
         om.writerWithDefaultPrettyPrinter().writeValue(storesFile(), root);
     }
 
+    /** 按 profile 更新店铺名（登录成功后脚本抓到真实店铺名时回填）。找不到该 profile 则忽略。 */
+    public synchronized void renameStore(String profile, String newName) throws Exception {
+        if (profile == null || profile.isBlank() || newName == null || newName.isBlank()) return;
+        List<Store> stores = new ArrayList<>(loadStores());
+        boolean hit = false;
+        for (Store s : stores) {
+            if (profile.equals(s.getProfile())) { s.setName(newName); hit = true; break; }
+        }
+        if (hit) saveStores(stores);
+    }
+
     /**
      * 店铺名 → profile 解析（供 P1 SemiAutoService 的 shopResolver 回填）。
      * 先精确匹配 name，再退子串包含（容忍文件夹名多/少后缀）。找不到返回 null。

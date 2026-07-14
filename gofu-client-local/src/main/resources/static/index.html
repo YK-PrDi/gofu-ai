@@ -3,73 +3,1337 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>GOFU-AI 融合工作台</title>
+  <title>GOFU-AI 商品工作台</title>
+  <script src="https://unpkg.com/vue@3.4.38/dist/vue.global.prod.js"></script>
+  <script src="data/categories.js"></script>
+  <script src="stores.js"></script>
   <style>
+    /* ── 设计系统 ── */
+    :root {
+      --bg: #f7f8fa; --surface: #fff; --border: #e5e7eb; --border-strong: #d1d5db;
+      --text: #1f2937; --text-dim: #6b7280; --text-faint: #9ca3af;
+      --primary: #4f46e5; --primary-hover: #4338ca; --primary-soft: #eef2ff;
+      --ok: #059669; --ok-soft: #ecfdf5; --warn: #d97706; --danger: #dc2626; --danger-soft: #fef2f2;
+      --radius: 10px; --radius-sm: 6px; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.1);
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; }
-    body { display: flex; flex-direction: column; }
-    .tabbar {
-      display: flex; align-items: center; gap: 4px; background: #1f2430; padding: 0 12px;
-      height: 46px; flex-shrink: 0; box-shadow: 0 1px 4px rgba(0,0,0,.2);
-    }
-    .brand { color: #fff; font-weight: 700; margin-right: 16px; font-size: 15px; letter-spacing: .5px; }
-    .tab {
-      color: #b7bdc9; background: transparent; border: none; padding: 8px 18px; cursor: pointer;
-      font-size: 14px; border-radius: 6px 6px 0 0; height: 46px;
-    }
-    .tab:hover { color: #fff; background: #2a3040; }
-    .tab.active { color: #fff; background: #f5f6f8; font-weight: 600; }
-    .tab.active.yuren { color: #2563eb; }
-    .tab.active.leyu { color: #c2410c; }
-    .tab.active.preview { color: #16a34a; }
-    .spacer { flex: 1; }
-    .cid-box { display: flex; align-items: center; gap: 6px; color: #b7bdc9; font-size: 12px; }
-    .cid-box input {
-      width: 200px; padding: 4px 8px; border: 1px solid #3a4150; border-radius: 5px;
-      background: #2a3040; color: #fff; font-size: 12px;
-    }
-    .frames { flex: 1; position: relative; background: #f5f6f8; }
-    .frames iframe {
-      position: absolute; inset: 0; width: 100%; height: 100%; border: none; display: none;
-    }
-    .frames iframe.active { display: block; }
+    body { font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); }
+    .wrap { max-width: 1560px; margin: 0 auto; padding: 0 24px 80px; }
+    /* 左右双栏：左操作(固定宽) 右预览(弹性) */
+    .cols2 { display: grid; grid-template-columns: 420px 1fr; gap: 20px; align-items: start; }
+    @media (max-width: 1100px) { .cols2 { grid-template-columns: 1fr; } }
+    .col-left { position: sticky; top: 78px; }
+    @media (max-width: 1100px) { .col-left { position: static; } }
+
+    /* 级联品类选择器（抄羽刃列式级联思路，现代化重做） */
+    .picker-box { border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: 8px 11px;
+      cursor: pointer; background: #fff; min-height: 38px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+    .picker-box:hover { border-color: var(--primary); }
+    .picker-box.placeholder { color: var(--text-faint); }
+    .casc { position: fixed; z-index: 110; background: #fff; border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: 0 12px 32px rgba(0,0,0,.18); display: flex; max-height: 320px; overflow: hidden; }
+    .casc-col { min-width: 160px; max-height: 320px; overflow-y: auto; border-right: 1px solid var(--border); padding: 4px; }
+    .casc-col:last-child { border-right: none; }
+    .casc-item { padding: 6px 10px; border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
+    .casc-item:hover { background: var(--primary-soft); }
+    .casc-item.on { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+    .casc-search { padding: 8px; border-bottom: 1px solid var(--border); }
+    .casc-search input { width: 100%; }
+
+    /* 白底图拖拽区 */
+    .dropzone { border: 2px dashed var(--border-strong); border-radius: var(--radius); padding: 18px; text-align: center;
+      color: var(--text-dim); font-size: 13px; cursor: pointer; transition: border-color .12s, background .12s; }
+    .dropzone.over { border-color: var(--primary); background: var(--primary-soft); }
+    .white-warn { background: var(--danger-soft); color: var(--danger); padding: 8px 12px; border-radius: var(--radius-sm); font-size: 13px; margin-top: 8px; }
+    .white-ok { background: var(--ok-soft); color: var(--ok); padding: 8px 12px; border-radius: var(--radius-sm); font-size: 13px; margin-top: 8px; }
+
+    /* 顶部状态条 */
+    .topbar { position: sticky; top: 0; z-index: 50; background: rgba(255,255,255,.92); backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border); margin-bottom: 24px; }
+    .topbar-inner { max-width: 1200px; margin: 0 auto; padding: 12px 20px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    .logo { font-weight: 800; font-size: 16px; letter-spacing: .5px; color: var(--primary); }
+    .stepper { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-faint); }
+    .stepper .st { padding: 3px 10px; border-radius: 20px; background: #f3f4f6; }
+    .stepper .st.done { background: var(--ok-soft); color: var(--ok); }
+    .stepper .st.active { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+    .stepper .arr { color: var(--text-faint); }
+    /* 店铺登录态 tag */
+    .tag-ok { background: var(--ok-soft); color: var(--ok); }
+    .store-tag { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 12px; }
+    .grow { flex: 1; }
+    .gmsg { font-size: 13px; }
+    .gmsg.ok { color: var(--ok); } .gmsg.err { color: var(--danger); }
+
+    /* 卡片版块 */
+    .section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: var(--shadow); padding: 20px; margin-bottom: 20px; }
+    .section h2 { font-size: 15px; font-weight: 700; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+    .section h2 .num { width: 22px; height: 22px; border-radius: 50%; background: var(--primary); color: #fff;
+      font-size: 12px; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; }
+    .subhead { font-size: 12px; color: var(--text-dim); margin: 16px 0 6px; font-weight: 600; text-transform: none; }
+
+    /* 表单 */
+    .field { margin-bottom: 12px; }
+    .field label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; font-weight: 600; }
+    input[type=text], input[type=number], select, textarea {
+      width: 100%; padding: 8px 11px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+      font-size: 14px; color: var(--text); background: #fff; font-family: inherit; }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .row > * { flex: 1; min-width: 160px; }
+
+    /* 按钮 */
+    .btn { padding: 8px 16px; border: none; border-radius: var(--radius-sm); cursor: pointer; font-size: 14px;
+      font-weight: 600; font-family: inherit; transition: background .12s, opacity .12s; }
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-ghost { background: #f3f4f6; color: var(--text); }
+    .btn-ghost:hover { background: #e5e7eb; }
+    .btn-lg { padding: 12px 28px; font-size: 15px; }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+
+    /* 徽章/标签 */
+    .badge { padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+    .badge.DRAFT { background: #fef9c3; color: #854d0e; }
+    .badge.GENERATING { background: var(--primary-soft); color: var(--primary); }
+    .badge.READY { background: var(--ok-soft); color: var(--ok); }
+    .badge.LISTED { background: #ede9fe; color: #6d28d9; }
+    .tag { display: inline-block; background: var(--primary-soft); color: var(--primary); padding: 3px 10px;
+      border-radius: 20px; font-size: 12px; margin: 2px; }
+
+    /* 图片网格 */
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; margin-top: 8px; }
+    .cell { position: relative; aspect-ratio: 1; background: #f3f4f6; border-radius: var(--radius-sm); overflow: hidden;
+      display: flex; align-items: center; justify-content: center; border: 1px solid var(--border); }
+    .cell img { width: 100%; height: 100%; object-fit: cover; }
+    .cell .ph { color: var(--text-faint); font-size: 12px; }
+    .cell .cap { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,.6); color: #fff;
+      font-size: 11px; padding: 3px 6px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cell-actions { position: absolute; inset: 0; display: none; flex-direction: column; gap: 6px;
+      align-items: center; justify-content: center; background: rgba(0,0,0,.5); }
+    .cell:hover .cell-actions { display: flex; }
+    .cell-actions button { padding: 4px 12px; border: none; border-radius: var(--radius-sm); cursor: pointer;
+      font-size: 12px; background: #fff; color: var(--text); font-weight: 600; }
+    .cell-actions button:hover { background: var(--primary); color: #fff; }
+
+    /* 表格 */
+    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+    th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+    th { color: var(--text-dim); font-weight: 600; font-size: 12px; }
+    td.num { text-align: right; }
+    .price-in { width: 84px; padding: 5px 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); text-align: right; }
+    .price-in.edited { border-color: var(--primary); background: var(--primary-soft); }
+    .margin { font-weight: 700; }
+    .margin.good { color: var(--ok); } .margin.mid { color: var(--warn); } .margin.bad { color: var(--danger); }
+
+    .empty { color: var(--text-faint); text-align: center; padding: 28px; font-size: 13px; }
+    .plan-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+    .plan-tab { padding: 6px 14px; border: 1px solid var(--border-strong); border-radius: 20px; background: #fff; cursor: pointer; font-size: 13px; }
+    .plan-tab.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+    .hint { font-size: 12px; color: var(--text-faint); margin-top: 4px; }
+    .progress { height: 6px; background: #eef2ff; border-radius: 3px; overflow: hidden; margin-top: 10px; }
+    .progress .bar { height: 100%; background: var(--primary); transition: width .3s; }
+    .settings-row { display: flex; gap: 20px; flex-wrap: wrap; font-size: 13px; color: var(--text); }
+    .settings-row label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    pre.log { background: #111827; color: #d1d5db; padding: 12px; border-radius: var(--radius-sm); font-size: 12px;
+      max-height: 240px; overflow: auto; white-space: pre-wrap; margin-top: 10px; }
+
+    /* 选品弹窗 */
+    .modal-mask { position: fixed; inset: 0; background: rgba(17,24,39,.5); z-index: 100;
+      display: flex; align-items: center; justify-content: center; padding: 24px; }
+    .modal { background: var(--surface); border-radius: var(--radius); box-shadow: 0 20px 40px rgba(0,0,0,.2);
+      width: 100%; max-width: 720px; max-height: 82vh; display: flex; flex-direction: column; overflow: hidden; }
+    .modal-head { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+    .modal-head h3 { font-size: 15px; font-weight: 700; }
+    .modal-head .x { margin-left: auto; cursor: pointer; color: var(--text-faint); font-size: 20px; background: none; border: none; }
+    .modal-body { padding: 16px 20px; overflow: auto; flex: 1; }
+    .modal-foot { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+    .pick-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--radius-sm);
+      border: 1px solid var(--border); margin-bottom: 6px; font-size: 13px; }
+    .pick-row { cursor: pointer; }
+    .pick-row:hover { background: #fafbfc; }
+    .pick-row.picked { background: #e8f2ff; box-shadow: inset 3px 0 0 var(--primary); }
+    .pick-row.picked:hover { background: #ddebff; }
+    .pick-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pick-row .pr { color: var(--text-dim); font-size: 12px; }
+    .pick-row select { width: 92px; padding: 3px 6px; font-size: 12px; }
+    .pick-thumb { width: 40px; height: 40px; flex: none; display: flex; align-items: center; justify-content: center;
+      border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; background: #fff; }
+    .pick-thumb img { width: 100%; height: 100%; object-fit: contain; }
+    .pick-thumb.clickable { cursor: zoom-in; }
+    .pick-thumb .ph { color: var(--text-dim); }
+    .chosen { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .chosen .chip { background: var(--primary-soft); color: var(--primary); padding: 3px 10px; border-radius: 20px; font-size: 12px; display: flex; gap: 6px; align-items: center; }
+    .chosen .chip .rm { cursor: pointer; color: var(--danger); }
   </style>
 </head>
 <body>
-  <div class="tabbar">
-    <span class="brand">GOFU-AI</span>
-    <button class="tab yuren active" data-tab="yuren" onclick="switchTab('yuren')">羽刃 · 生图</button>
-    <button class="tab leyu" data-tab="leyu" onclick="switchTab('leyu')">乐羽 · 上新</button>
-    <button class="tab preview" data-tab="preview" onclick="switchTab('preview')">预览 · 合流</button>
-    <span class="spacer"></span>
-    <div class="cid-box">
-      商品ID
-      <input id="cid" placeholder="ProductContext ID" oninput="saveCid()" />
+<div id="app">
+  <div class="topbar">
+    <div class="topbar-inner">
+      <span class="logo">GOFU-AI</span>
+      <div class="stepper">
+        <span class="st" :class="stepClass('entry')">录入</span><span class="arr">›</span>
+        <span class="st" :class="stepClass('layout')">布局</span><span class="arr">›</span>
+        <span class="st" :class="stepClass('images')">出图</span><span class="arr">›</span>
+        <span class="st" :class="stepClass('ready')">就绪</span>
+      </div>
+      <span v-if="ctx" class="badge" :class="ctx.status">{{ ctx.status }}</span>
+      <span class="grow"></span>
+      <span class="gmsg" :class="msgType">{{ msg }}</span>
+      <button class="btn btn-ghost" @click="openStores">🏪 店铺</button>
+      <button class="btn btn-ghost" @click="openErpConfig">⚙️ 快麦设置</button>
+      <button class="btn btn-ghost" @click="listContexts">列出商品</button>
+      <button class="btn btn-ghost" @click="saveContext" :disabled="!ctx">保存</button>
     </div>
   </div>
-  <div class="frames">
-    <iframe id="f-yuren" class="active" src="yuren/index.html"></iframe>
-    <iframe id="f-leyu" src="leyu/index.html"></iframe>
-    <iframe id="f-preview" src="preview.html"></iframe>
+
+  <div class="wrap">
+    <div v-if="ctxList.length" class="section" style="padding:14px 20px">
+      <div class="subhead" style="margin-top:0">云端商品（点选加载）</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        <button v-for="c in ctxList" :key="c.id" class="plan-tab" :class="{active:c.id===contextId}"
+                @click="contextId=c.id; loadContext()">
+          {{ (c.visual&&c.visual.title? c.visual.title.slice(0,14): c.mainItem||c.id.slice(0,8)) }}
+          <span style="color:#9ca3af"> · {{ c.status }}</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="cols2">
+     <!-- 左栏：录入 + 一键生成 + 上新 -->
+     <div class="col-left">
+      <div class="section">
+        <h2><span class="num">1</span> 录入商品</h2>
+        <div class="field">
+          <label>品类</label>
+          <div class="picker-box" :class="{placeholder:!cat.path.length}" @click="openCasc">
+            {{ cat.path.length ? cat.path.join(' › ') : '点击选择品类（如 家装主材 › 卫浴配件 › 花洒配件 › 花洒喷头）' }}
+          </div>
+        </div>
+        <div class="field">
+          <label>主件 / 配件</label>
+          <div class="picker-box" :class="{placeholder:!entry.skus.length}" @click="openPicker">
+            <template v-if="entry.skus.length">
+              <span v-for="(s,i) in entry.skus" :key="i" class="chip" @click.stop>
+                <b>{{ roleLabel(s.role) }}</b> {{ s.name }}
+                <span class="rm" @click.stop="removeSku(i)">✕</span>
+              </span>
+            </template>
+            <template v-else>📦 从快麦 ERP 选品（主件/配件）</template>
+          </div>
+        </div>
+        <div class="field">
+          <label>生图模型</label>
+          <select v-model="entry.agentId">
+            <option v-for="a in agents" :key="a.id" :value="a.id">{{ a.name }}</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>品牌（可选，标题开头用；留空则标题不带品牌）</label>
+          <input type="text" v-model="entry.brand" placeholder="如：潮乐 / 留空" style="width:100%;padding:6px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)" />
+        </div>
+
+        <div class="field">
+          <label>白底图</label>
+          <div class="hint" style="margin-bottom:6px">
+            选好主件后自动从快麦拉取白底图（预览在右侧）。快麦缺图的编码会在右侧「产品白底图」区**按编码**提示，
+            在那里为每个编码导入并可一键回传快麦。也可在下方批量拖入一批白底图。
+          </div>
+          <div class="dropzone" :class="{over:dropOver}"
+               @click="pickWhiteFiles" @dragover.prevent="dropOver=true" @dragleave="dropOver=false" @drop.prevent="onDropWhite">
+            批量拖拽白底图到此，或点击选择文件；也可
+            <a href="#" @click.stop.prevent="pickWhiteDir">选择文件夹</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2><span class="num">2</span> 一键生成</h2>
+        <div class="settings-row" style="margin-bottom:8px;display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;align-items:center">
+          <label style="display:flex;align-items:center;justify-content:space-between;gap:6px">主图张数
+            <select v-model.number="genOpts.mainCount" style="flex:1;max-width:110px"><option v-for="n in [3,4,5,6,8,10]" :key="n" :value="n">{{n}}</option></select>
+          </label>
+          <label style="display:flex;align-items:center;justify-content:space-between;gap:6px">主图比例
+            <select v-model="genOpts.mainAspect" style="flex:1;max-width:110px"><option v-for="a in ['1:1','3:4','4:3','9:16','16:9']" :key="a" :value="a">{{a}}</option></select>
+          </label>
+          <label style="display:flex;align-items:center;justify-content:space-between;gap:6px">方案数
+            <select v-model.number="genOpts.planCount" style="flex:1;max-width:110px"><option v-for="n in [1,2,3,4,5]" :key="n" :value="n">{{n}}套</option></select>
+          </label>
+          <label style="display:flex;align-items:center;justify-content:space-between;gap:6px">防比价模式
+            <select v-model="genOpts.templateId" style="flex:1;max-width:110px">
+              <option value="__random__">随机</option>
+              <option v-for="t in antipriceTemplates" :key="t.id" :value="t.id">{{ t.name }}</option>
+            </select>
+          </label>
+          <label style="display:flex;align-items:center;justify-content:space-between;gap:6px">改图风格
+            <select v-model="genOpts.styleId" style="flex:1;max-width:110px">
+              <option v-for="s in styleOptions" :key="s.id" :value="s.id">{{ s.name }}</option>
+            </select>
+          </label>
+        </div>
+        <div class="field" style="margin-bottom:8px">
+          <label style="font-size:12px;color:var(--text-dim)">生图要求（选填，留空则按品类/卖点自动生成；AI 会看白底图针对性出图）</label>
+          <input type="text" v-model="genOpts.customRequest" placeholder="如：浴室场景、突出增压水流、高级感" style="width:100%;padding:6px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)" />
+        </div>
+        <!-- 两段式（07.08）：先出布局+主图 → 预览选方案 → 再对选定方案生 SKU图+详情图 -->
+        <button class="btn btn-primary btn-lg" @click="runLayout" :disabled="genRunning || !canGenerate" style="width:100%">
+          {{ genRunning && !layoutDone ? '生成布局+主图中…' : '① 生成布局 + 主图' }}
+        </button>
+        <button v-if="layoutDone" class="btn btn-primary btn-lg" @click="runSkuImages" :disabled="genRunning" style="width:100%;margin-top:8px">
+          {{ genRunning ? '生成中…' : '② 生成选定方案的 SKU 图 + 详情图' }}
+        </button>
+        <div v-if="!canGenerate" class="hint">需先选品类、选主件、备齐主件白底图</div>
+        <div v-if="layoutDone" class="hint">已出布局和主图。在右侧预览切换/选定方案后，点②生成该方案的 SKU 图和详情图。</div>
+        <div v-if="genRunning || genDone" class="progress"><div class="bar" :style="{width: genProgress+'%'}"></div></div>
+        <div class="hint" v-if="genMsg">{{ genMsg }}</div>
+      </div>
+
+      <div v-if="ctx" class="section">
+        <h2><span class="num">4</span> 上新</h2>
+        <div class="field">
+          <label>目标店铺</label>
+          <select v-model="targetProfile" @focus="stores.list.length||loadStores()">
+            <option value="">默认店铺（单店旧行为）</option>
+            <option v-for="s in stores.list" :key="s.profile" :value="s.profile">
+              {{ s.name }}（{{ s.profile }}{{ s.loggedIn?' · 已登录':' · 未登录' }}）
+            </option>
+          </select>
+        </div>
+        <div class="settings-row" style="margin-bottom:12px;flex-direction:column;gap:8px">
+          <label><input type="checkbox" v-model="settings.reviewImages" @change="saveSettings" /> 生图后必须人工过图</label>
+          <label><input type="checkbox" v-model="settings.confirmBeforeListing" @change="saveSettings" /> 上新前二次确认</label>
+          <label><input type="checkbox" v-model="listingDryRun" /> 诊断模式(不提交)</label>
+        </div>
+        <button class="btn btn-primary btn-lg" @click="submitListing" :disabled="listingRunning || !currentItems.length" style="width:100%">
+          {{ listingRunning ? '上新中…' : '确认上新' }}
+        </button>
+        <div class="gmsg" :class="listingMsgType" style="margin-top:8px">{{ listingMsg }}</div>
+        <pre v-if="listingLog" class="log">{{ listingLog }}</pre>
+      </div>
+     </div>
+
+     <!-- 右栏：预览 -->
+     <div class="col-right">
+      <!-- 白底图预览（选主件即自动拉取，缺图提示导入）——独立于生成结果，先于 ctx 显示 -->
+      <div v-if="mainCodes.length || entry.whites.length" class="section">
+        <h2>产品白底图</h2>
+        <div v-if="whiteFetching" class="hint">从快麦拉取白底图…</div>
+        <div v-if="whiteCheck.missing.length" class="white-warn">
+          ⚠️ 快麦无白底图的编码（主件/配件）：为每个缺图编码导入白底图，导入后可一键回传快麦。
+          <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
+            <div v-for="code in whiteCheck.missing" :key="'miss'+code" style="display:flex;align-items:center;gap:8px;font-size:12px">
+              <span style="min-width:150px;font-family:monospace">{{ code }}</span>
+              <button class="btn btn-ghost" @click="importForCode(code)">导入白底图</button>
+              <span v-if="importedFor[code]" class="pick-thumb" style="width:32px;height:32px"><img :src="importedFor[code]" /></span>
+              <button v-if="importedFor[code]" class="btn btn-ghost" @click="pushWhiteToKuaimai(code)" :disabled="pushingCode===code">
+                {{ pushingCode===code ? '回传中…' : '↑ 回传快麦' }}
+              </button>
+              <span v-if="pushedCodes.includes(code)" class="white-ok" style="padding:2px 6px">✓ 已回传</span>
+            </div>
+          </div>
+        </div>
+        <div v-else-if="entry.whites.length" class="white-ok">✓ 白底图就绪（{{ entry.whites.length }} 张）</div>
+        <div v-if="entry.whites.length" class="grid" style="margin-top:8px">
+          <div v-for="(w,i) in entry.whites" :key="'w'+i" class="cell" style="background:#fff">
+            <img :src="whiteThumb(w)" :title="'白底#'+(i+1)" />
+            <div class="cell-actions"><button @click="entry.whites.splice(i,1)">✕ 移除</button></div>
+          </div>
+        </div>
+        <!-- D：配件白底图（自动搭配后拉取的软管/底座/滤芯等），之前只塞后端无展示出口 -->
+        <template v-if="entry.accWhites && entry.accWhites.length">
+          <div class="subhead">配件白底图（{{ entry.accWhites.length }} 张）</div>
+          <div class="grid" style="margin-top:4px">
+            <div v-for="(w,i) in entry.accWhites" :key="'aw'+i" class="cell" style="background:#fff">
+              <img :src="whiteThumb(w)" :title="'配件白底#'+(i+1)" />
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <div v-if="ctx" class="section">
+      <h2><span class="num">3</span> 结果预览</h2>
+      <div class="field">
+        <label>标题</label>
+        <textarea rows="2" v-model="ctx.visual.title" @input="markLocked('title')"></textarea>
+      </div>
+      <div class="subhead">核心卖点</div>
+      <div>
+        <span v-for="(p,i) in ctx.visual.sellingPoints" :key="i" class="tag">{{ p }}</span>
+        <span v-if="!ctx.visual.sellingPoints.length" class="hint">（无卖点）</span>
+      </div>
+
+      <div class="subhead" style="display:flex;align-items:center;justify-content:space-between">
+        <span>主图</span>
+        <button v-if="ctx.visual.mainImages.length" class="btn btn-ghost" style="padding:2px 10px;font-size:12px"
+                @click="regenAllMains" :disabled="genRunning">🔄 一键重生全部主图（覆盖）</button>
+      </div>
+      <div class="grid">
+        <div v-for="(k,i) in ctx.visual.mainImages" :key="k" class="cell">
+          <img v-if="signed[k]" :src="signed[k]" />
+          <span v-else class="ph">加载中…</span>
+          <div class="cell-actions">
+            <button @click="regenImage('main',i)" :disabled="imgBusy">🔄 重生</button>
+            <button @click="repaintImage('main',i)" :disabled="imgBusy">🎨 重绘</button>
+          </div>
+        </div>
+        <div v-if="!ctx.visual.mainImages.length" class="empty" style="grid-column:1/-1">暂无主图</div>
+      </div>
+
+      <div class="subhead">详情图</div>
+      <div class="grid">
+        <div v-for="(k,i) in ctx.visual.detailImages" :key="k" class="cell">
+          <img v-if="signed[k]" :src="signed[k]" />
+          <span v-else class="ph">加载中…</span>
+          <div class="cell-actions">
+            <button @click="regenImage('detail',i)" :disabled="imgBusy">🔄 重生</button>
+            <button @click="repaintImage('detail',i)" :disabled="imgBusy">🎨 重绘</button>
+          </div>
+        </div>
+        <div v-if="!ctx.visual.detailImages.length" class="empty" style="grid-column:1/-1">暂无详情图</div>
+      </div>
+
+      <div class="subhead">SKU 方案</div>
+      <div v-if="plans.length" class="plan-tabs">
+        <button v-for="(p,i) in plans" :key="i" class="plan-tab" :class="{active:i===selectedPlan}" @click="selectPlan(i)">
+          {{ p.planName || ('方案'+(i+1)) }}
+        </button>
+      </div>
+      <div v-if="currentPlan" class="hint">{{ currentPlan.description }}</div>
+      <div v-if="currentItems.length" style="display:flex;align-items:center;gap:10px;margin:8px 0">
+        <span class="hint">利润率（利润占售价）：<b>{{ (profitRate*100).toFixed(0) }}%</b></span>
+        <input type="range" min="0.15" max="0.65" step="0.01" v-model.number="profitRate" style="flex:1;max-width:220px" />
+        <button class="btn btn-ghost" @click="recalcPrice" :disabled="genRunning">按此重算定价</button>
+        <button class="btn btn-ghost" @click="exportPricing">导出定价表</button>
+      </div>
+      <table v-if="currentItems.length">
+        <thead><tr><th>SKU图</th><th>型号</th><th>主件</th><th>配件</th><th class="num">成本</th><th class="num">售价</th></tr></thead>
+        <tbody>
+          <tr v-for="(it,idx) in currentItems" :key="idx">
+            <td><div class="cell" style="width:40px;height:40px;aspect-ratio:auto">
+              <img v-if="skuImgFor(it)" :src="skuImgFor(it)" /><span v-else class="ph" style="font-size:10px">—</span>
+            </div></td>
+            <td>{{ it.skuDisplayName || it.name }}</td>
+            <td>{{ it.spec1 }}</td>
+            <td>{{ (it.accParts && it.accParts.length) ? it.spec2 : '无' }}</td>
+            <td class="num">{{ fmt(it.cost) }}</td>
+            <td class="num"><input type="number" class="price-in" :class="{edited:it.__edited}" v-model.number="it.groupPrice" min="0" step="0.1" @input="onPrice(idx)" /></td>
+          </tr>
+        </tbody>
+      </table>
+      <div v-else class="empty">当前方案暂无 SKU 型号</div>
+
+      <div class="subhead">SKU 图（按型号名匹配挂到上表）</div>
+      <div class="grid">
+        <div v-for="(k,i) in skuImages" :key="k" class="cell">
+          <img v-if="signed[k]" :src="signed[k]" /><span v-else class="ph">加载中…</span>
+        </div>
+        <div v-if="!skuImages.length" class="empty" style="grid-column:1/-1">暂无 SKU 图</div>
+      </div>
+      </div>
+      <div v-else class="section"><div class="empty">左侧录入并「一键生成」后，这里显示预览结果（主图/详情/SKU）。</div></div>
+     </div>
+    </div>
   </div>
 
-  <script>
-    // 三页共享 contextId（localStorage）。预览页/编排产出的 ID 填这里，切到乐羽/羽刃时可带上。
-    const CID_KEY = 'gofu_context_id';
-    function saveCid() {
-      localStorage.setItem(CID_KEY, document.getElementById('cid').value.trim());
-    }
-    function loadCid() {
-      const v = localStorage.getItem(CID_KEY) || '';
-      document.getElementById('cid').value = v;
-    }
-    function switchTab(name) {
-      document.querySelectorAll('.tab').forEach(t =>
-        t.classList.toggle('active', t.dataset.tab === name));
-      document.querySelectorAll('.frames iframe').forEach(f =>
-        f.classList.toggle('active', f.id === 'f-' + name));
-    }
-    loadCid();
-  </script>
+  <!-- 品类级联下拉 -->
+  <div v-if="casc.open" class="casc" :style="{left:casc.x+'px', top:casc.y+'px'}">
+    <div class="casc-col">
+      <div class="casc-search"><input type="text" v-model="casc.kw" placeholder="搜索品类" @click.stop /></div>
+      <div v-if="casc.kw">
+        <div v-for="(hit,i) in cascSearch" :key="i" class="casc-item" @click="pickCascPath(hit)">{{ hit.join(' › ') }}</div>
+        <div v-if="!cascSearch.length" class="empty" style="padding:12px">无匹配</div>
+      </div>
+    </div>
+    <template v-if="!casc.kw">
+      <div v-for="(col,ci) in cascCols" :key="ci" class="casc-col">
+        <div v-for="node in col" :key="node.display" class="casc-item"
+             :class="{on: casc.sel[ci]===node.display}" @click="pickCasc(ci, node)">
+          {{ node.display }}<span v-if="node.children">›</span>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- ERP 选品弹窗 -->
+  <div v-if="picker.open" class="modal-mask" @click.self="picker.open=false">
+    <div class="modal">
+      <div class="modal-head">
+        <h3>从快麦 ERP 选品</h3>
+        <input type="text" v-model="picker.kw" placeholder="搜索名称/编码（打开即显示全部，输入实时过滤）" @input="searchPick" @keyup.enter="searchPick" style="flex:1;max-width:340px" />
+        <button class="btn btn-ghost" @click="refreshErpCache" :disabled="erpRefreshing" title="ERP有新单品/刚传的白底图搜不到？点此刷新缓存">{{ erpRefreshing ? '刷新中…' : '🔄 刷新缓存' }}</button>
+        <button class="x" @click="picker.open=false">×</button>
+      </div>
+      <div class="modal-body">
+        <div v-if="picker.loading" class="empty">加载中…</div>
+        <div v-else-if="!picker.results.length" class="empty">
+          {{ picker.kw ? '无匹配单品，换个关键词' : '无单品（快麦凭证未配或缓存为空，点⚙️设置检查/刷新缓存）' }}
+        </div>
+        <div v-for="(r,i) in picker.results" :key="i" class="pick-row" :class="{picked: !!picker.roleFor[r.outerId]}" @click="togglePick(r)">
+          <span class="pick-thumb" @click.stop="lightbox = rowImg(r) || lightbox" :class="{clickable:rowImg(r)}">
+            <img v-if="rowImg(r)" :src="rowImg(r)" :title="'点击放大'" />
+            <span v-else class="ph" style="font-size:10px">无图</span>
+          </span>
+          <span class="nm">{{ r.title || r.outerId }}</span>
+          <span class="pr">¥{{ (r.purchasePrice||0) }}</span>
+          <!-- 选中后才显示角色下拉(默认主件)，可改配件/批量件；点整行切换选中/取消 -->
+          <select v-if="picker.roleFor[r.outerId]" v-model="picker.roleFor[r.outerId]" @click.stop>
+            <option value="main">主件</option>
+            <option value="accessory">配件</option>
+            <option value="batch">批量件</option>
+          </select>
+          <span v-else class="hint" style="width:92px;text-align:center">点击选中</span>
+        </div>
+        <div v-if="picker.results.length>=200" class="hint" style="padding:8px">仅显示前 200 条，用上方搜索缩小范围</div>
+      </div>
+      <div class="modal-foot">
+        <span class="hint" style="margin:0">选好角色的单品将加入录入区</span>
+        <span class="grow" style="flex:1"></span>
+        <button class="btn btn-ghost" @click="picker.open=false">取消</button>
+        <button class="btn btn-primary" @click="confirmPick">加入选中</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 图片放大灯箱（选品缩略图点击放大，也可复用于其他预览）-->
+  <div v-if="lightbox" class="modal-mask" style="z-index:100" @click="lightbox=''">
+    <img :src="lightbox" style="max-width:88vw;max-height:88vh;object-fit:contain;background:#fff;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,.4)" />
+  </div>
+
+  <!-- 店铺管理弹窗（多店：每店独立 profile/cookie 隔离，方案A 反风控脚本不动） -->
+  <div v-if="stores.open" class="modal-mask" @click.self="stores.open=false">
+    <div class="modal" style="max-width:640px">
+      <div class="modal-head">
+        <h3>🏪 店铺管理（{{ stores.list.length }}）</h3>
+        <button class="x" @click="stores.open=false">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="hint" style="margin-bottom:12px">点「+ 加店铺」直接弹出浏览器扫码登录，登录后自动识别并填入店铺名（识别不到会显示"未命名店铺N"，可点名字改）。每个店铺独立登录态、互不串号。上新时在第 4 步「目标店铺」选上到哪个店。</div>
+        <div class="field">
+          <button class="btn btn-primary" @click="addAndLogin" :disabled="stores.adding">{{ stores.adding ? '正在弹出浏览器…' : '+ 加店铺（扫码登录）' }}</button>
+        </div>
+        <table v-if="stores.list.length" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:10px">
+          <thead><tr>
+            <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee">店铺名</th>
+            <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee">profile</th>
+            <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee">登录态</th>
+            <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee">操作</th>
+          </tr></thead>
+          <tbody>
+            <tr v-for="s in stores.list" :key="s.profile">
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6" title="点击改名">
+                <span @click="renameStorePrompt(s)" style="cursor:pointer;border-bottom:1px dashed #cbd5e1">{{ s.name || '未命名店铺' }}</span>
+              </td>
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6;color:var(--text-dim)">{{ s.profile }}</td>
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6"><span class="store-tag" :class="s.loggedIn?'tag-ok':''" style="background:#f3f4f6">{{ s.loggedIn?'已登录':'未登录' }}</span></td>
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6"><button class="btn btn-ghost" style="padding:2px 10px;font-size:12px" @click="loginStore(s)">登录/重登</button></td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else class="hint">还没有店铺，先新增并登录。</div>
+        <div class="gmsg" :class="stores.msgType" style="margin-top:8px">{{ stores.msg }}</div>
+      </div>
+      <div class="modal-foot">
+        <span class="grow" style="flex:1"></span>
+        <button class="btn btn-ghost" @click="stores.open=false">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 快麦 ERP 配置弹窗（会话30天过期，用户自行更新 token） -->
+  <div v-if="erpCfg.open" class="modal-mask" @click.self="erpCfg.open=false">
+    <div class="modal" style="max-width:560px">
+      <div class="modal-head">
+        <h3>⚙️ 快麦 ERP 设置</h3>
+        <button class="x" @click="erpCfg.open=false">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="hint" style="margin-bottom:12px">会话有效期 30 天，过期后在快麦后台重新获取 accessToken / refreshToken 填入这里保存；或点「刷新 Token」用 refreshToken 续期。</div>
+        <div class="field"><label>appKey</label><input type="text" v-model="erpCfg.form.appKey" /></div>
+        <div class="field"><label>appSecret</label><input type="text" v-model="erpCfg.form.appSecret" /></div>
+        <div class="field"><label>accessToken</label><input type="text" v-model="erpCfg.form.accessToken" /></div>
+        <div class="field"><label>refreshToken</label><input type="text" v-model="erpCfg.form.refreshToken" /></div>
+        <div class="field"><label>companyId</label><input type="text" v-model="erpCfg.form.companyId" /></div>
+        <div class="field"><label>appTitle（公司名）</label><input type="text" v-model="erpCfg.form.appTitle" /></div>
+        <div class="gmsg" :class="erpCfg.msgType">{{ erpCfg.msg }}</div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" @click="refreshErpToken">刷新 Token</button>
+        <span class="grow" style="flex:1"></span>
+        <button class="btn btn-ghost" @click="erpCfg.open=false">取消</button>
+        <button class="btn btn-primary" @click="saveErpConfig">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+// 主品数量：优先后端结构化 mainQty，缺失才回退正则(认"N件装/组合/套")。
+function mainQtyFromSpec(spec) {
+  const s = String(spec || '');
+  const m = s.match(/([0-9]+|[一二两三四五六七八九十]+)\s*件\s*(?:装|组合|套)/);
+  if (m) {
+    const cn = { 一:1, 二:2, 两:2, 三:3, 四:4, 五:5, 六:6, 七:7, 八:8, 九:9, 十:10 };
+    const t = m[1];
+    const n = /^[0-9]+$/.test(t) ? parseInt(t, 10) : (cn[t] || 1);
+    return Math.max(1, n);
+  }
+  return 1; // 单品/标准款/无匹配 → 1
+}
+function mainQtyOf(obj, specText) {
+  const q = obj && obj.mainQty;
+  if (typeof q === 'number' && q >= 1) return Math.floor(q);
+  if (typeof q === 'string' && /^\d+$/.test(q) && +q >= 1) return +q;
+  return mainQtyFromSpec(specText);
+}
+const { createApp } = Vue;
+createApp({
+  mixins: [window.StoreMixin],   // 多店铺管理（逻辑在 stores.js）
+  data() {
+    return {
+      contextId: '', ctx: null, ctxList: [], signed: {}, selectedPlan: 0,
+      msg: '', msgType: '',
+      agents: [{ id: 'gpt-image', name: 'GPT-Image 2' }],   // 兜底，onMounted 拉全量
+      entry: { agentId: 'gpt-image', whites: [], accWhites: [], skus: [], brand: 'GOFU' },
+      cat: { path: [] },   // 选中的品类路径数组
+      casc: { open: false, x: 0, y: 0, kw: '', sel: [] },   // 级联下拉状态
+      dropOver: false,
+      whiteCheck: { done: false, has: [], missing: [] },
+      importedFor: {},        // 缺图编码 → 导入的白底图 dataURL（供预览+回传）
+      whiteCodeMap: {},       // 编码 → [白底图file,...] 旁路映射（快麦取/导入的记来源，删单品时同步移除白底图）
+      pushingCode: '',        // 正在回传快麦的编码
+      pushedCodes: [],        // 已成功回传的编码
+      whiteFetching: false,
+      picker: { open: false, kw: '', loading: false, searched: false, results: [], all: [], roleFor: {} },
+      lightbox: '',   // 图片放大灯箱当前URL
+      erpCfg: { open: false, form: { appKey: '', appSecret: '', accessToken: '', refreshToken: '', companyId: '', appTitle: '' }, msg: '', msgType: '' },
+      genOpts: { mainCount: 6, planCount: 3, templateId: '__random__', mainAspect: '1:1', customRequest: '', styleId: 'random' },   // 主图张数默认6(详情配对=主图数)；方案数默认3；防比价默认随机；主图比例默认1:1；生图要求选填(空则自动)；改图风格默认随机(07.09#2)
+      // 改图风格选项（与后端 STYLE_PROMPTS 对齐，默认随机）
+      styleOptions: [
+        { id: 'random', name: '随机' },
+        { id: 'original', name: '原图延展' },
+        { id: 'tech-blue', name: '科技蓝' },
+        { id: 'girl-pink', name: '少女粉' },
+        { id: 'premium-gray', name: '高级灰' },
+        { id: 'natural-green', name: '自然绿' },
+        { id: 'sunset-orange', name: '暖阳橙' },
+        { id: 'khaki', name: '卡其色' },
+        { id: 'light-yellow', name: '淡黄色' },
+        { id: 'beige', name: '米黄色' },
+      ],
+      antipriceTemplates: [],   // 防比价模板库(从云端 /api/listing/antiprice-templates 拉)
+      genRunning: false, genDone: false, layoutDone: false, genProgress: 0, genMsg: '',
+      imgBusy: false,
+      profitRate: 0.58,  // 利润率(=二级利润/价格)，后端反解百分比=0.93-利润率；默认58%(对应百分比0.35)
+      erpRefreshing: false,
+      listingDryRun: true, listingRunning: false, listingMsg: '', listingMsgType: '', listingLog: '',
+      settings: { reviewImages: true, confirmBeforeListing: true },
+    };
+  },
+  computed: {
+    plans() { return this.ctx?.structure?.plans || []; },
+    currentPlan() { return this.plans[this.selectedPlan] || null; },
+    currentItems() { return this.currentPlan?.items || []; },
+    skuImages() { return this.currentItems.map(it => it.imgDir).filter(Boolean); },
+    // 主件名：从选中的 role=main 单品带出（去掉手填，避免和选品重复）
+    mainItemName() { const m = this.entry.skus.find(s => s.role === 'main'); return m ? m.name : ''; },
+    mainCodes() { return this.entry.skus.filter(s => s.role === 'main').map(s => s.itemCode); },
+    canGenerate() { return this.cat.path.length && this.entry.skus.length && this.entry.whites.length; },
+    // 级联当前展示的列：按已选路径逐级展开
+    cascCols() {
+      const tree = window.EC_CATEGORY_TREE || [];
+      const cols = [tree];
+      let cur = tree;
+      for (const disp of this.casc.sel) {
+        const node = cur.find(n => n.display === disp);
+        if (node && node.children) { cols.push(node.children); cur = node.children; }
+        else break;
+      }
+      return cols;
+    },
+    // 品类搜索：平铺所有叶子路径，匹配关键词
+    cascSearch() {
+      const kw = this.casc.kw.trim();
+      if (!kw) return [];
+      const out = [];
+      const walk = (nodes, path) => {
+        for (const n of nodes) {
+          const p = [...path, n.display];
+          if (n.children) walk(n.children, p);
+          else if (p.join('>').includes(kw)) out.push(p);
+        }
+      };
+      walk(window.EC_CATEGORY_TREE || [], []);
+      return out.slice(0, 50);
+    },
+  },
+  methods: {
+    setMsg(t, ty) { this.msg = t; this.msgType = ty || ''; },
+    fmt(n) { return (Number(n) || 0).toFixed(2); },
+    stepClass(step) {
+      const stage = this.ctx?.stage;
+      const order = { entry: 0, layout: 1, images: 2, ready: 3 };
+      let cur = 0;
+      if (stage === 'WHITE_UPLOADED') cur = 0;
+      else if (stage === 'LAYOUT_DONE') cur = 1;
+      else if (stage === 'SKU_DONE') cur = 2;
+      if (this.ctx?.status === 'READY' || this.ctx?.status === 'LISTED') cur = 3;
+      const me = order[step];
+      return { done: me < cur, active: me === cur };
+    },
+
+    // ── context 读写 ──
+    async loadContext() {
+      const id = this.contextId.trim();
+      if (!id) { this.setMsg('请先选商品', 'err'); return; }
+      this.setMsg('加载中…');
+      try {
+        const r = await fetch('/api/context/' + encodeURIComponent(id));
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.ctx = await r.json();
+        this.selectedPlan = this.ctx.structure?.selectedPlanIndex || 0;
+        // C1 防频闪：只在切换商品时清空签名缓存；同一商品轮询刷新时保留已签 URL，
+        // resolveImages 只补新 key（避免每 1.5s 把所有 <img> 清成占位再重签导致闪烁）。
+        if (this._signedFor !== id) { this.signed = {}; this._signedFor = id; }
+        this.resolveImages();
+        this.setMsg('已加载', 'ok');
+      } catch (e) { this.ctx = null; this.setMsg('加载失败：' + e.message, 'err'); }
+    },
+    async listContexts() {
+      try {
+        const r = await fetch('/api/context?tenantId=default');
+        this.ctxList = await r.json();
+        this.setMsg('共 ' + this.ctxList.length + ' 个商品', 'ok');
+      } catch (e) { this.setMsg('列表失败：' + e.message, 'err'); }
+    },
+    async saveContext() {
+      if (!this.ctx) return;
+      try {
+        const payload = JSON.parse(JSON.stringify(this.ctx));
+        (payload.structure?.plans || []).forEach(p => (p.items || []).forEach(it => delete it.__edited));
+        const r = await fetch('/api/context', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.ctx = await r.json();
+        this.setMsg('已保存', 'ok');
+      } catch (e) { this.setMsg('保存失败：' + e.message, 'err'); }
+    },
+    async resolveImages() {
+      const keys = [...(this.ctx.visual.mainImages || []), ...(this.ctx.visual.detailImages || []), ...this.skuImages];
+      for (const key of keys) {
+        if (!key || this.signed[key]) continue;
+        let url = key;
+        try { const r = await fetch('/api/gen/sign?key=' + encodeURIComponent(key)); if (r.ok) url = await r.text(); }
+        catch {}
+        // COS 未启用/欠费时 signedUrl 是本地文件路径,<img>无法直接加载→走 local-image 端点(07.08)
+        if (url && !url.startsWith('http') && !url.startsWith('data:')) {
+          url = '/api/erp/local-image?path=' + encodeURIComponent(url);
+        }
+        this.signed[key] = url;
+      }
+    },
+
+    // ── 品类级联 ──
+    openCasc(e) {
+      const box = e.currentTarget.getBoundingClientRect();
+      this.casc.x = box.left; this.casc.y = box.bottom + 4;
+      this.casc.open = true; this.casc.kw = '';
+      // 关闭点击外部
+      setTimeout(() => document.addEventListener('click', this._cascClose = (ev) => {
+        if (!ev.target.closest('.casc') && !ev.target.closest('.picker-box')) this.closeCasc();
+      }), 0);
+    },
+    closeCasc() { this.casc.open = false; if (this._cascClose) { document.removeEventListener('click', this._cascClose); this._cascClose = null; } },
+    pickCasc(colIdx, node) {
+      this.casc.sel = this.casc.sel.slice(0, colIdx);
+      this.casc.sel.push(node.display);
+      if (!node.children) { this.cat.path = [...this.casc.sel]; this.closeCasc(); }   // 叶子=选定
+    },
+    pickCascPath(path) { this.cat.path = [...path]; this.casc.sel = [...path]; this.closeCasc(); },
+
+    // ── 白底图（拖拽/文件夹/检测）──
+    // 白底图缩略图（R8）：data URL(拖拽的)直接显示；本地路径(快麦取的)走 local-image 端点
+    // 选品行白底图缩略图 URL：picPath 为真实图(http且非no_pic占位)才返回，否则空
+    rowImg(r) {
+      const p = r && r.picPath;
+      return (p && p.startsWith('http') && !p.includes('no_pic')) ? p : '';
+    },
+    whiteThumb(w) {
+      if (!w) return '';
+      if (w.startsWith('data:') || w.startsWith('http')) return w;
+      return '/api/erp/local-image?path=' + encodeURIComponent(w);
+    },
+    pickWhiteFiles() { this._openFileInput(false); },    pickWhiteDir() { this._openFileInput(true); },
+    _openFileInput(dir) {
+      const inp = document.createElement('input');
+      inp.type = 'file'; inp.multiple = true; inp.accept = 'image/*';
+      if (dir) inp.webkitdirectory = true;
+      inp.onchange = () => this._addWhiteFiles([...inp.files]);
+      inp.click();
+    },
+    onDropWhite(e) {
+      this.dropOver = false;
+      this._addWhiteFiles([...(e.dataTransfer?.files || [])].filter(f => f.type.startsWith('image/')));
+    },
+    _addWhiteFiles(files) {
+      // 过滤非图片(选文件夹时 webkitdirectory 会带进 .db/.txt 等，accept 不生效)
+      const imgs = [...files].filter(f => f.type && f.type.startsWith('image/'));
+      imgs.forEach(f => {
+        const rd = new FileReader();
+        rd.onload = () => this.entry.whites.push(rd.result);
+        rd.readAsDataURL(f);
+      });
+      const skipped = files.length - imgs.length;
+      this.setMsg('已加 ' + imgs.length + ' 张白底图' + (skipped ? '（跳过 ' + skipped + ' 个非图片）' : ''), imgs.length ? 'ok' : 'err');
+    },
+    // 自动拉取主件白底图：选主件后自动调用。fetch-white-images 一步到位(有则下载,无则进missing)。
+    // 已有白底(手动导入/上批已取)则跳过对应编码，避免重复。
+    async autoFetchWhite() {
+      const codes = this.mainCodes;
+      if (!codes.length) { this.whiteCheck = { done: false, has: [], missing: [] }; return; }
+      this.whiteFetching = true;
+      try {
+        const r = await fetch('/api/erp/fetch-white-images', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ codes }) });
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        (d.matched || []).forEach(m => {
+          if (m.file && !this.entry.whites.includes(m.file)) this.entry.whites.push(m.file);
+          if (m.code && m.file) this.recordWhiteCode(m.code, m.file);   // 记来源，供删单品时同步移除
+        });
+        this.whiteCheck = { done: true, has: (d.matched || []).map(m => m.code), missing: d.missing || [] };
+        const miss = (d.missing || []).length;
+        this.setMsg('自动取白底图：' + (d.matched || []).length + ' 张' + (miss ? '，缺 ' + miss + ' 张待导入' : '（齐全）'), miss ? 'err' : 'ok');
+      } catch (e) { this.setMsg('自动取白底图失败：' + e.message, 'err'); }
+      finally { this.whiteFetching = false; }
+    },
+    // 拉取配件白底图（软管/底座/滤芯）：SKU 贴图合成需要配件图，主件白底不含配件。
+    // 从已搭配的 accessory/batch 单品编码取，落 entry.accWhites，供 step2 传给云端做防比价贴图。
+    async fetchAccWhites(skus) {
+      const accCodes = [...new Set((skus || []).filter(s => s.role === 'accessory' || s.role === 'batch').map(s => s.itemCode).filter(Boolean))];
+      if (!accCodes.length) return;
+      try {
+        const r = await fetch('/api/erp/fetch-white-images', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ codes: accCodes }) });
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        this.entry.accWhites = (d.matched || []).map(m => m.file).filter(Boolean);
+        (d.matched || []).forEach(m => { if (m.code && m.file) this.recordWhiteCode(m.code, m.file); });   // 记来源，供删单品时同步移除
+        // 配件缺图也并入 whiteCheck.missing（去重），让缺图补传区同时覆盖主件+配件
+        const accMissing = (d.missing || []).filter(c => !this.whiteCheck.missing.includes(c));
+        if (accMissing.length) this.whiteCheck.missing = [...this.whiteCheck.missing, ...accMissing];
+      } catch (e) { this.setMsg('取配件白底图失败（SKU贴图可能缺配件）：' + e.message, 'err'); }
+    },
+    // 为某缺图编码导入白底图：弹文件选择 → 存 importedFor[code] + 并入 entry.whites/accWhites
+    importForCode(code) {
+      const inp = document.createElement('input');
+      inp.type = 'file'; inp.accept = 'image/*';
+      inp.onchange = () => {
+        const f = inp.files && inp.files[0];
+        if (!f) return;
+        const rd = new FileReader();
+        rd.onload = () => {
+          this.importedFor[code] = rd.result;
+          const isMain = this.mainCodes.includes(code);
+          if (isMain) { if (!this.entry.whites.includes(rd.result)) this.entry.whites.push(rd.result); }
+          else { if (!this.entry.accWhites.includes(rd.result)) this.entry.accWhites.push(rd.result); }
+          this.recordWhiteCode(code, rd.result);   // 记来源，供删单品时同步移除
+          this.setMsg('已为 ' + code + ' 导入白底图，可点「回传快麦」写回该单品', 'ok');
+        };
+        rd.readAsDataURL(f);
+      };
+      inp.click();
+    },
+    // 回传快麦：把导入的白底图写回该编码的快麦单品(会改线上商品档案,先二次确认)
+    async pushWhiteToKuaimai(code) {
+      const dataUrl = this.importedFor[code];
+      if (!dataUrl) { this.setMsg('请先为 ' + code + ' 导入白底图', 'err'); return; }
+      if (!confirm('确认把这张白底图回传到快麦单品【' + code + '】？\n这会修改快麦线上商品档案的图片。')) return;
+      this.pushingCode = code;
+      try {
+        const r = await fetch('/api/erp/upload-white-image', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ outerId: code, dataUrl }) });
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        if (!this.pushedCodes.includes(code)) this.pushedCodes.push(code);
+        this.setMsg('✓ 已回传快麦：' + code, 'ok');
+      } catch (e) { this.setMsg('回传快麦失败：' + e.message, 'err'); }
+      finally { this.pushingCode = ''; }
+    },
+    // 刷新快麦缓存（选品弹窗内按钮）：刷新单品列表；弹窗开着则重载列表，已选主件则顺带重取白底图
+    async refreshErpCache() {
+      this.erpRefreshing = true; this.setMsg('刷新快麦缓存（约6-10秒）…');
+      try {
+        const r = await fetch('/api/erp/sku-items/refresh', { method: 'POST' });
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        this.picker.all = [];   // 缓存变了，清选品全量缓存
+        this.setMsg('缓存已刷新，共 ' + (d.total || 0) + ' 个单品', 'ok');
+        if (this.picker.open) await this.loadPickerAll();      // 弹窗开着则重载列表
+        if (this.mainCodes.length) await this.autoFetchWhite(); // 已选主件顺带重取白底
+      } catch (e) { this.setMsg('刷新失败：' + e.message, 'err'); }
+      finally { this.erpRefreshing = false; }
+    },
+
+    // ── ERP 选品弹窗 ──
+    roleLabel(r) { return { main: '主件', accessory: '配件', batch: '批量件' }[r] || r; },
+    // 打开选品：立即加载全量单品（复用乐羽"打开即显示"，不用先搜索）——建议1
+    async openPicker() {
+      this.picker.open = true;
+      if (!this.picker.all.length) await this.loadPickerAll();
+    },
+    async loadPickerAll() {
+      this.picker.loading = true; this.picker.searched = true; this.picker.roleFor = {};
+      try {
+        const r = await fetch('/api/erp/sku-items?keyword=');   // 空关键词=全量(首次约6-10秒建缓存)
+        const d = await r.json();
+        this.picker.all = d.items || [];
+        this.picker.results = this.picker.all.slice(0, 200);   // 展示上限，超出用搜索缩小
+      } catch (e) { this.picker.all = []; this.picker.results = []; this.setMsg('加载单品失败：' + e.message, 'err'); }
+      finally { this.picker.loading = false; }
+    },
+    // 搜索=本地过滤已加载的全量（无则先远程加载）
+    async searchPick() {
+      if (!this.picker.all.length) { await this.loadPickerAll(); return; }
+      const kw = this.picker.kw.trim().toLowerCase();
+      if (!kw) { this.picker.results = this.picker.all.slice(0, 200); return; }
+      this.picker.results = this.picker.all.filter(r => {
+        const t = String(r.title || '').toLowerCase(), o = String(r.outerId || '').toLowerCase();
+        return t.includes(kw) || o.includes(kw);
+      }).slice(0, 200);
+    },
+    // 记录 编码→白底图file 来源（快麦取/导入时调用），供删单品时反查移除。同码多图存数组去重。
+    recordWhiteCode(code, file) {
+      if (!code || !file) return;
+      const arr = this.whiteCodeMap[code] || (this.whiteCodeMap[code] = []);
+      if (!arr.includes(file)) arr.push(file);
+    },
+    // 删除已选单品：同步移除该单品对应的白底图(快麦取/导入的，按 whiteCodeMap 反查)。
+    // 拖拽加的白底图无编码归属，不受影响。
+    removeSku(i) {
+      const sku = this.entry.skus[i];
+      const code = sku && sku.itemCode;
+      if (code) {
+        const files = this.whiteCodeMap[code] || [];
+        files.forEach(f => {
+          let k = this.entry.whites.indexOf(f);
+          if (k >= 0) this.entry.whites.splice(k, 1);
+          k = this.entry.accWhites.indexOf(f);
+          if (k >= 0) this.entry.accWhites.splice(k, 1);
+        });
+        delete this.whiteCodeMap[code];
+        delete this.importedFor[code];
+      }
+      this.entry.skus.splice(i, 1);
+      // 主件全删空则重置白底检测状态（缺图提示区随之清空）
+      if (!this.mainCodes.length) this.whiteCheck = { done: false, has: [], missing: [] };
+    },
+    // 点整行切换选中：未选→默认主件；已选→取消(点错再点即取消)。Vue3 直接增删即响应。
+    togglePick(r) {
+      const id = r.outerId;
+      if (this.picker.roleFor[id]) delete this.picker.roleFor[id];
+      else this.picker.roleFor[id] = 'main';
+    },
+    confirmPick() {
+      const rf = this.picker.roleFor;
+      let n = 0;
+      this.picker.results.forEach(r => {
+        const role = rf[r.outerId];
+        if (!role) return;
+        if (this.entry.skus.some(s => s.itemCode === r.outerId)) return;   // 去重
+        this.entry.skus.push({ itemCode: r.outerId, name: r.title || r.outerId, cost: r.purchasePrice || 0, role });
+        n++;
+      });
+      this.picker.open = false;
+      this.setMsg('已加入 ' + n + ' 个单品', 'ok');
+      // 选了主件即自动拉快麦白底图（预览在右侧，缺图右侧提示导入）
+      if (n > 0 && this.mainCodes.length) this.autoFetchWhite();
+    },
+
+    // ── 第一步：配件搭配 → step1(布局+全部主图,并行,异步) → 回填定价+标题。出来后用户在预览选方案。──
+    async runLayout() {
+      if (!this.entry.whites.length) { this.setMsg('请先加白底图', 'err'); return; }
+      // C3 防呆：已有主图时二次确认（避免误触覆盖已生成的图）
+      if ((this.ctx?.visual?.mainImages || []).length &&
+          !confirm('已有主图，重新生成将【覆盖】现有所有主图与详情图，是否继续？')) return;
+      this.genRunning = true; this.genDone = false; this.layoutDone = false; this.genProgress = 5;
+      try {
+        // 0) 配件自动搭配：只选了主件时，按规则库补配件（乐羽核心逻辑），一并喂给 AI 布局。
+        // M18-P0-B 类目分隔：配件规则库(软管/底座/滤芯)是花洒专属，非花洒品类(如架类)不跑，
+        // 避免对架类误报"按规则库搭配配件"文案、也避免未来规则库串味。
+        let skus = this.entry.skus.slice();
+        const isShower = this.cat.path.join('>').includes('花洒') || this.cat.path.join('>').includes('淋浴');
+        const hasAcc = skus.some(s => s.role === 'accessory' || s.role === 'batch');
+        if (isShower && this.mainCodes.length && !hasAcc) {
+          this.genMsg = '按规则库自动搭配配件…';
+          const acc = await this.autoResolveAccessories();
+          if (acc.length) { skus = skus.concat(acc); this.entry.skus = skus; }
+        }
+        // 配件白底图：搭好配件后拉取配件(软管/底座/滤芯)白底图，供后续 SKU 贴图合成
+        this.genMsg = '拉取配件白底图…';
+        await this.fetchAccWhites(skus);
+
+        this.genProgress = 12; this.genMsg = '生成布局+主图（并行，异步）…';
+        // step1 改异步：布局与全部主图并行跑，返回 taskId 轮询
+        const r1 = await fetch('/api/flow/step1', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contextId: this.ctx?.id || undefined,
+            category: this.cat.path.join('>'), mainItem: this.mainItemName, productName: this.mainItemName,
+            whiteImages: this.entry.whites, skus: skus, agentId: this.entry.agentId, mainCount: this.genOpts.mainCount, planCount: this.genOpts.planCount, mainAspect: this.genOpts.mainAspect, customRequest: this.genOpts.customRequest, styleId: this.genOpts.styleId,
+          }),
+        });
+        const d1 = await r1.json();
+        if (d1.error) throw new Error(d1.error);
+        if (!d1.taskId) throw new Error('step1 未返回 taskId');
+        this.contextId = d1.contextId;
+        await this.pollFlowTask(d1.taskId, d1.total || 0, 12, 88);
+
+        await this.loadContext();
+        await this.fillCostAndPrice();     // 布局出来即回填成本+定价
+        this.genMsg = '生成标题…'; await this.genTitle();
+        await this.saveContext(); await this.loadContext();
+
+        this.genProgress = 100; this.genDone = true; this.layoutDone = true;
+        this.genMsg = `布局完成：${(this.ctx?.structure?.plans||[]).length} 套方案，主图 ${(this.ctx?.visual?.mainImages||[]).length} 张。请在下方选定方案，再生成 SKU 图和详情图。`;
+      } catch (e) { this.genMsg = '布局生成失败：' + e.message; this.setMsg(e.message, 'err'); }
+      finally { this.genRunning = false; }
+    },
+
+    // 一键重生：复用 runLayout（后端 genAllMains 生成前 clear，天然覆盖主图；详情随后 step2 重生）。confirm 已在 runLayout 内。
+    async regenAllMains() { await this.runLayout(); },
+
+    // ── 第二步：对选定方案生 SKU 图 + 配对详情图（每张主图转一张 9:16）──
+    async runSkuImages() {
+      if (!this.contextId) { this.setMsg('请先生成布局', 'err'); return; }
+      this.genRunning = true; this.genDone = false; this.genProgress = 5;
+      try {
+        this.genMsg = '生成选定方案的 SKU 图 + 详情图（异步）…';
+        const r2 = await fetch('/api/flow/step2', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contextId: this.contextId, planIndex: this.selectedPlan, accWhiteImages: this.entry.accWhites, templateId: this.resolveTemplateId() }) });
+        const d2 = await r2.json();
+        if (d2.error) throw new Error(d2.error);
+        if (!d2.taskId) throw new Error('step2 未返回 taskId');
+        await this.pollFlowTask(d2.taskId, d2.total || 0, 5, 98);
+
+        await this.loadContext();
+        await this.fillCostAndPrice();
+        this.genProgress = 100; this.genDone = true;
+        this.genMsg = '完成：SKU 图 + 详情图已生成';
+        await this.saveContext(); await this.loadContext();
+      } catch (e) { this.genMsg = 'SKU/详情图生成失败：' + e.message; this.setMsg(e.message, 'err'); }
+      finally { this.genRunning = false; }
+    },
+
+    // 轮询异步生图任务：进度映射到 [lo,hi]，每拍刷新预览让已出的图流式显示。step1/step2 通用。
+    // 对齐羽刃进度条：N/total + 已用时 + 预计剩余(ETA线性外推) + 当前在生成哪张(currentProduct)。
+    async pollFlowTask(taskId, total, lo, hi) {
+      lo = lo || 5; hi = hi || 98;
+      const startAt = Date.now();
+      const fmtSec = s => { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+      for (let tries = 0; tries < 1200; tries++) {
+        await new Promise(r => setTimeout(r, 1500));
+        let t;
+        try {
+          const r = await fetch('/api/flow/task/' + taskId);
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          t = await r.json();
+        } catch (e) { continue; }   // 瞬时错误继续轮询
+        const pct = total > 0 ? Math.round((t.progress / total) * (hi - lo)) : 0;
+        this.genProgress = Math.min(hi, lo + pct);
+        // 已用时 + ETA：用「已用时/已完成数 × 剩余数」线性外推，与羽刃一致，简单够用。
+        const elapsedSec = (Date.now() - startAt) / 1000;
+        let eta = '估算中…';
+        if (t.progress > 0 && t.progress < t.total) eta = fmtSec((elapsedSec / t.progress) * (t.total - t.progress));
+        else if (t.total > 0 && t.progress >= t.total) eta = '收尾中…';
+        // 当前在生成哪张：优先后端 currentProduct，退化为「第 N 张」。
+        const cur = t.currentProduct || (t.progress < t.total ? `第 ${t.progress + 1} 张` : '');
+        this.genMsg = `生图中… ${t.progress}/${t.total} · 已用时 ${fmtSec(elapsedSec)} · 预计剩余 ${eta}`
+                    + (cur ? ` · 正在生成 ${cur}` : '');
+        if (t.progress > 0) { try { await this.loadContext(); } catch (e) {} }  // 流式刷新预览
+        if (t.status === 'done') return;
+        if (t.status === 'error') throw new Error((t.results || []).map(x => x.message).join('；') || '生图失败');
+      }
+      throw new Error('生图轮询超时（超过30分钟）');
+    },
+
+    // 配件自动搭配：主件+ERP单品池 → 规则库匹配真实配件单品
+    async autoResolveAccessories() {
+      try {
+        // 用当前搜索池或全量单品作 ERP 池；这里传已选 + 一次宽搜，规则服务按关键字匹配
+        const poolR = await fetch('/api/erp/sku-items?keyword=');
+        const pool = (await poolR.json()).items || [];
+        const erpSkus = pool.map(r => ({ itemCode: r.outerId, name: r.title || r.outerId }));
+        const r = await fetch('/api/listing/auto-resolve', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ category: this.cat.path.join('>'), mainItemCode: this.mainCodes[0], erpSkus }),
+        });
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        const accs = (d.accSkus || []).map(a => ({
+          itemCode: a.itemCode, name: a.name, cost: 0, role: a.role || 'accessory',
+        }));
+        if (accs.length) this.setMsg('自动搭配 ' + accs.length + ' 个配件', 'ok');
+        return accs;
+      } catch (e) { this.setMsg('配件自动搭配失败（继续）：' + e.message, 'err'); return []; }
+    },
+
+    // 回填成本+定价：遍历【所有方案】，每套都算价并落库（修 bug2：切换方案不再空）。
+    // 参照 preview.html:fetchCosts —— components 必含主件(itemCode首段)，否则成本漏主件(修 bug3)。
+    async fillCostAndPrice() {
+      const plans = this.plans;
+      if (!plans.length) return;
+      const cp = this.cat.path.join('>');
+      const productType = cp.includes('花洒') ? '花洒' : (cp.includes('代发') ? '代发' : '架类');
+      try {
+        for (const plan of plans) {
+          await this.fillOnePlan(plan.items || [], productType);
+        }
+        if (this.ctx) await this.saveContext();   // 算完立即落库，切换方案价还在、上新不输0
+        this.setMsg('全部 ' + plans.length + ' 套方案成本/定价已回填', 'ok');
+      } catch (e) { this.setMsg('成本定价回填失败：' + e.message, 'err'); }
+    },
+
+    // 给单套方案的 items 算成本+定价（不落库，由调用方统一保存）
+    async fillOnePlan(items, productType) {
+      if (!items.length) return;
+      // 主件码 = itemCode 去掉 "+配件*N" 后缀（组合码首段）
+      const mainCodeOf = it => (it.itemCode || '').split('+')[0];
+      // 主品数量：从型号名(spec2)解析"单品/双件组合/三件组合/N件组合"→1/2/3/N。
+      // 数量档位策略下同一主品出多档，主件成本须×数量（否则1/2/3件成本相同=bug）。
+      const parseMainQty = it => mainQtyOf(it, it.spec2 || it.skuDisplayName || '');
+      // ① 收集所有编码（主件+配件）批量查单码成本/重量
+      const codes = new Set();
+      items.forEach(it => {
+        const mc = mainCodeOf(it); if (mc) codes.add(mc);
+        (it.accParts || []).forEach(a => { if (a.code) codes.add(a.code); });
+      });
+      const costMap = {};
+      if (codes.size) {
+        const cr = await fetch('/api/erp/calc-cost', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ skuOuterIds: [...codes], productType }),
+        });
+        const cd = await cr.json();
+        (cd.items || []).forEach(x => { costMap[x.skuOuterId] = { cost: Number(x.cost) || 0, weight: Number(x.weight) || 0 }; });
+      }
+      // ② 组合成本：components = 主件(首项) + 配件（修 bug3 漏主件）
+      const comboSkus = items.map(it => {
+        const comps = [];
+        const mc = mainCodeOf(it);
+        if (mc) comps.push({ itemCode: mc, qty: parseMainQty(it), name: it.spec1, cost: costMap[mc]?.cost || 0, weight: costMap[mc]?.weight || 0 });
+        (it.accParts || []).forEach(a => comps.push({ itemCode: a.code, qty: a.qty || 1, cost: costMap[a.code]?.cost || 0, weight: costMap[a.code]?.weight || 0 }));
+        return { name: it.skuDisplayName || it.name || '', components: comps };
+      });
+      const comboR = await fetch('/api/erp/calc-combo-cost', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ productType, fixedAccessories: [], skus: comboSkus }),
+      });
+      const combo = await comboR.json();
+      (combo.skus || []).forEach((s, i) => { if (items[i]) items[i].cost = Number(s.cost) || 0; });
+
+      // ③ 定价：加价率反推售价，回填 groupPrice（用户手改过的不覆盖）
+      const priceR = await fetch('/api/pricing/calculate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profitRate: this.profitRate, skus: items.map(it => ({ itemCode: it.itemCode || '', name: it.skuDisplayName || it.name || '', cost: it.cost || 0 })) }),
+      });
+      const pd = await priceR.json();
+      if (!pd.error && pd.skus) {
+        // 平台发品价 = 拼单价(价格+20)，与导出表同源(拍板A)。
+        items.forEach((it, i) => { if (pd.skus[i] && !it.__edited) { it.groupPrice = pd.skus[i].pinPrice; it.singlePrice = pd.singlePrice; } });
+      }
+    },
+
+    // 手动重算定价（改加价率滑块后）：重算所有方案并落库
+    async recalcPrice() { await this.fillCostAndPrice(); },
+
+    // 导出定价表 xlsx（乐羽 PricingController.export）
+    async exportPricing() {
+      const items = this.currentItems;
+      if (!items.length) { this.setMsg('无 SKU 可导出', 'err'); return; }
+      try {
+        const r = await fetch('/api/pricing/export', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profitRate: this.profitRate, skus: items.map(it => ({ itemCode: it.itemCode || '', name: it.skuDisplayName || it.name || '', cost: it.cost || 0 })) }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = '定价表.xlsx'; a.click();
+        URL.revokeObjectURL(url);
+        this.setMsg('定价表已导出', 'ok');
+      } catch (e) { this.setMsg('导出失败：' + e.message, 'err'); }
+    },
+
+    // 生成标题：vision 模式带主图（无图自动回退标题库），写回 context.visual.title
+    async genTitle() {
+      if (!this.contextId) return;
+      try {
+        const skuNames = this.currentItems.map(it => it.skuDisplayName || it.name).filter(Boolean);
+        const mainImgPaths = (this.ctx?.visual?.mainImages || []);
+        const r = await fetch('/api/gen/title', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contextId: this.contextId, mode: mainImgPaths.length ? 'vision' : 'titlelib',
+            category: this.cat.path.join('>'), productName: this.mainItemName,
+            brand: this.entry.brand || '', skuNames, mainImgPaths,
+          }),
+        });
+        const d = await r.json();
+        if (d.title && this.ctx?.visual) this.ctx.visual.title = d.title;
+      } catch (e) { this.setMsg('标题生成失败，用兜底标题：' + e.message, 'err'); }
+      // 兜底（修 bug7）：AI 没出标题就拼一个基础标题(品牌+品类叶+卖点)，保证非空、能预览/上新
+      if (this.ctx?.visual && !this.ctx.visual.title) {
+        const leaf = this.cat.path.length ? this.cat.path[this.cat.path.length - 1] : '';
+        const pts = (this.ctx.visual.sellingPoints || []).slice(0, 3).join(' ');
+        this.ctx.visual.title = [this.entry.brand, leaf, pts, this.mainItemName].filter(Boolean).join(' ').trim() || (leaf || '新品');
+      }
+    },
+
+    // ── SKU 方案/改价 ──
+    selectPlan(i) { this.selectedPlan = i; if (this.ctx.structure) this.ctx.structure.selectedPlanIndex = i; },
+    onPrice(idx) { const it = this.currentItems[idx]; if (it) it.__edited = true; this.markLocked('plans[' + this.selectedPlan + '].items[' + idx + '].groupPrice'); },
+    // 利润率由上方滑块统一表达，预览表不再单列（信息重复，07.06反馈删列）
+    markLocked(f) { if (!this.ctx.lockedFields) this.ctx.lockedFields = []; if (!this.ctx.lockedFields.includes(f)) this.ctx.lockedFields.push(f); },
+
+    // SKU 图精确挂载（M9-3）：step2 已把 SKU 图 COS key 写进 it.imgDir，直接取签名 URL
+    skuImgFor(it) {
+      return it.imgDir ? (this.signed[it.imgDir] || null) : null;
+    },
+
+    // ── 单张重生/重绘（复用 M8-D 逻辑）──
+    async regenImage(kind, i) {
+      if (!this.ctx) return;
+      this.imgBusy = true; this.setMsg('重生第 ' + (i + 1) + ' 张…');
+      try {
+        // M11：走 /api/flow/regen-main，与初次生成同一视觉分析路径，原地替换第 i 张（不再 append+挪位）
+        const r = await fetch('/api/flow/regen-main', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contextId: this.ctx.id, kind, index: i, mainAspect: this.genOpts.mainAspect, customRequest: this.genOpts.customRequest, styleId: this.genOpts.styleId }) });
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        await this.loadContext(); this.resolveImages();
+        this.setMsg('第 ' + (i + 1) + ' 张已重生', 'ok');
+      } catch (e) { this.setMsg('重生失败：' + e.message, 'err'); }
+      finally { this.imgBusy = false; }
+    },
+    repaintImage(kind, i) {
+      if (!this.ctx) return;
+      const arr = kind === 'main' ? this.ctx.visual.mainImages : this.ctx.visual.detailImages;
+      const src = this.signed[arr[i]];
+      if (!src) { this.setMsg('该图未就绪', 'err'); return; }
+      const prompt = window.prompt('重绘指令（如：把背景换成雪山）：');
+      if (!prompt) return;
+      const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
+      inp.onchange = async () => {
+        const mask = inp.files[0]; if (!mask) return;
+        this.imgBusy = true; this.setMsg('重绘第 ' + (i + 1) + ' 张…');
+        try {
+          const imgBlob = await (await fetch(src)).blob();
+          const fd = new FormData(); fd.append('image', imgBlob, 'image.png'); fd.append('mask', mask); fd.append('prompt', prompt);
+          const r = await fetch('/api/gen/inpaint', { method: 'POST', body: fd });
+          const d = await r.json();
+          if (d.error) throw new Error(d.error);
+          arr.splice(i, 1, d.imageRef); this.signed[d.imageRef] = d.signedUrl; await this.saveContext();
+          this.setMsg('第 ' + (i + 1) + ' 张已重绘', 'ok');
+        } catch (e) { this.setMsg('重绘失败：' + e.message, 'err'); }
+        finally { this.imgBusy = false; }
+      };
+      inp.click();
+    },
+
+    // ── 设置 ──
+    loadSettings() { try { Object.assign(this.settings, JSON.parse(localStorage.getItem('gofu_wb_settings') || '{}')); } catch (_) {} },
+    saveSettings() { localStorage.setItem('gofu_wb_settings', JSON.stringify(this.settings)); },
+    // 拉防比价模板库(云端 ly-gen)，填「防比价模式」下拉
+    async loadAntipriceTemplates() {
+      try {
+        const r = await fetch('/api/ly-gen/antiprice-templates');
+        if (!r.ok) return;
+        const d = await r.json();
+        this.antipriceTemplates = (d.templates || []).map(t => ({ id: t.id, name: t.name }));
+      } catch (_) {}
+    },
+    // 解析实际用的 templateId：随机则从模板库抽一个，否则原样('' = 默认贴图)
+    resolveTemplateId() {
+      if (this.genOpts.templateId === '__random__') {
+        const ids = this.antipriceTemplates.map(t => t.id);
+        return ids.length ? ids[Math.floor(Math.random() * ids.length)] : '';
+      }
+      return this.genOpts.templateId || '';
+    },
+
+    // ── 上新 ──
+    async submitListing() {
+      if (!this.ctx) return;
+      if (this.settings.reviewImages && !this.listingDryRun && !(this.ctx.visual.mainImages || []).length) {
+        this.setMsg('设置要求生图后人工过图：当前无主图，不允许上新', 'err'); return;
+      }
+      if (!this.listingDryRun && this.settings.confirmBeforeListing && !confirm('将真实提交上新到拼多多，确认继续？')) return;
+      this.listingRunning = true; this.listingLog = ''; this.listingMsg = this.listingDryRun ? '启动诊断…' : '启动上新…'; this.listingMsgType = '';
+      try {
+        const r = await fetch('/api/listing/from-context', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contextId: this.contextId.trim(), planIndex: this.selectedPlan, dryRun: this.listingDryRun, brand: this.entry.brand || '', storeProfile: this.targetProfile || '' }) });
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        if (!d.taskId) throw new Error('未返回 taskId');
+        this.pollTask(d.taskId);
+      } catch (e) { this.listingMsg = '启动失败：' + e.message; this.listingMsgType = 'err'; this.listingRunning = false; }
+    },
+    async pollTask(taskId, tries) {
+      tries = tries || 0;
+      if (tries > 1200) { this.listingMsg = '轮询超时（超过30分钟），请查看服务端日志'; this.listingMsgType = 'err'; this.listingRunning = false; return; }
+      try {
+        const r = await fetch('/api/task/' + taskId);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const t = await r.json();
+        this.listingLog = (t.results || []).map(x => x.message || JSON.stringify(x)).join('\n');
+        this.listingMsg = `${t.status} ${t.progress}/${t.total}`;
+        if (t.status === 'running') setTimeout(() => this.pollTask(taskId, tries + 1), 1500);
+        else {
+          this.listingRunning = false;
+          const ok = t.status === 'done';
+          this.listingMsgType = ok ? 'ok' : 'err';
+          // done 现在=真实发品成功(后端已把脚本DONE/ERROR语义传导到status)；error=未成功
+          this.listingMsg = ok
+            ? (this.listingDryRun ? '诊断完成（未真实提交，见日志/截图）' : '✓ 上新成功')
+            : '✗ 上新未成功：' + (t.status) + '，见下方日志';
+        }
+      } catch (e) { this.listingMsg = '轮询失败：' + e.message; this.listingMsgType = 'err'; this.listingRunning = false; }
+    },
+
+    async loadAgents() {
+      try { const r = await fetch('/api/gen/agents'); if (r.ok) { const a = await r.json(); if (a.length) { this.agents = a; if (a.find(x => x.id === 'gpt-image')) this.entry.agentId = 'gpt-image'; } } } catch (_) {}
+    },
+
+    // ── 快麦 ERP 配置（会话30天过期，用户自行更新）──
+    async openErpConfig() {
+      this.erpCfg.open = true; this.erpCfg.msg = '';
+      try {
+        const r = await fetch('/api/erp/config');
+        if (r.ok) { const c = await r.json(); Object.keys(this.erpCfg.form).forEach(k => { if (c[k] != null) this.erpCfg.form[k] = c[k]; }); }
+      } catch (_) {}
+    },
+    async saveErpConfig() {
+      this.erpCfg.msg = '保存中…'; this.erpCfg.msgType = '';
+      try {
+        const r = await fetch('/api/erp/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(this.erpCfg.form) });
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        this.erpCfg.msg = '已保存（写入 kuaimai-config.json，重启仍生效）'; this.erpCfg.msgType = 'ok';
+      } catch (e) { this.erpCfg.msg = '保存失败：' + e.message; this.erpCfg.msgType = 'err'; }
+    },
+    async refreshErpToken() {
+      this.erpCfg.msg = '刷新 Token 中…'; this.erpCfg.msgType = '';
+      try {
+        const r = await fetch('/api/erp/refresh-token', { method: 'POST' });
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        // 刷新后重新拉配置显示新 token
+        const c = await (await fetch('/api/erp/config')).json();
+        Object.keys(this.erpCfg.form).forEach(k => { if (c[k] != null) this.erpCfg.form[k] = c[k]; });
+        this.erpCfg.msg = 'Token 已刷新'; this.erpCfg.msgType = 'ok';
+      } catch (e) { this.erpCfg.msg = '刷新失败（refreshToken 可能也过期，需在快麦后台重新获取）：' + e.message; this.erpCfg.msgType = 'err'; }
+    },
+  },
+  mounted() { this.loadSettings(); this.loadAgents(); this.loadAntipriceTemplates(); },
+}).mount('#app');
+</script>
 </body>
 </html>

@@ -26,15 +26,18 @@ public class ListingController {
     private final ContextSyncService contextSyncService;
     private final ContextToListingMapper contextToListingMapper;
     private final AccessoryRuleService accessoryRuleService;
+    private final com.gofu.local.service.listing.StoreService storeService;
 
     public ListingController(ListingService listingService,
                              ContextSyncService contextSyncService,
                              ContextToListingMapper contextToListingMapper,
-                             AccessoryRuleService accessoryRuleService) {
+                             AccessoryRuleService accessoryRuleService,
+                             com.gofu.local.service.listing.StoreService storeService) {
         this.listingService = listingService;
         this.contextSyncService = contextSyncService;
         this.contextToListingMapper = contextToListingMapper;
         this.accessoryRuleService = accessoryRuleService;
+        this.storeService = storeService;
     }
 
     /**
@@ -70,9 +73,15 @@ public class ListingController {
         // material/brand 在 ProductContext 无字段承载，由上新请求 body 透传（前端 entry.brand 等）
         String material = body.get("material") != null ? String.valueOf(body.get("material")) : null;
         String brand = body.get("brand") != null ? String.valueOf(body.get("brand")) : null;
+        // 目标店铺（多店）：非空则注入该店独立 cookie/profile 路径；空则 ListingService 回退单店默认。
+        String storeProfile = body.get("storeProfile") != null ? String.valueOf(body.get("storeProfile")).trim() : "";
         try {
             ProductContext ctx = contextSyncService.fetch(contextId);
             ListingConfig config = contextToListingMapper.toListingConfig(ctx, planIndex, material, brand);
+            if (!storeProfile.isBlank()) {
+                config.setCookiesPath(storeService.cookiesPathOf(storeProfile));
+                config.setUserDataDir(storeService.userDataDirOf(storeProfile));
+            }
             String taskId = listingService.runListing(config, dryRun);
             return ResponseEntity.ok(Map.of("taskId", taskId));
         } catch (Exception e) {
