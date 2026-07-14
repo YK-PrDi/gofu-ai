@@ -42,6 +42,22 @@ window.StoreMixin = {
         this.stores.msgType = 'err';
       }
     },
+    // 轮询自动刷新：登录/扫码耗时不定，每 3s 拉一次 stores，检测到该店“登录态变已登录”或
+    // “店铺名回填(不再是未命名)”即刷新到位并停；最多轮询 2 分钟。免去退出重进。
+    pollStoreUntilReady(profile, prevName, prevLoggedIn) {
+      let n = 0;
+      const timer = setInterval(async () => {
+        n++;
+        await this.loadStores();
+        const s = this.stores.list.find(x => x.profile === profile);
+        const nameChanged = s && s.name && s.name !== prevName && !/^未命名店铺/.test(s.name);
+        const loginChanged = s && s.loggedIn && !prevLoggedIn;
+        if (nameChanged || loginChanged || n >= 40) {   // 40×3s = 2分钟兜底
+          clearInterval(timer);
+          if (s && s.loggedIn) this.stores.msg = '「' + (s.name || s.profile) + '」已登录', this.stores.msgType = 'ok';
+        }
+      }, 3000);
+    },
     // 加店铺：不用打名字 → 后端建占位店铺(自动分配 profile+临时名) → 立刻弹浏览器扫码；
     // 登录成功后脚本尽力抓真实店铺名回填(抓不到保留"未命名店铺N"，可点名字手改)。
     async addAndLogin() {
@@ -53,7 +69,7 @@ window.StoreMixin = {
         await this.storeApi('/api/semi-auto/stores/login', { profile: d.profile });
         this.stores.msg = '已弹出浏览器，请扫码登录；登录后自动识别店铺名并刷新';
         this.stores.msgType = 'ok';
-        setTimeout(() => this.loadStores(), 15000);
+        this.pollStoreUntilReady(d.profile, '未命名店铺' + seq, false);
       } catch (e) {
         this.stores.msg = '加店铺失败：' + e.message;
         this.stores.msgType = 'err';
@@ -67,7 +83,7 @@ window.StoreMixin = {
         await this.storeApi('/api/semi-auto/stores/login', { profile: s.profile });
         this.stores.msg = '已为「' + (s.name || s.profile) + '」弹出浏览器，请扫码登录；完成后自动刷新';
         this.stores.msgType = 'ok';
-        setTimeout(() => this.loadStores(), 15000);
+        this.pollStoreUntilReady(s.profile, s.name, s.loggedIn);
       } catch (e) {
         this.stores.msg = '登录启动失败：' + e.message;
         this.stores.msgType = 'err';

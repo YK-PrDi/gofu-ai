@@ -401,28 +401,40 @@ async function main() {
                 // 登录成功后「尽力」抓店铺名回填（只读，不碰登录/反风控逻辑）。
                 // 不同店铺后台布局不一，抓不到不影响登录成功——Java 侧回退占位名。
                 try {
-                    const shopName = await page.evaluate(() => {
+                    // 有些商家信息登录后异步渲染，稍等再抓（不影响反风控节奏）。
+                    await page.waitForTimeout(1500);
+                    const diag = await page.evaluate(() => {
                         const clean = (t) => (t || '').replace(/\s+/g, '').trim();
-                        // 1) 顶栏商家昵称常见容器（多套 class 命名，逐个尝试）
+                        const out = { title: document.title || '', bySel: '', byGlobal: '', byTitle: '' };
+                        // 1) 顶栏商家昵称常见容器（多套 class 命名，逐个尝试）。
+                        //    拼多多首页右上角实测：<span class="user-name-text">店铺名</span>，故 user-name-text 优先。
                         const sels = [
+                            '.user-name-text', '[class*="user-name-text"]', '[class*="user-name-name"]',
                             '[class*="mallName"]', '[class*="shopName"]', '[class*="mall-name"]',
                             '[class*="userName"]', '[class*="nickname"]', '[class*="storeName"]',
+                            '[class*="mall-info"]', '[class*="mallInfo"]', '[class*="shop-name"]',
                         ];
                         for (const s of sels) {
                             const el = document.querySelector(s);
                             const t = clean(el && el.textContent);
-                            if (t && t.length >= 2 && t.length <= 40) return t;
+                            if (t && t.length >= 2 && t.length <= 40) { out.bySel = t; break; }
                         }
-                        // 2) 兜底：全局注入的商家信息对象
+                        // 2) 全局注入的商家信息对象
                         try {
                             const g = window.__GLOBAL__ || window.rawData || {};
                             const nm = g.mallName || (g.mallInfo && g.mallInfo.mallName) || (g.userInfo && g.userInfo.mallName);
-                            if (nm) return clean(nm);
+                            if (nm) out.byGlobal = clean(nm);
                         } catch (e) {}
-                        return '';
+                        // 3) document.title 兜底：拼多多后台标题常形如「店铺名-拼多多商家后台」。
+                        const m = (document.title || '').match(/^([^-_|·]+?)\s*[-_|·].*?(?:拼多多|商家|后台|管理)/);
+                        if (m && m[1]) out.byTitle = clean(m[1]);
+                        return out;
                     });
+                    // 诊断：把 title 和三种抓取结果都打印，便于没命中时据真实 DOM 精修。
+                    console.log('SHOPNAME_DIAG:' + JSON.stringify(diag));
+                    const shopName = diag.bySel || diag.byGlobal || diag.byTitle || '';
                     if (shopName) console.log('SHOPNAME:' + shopName);
-                } catch (e) { /* 抓不到店铺名不影响登录 */ }
+                } catch (e) { console.log('LOG:抓店铺名异常(不影响登录): ' + e.message); }
                 await context.close();
                 done('login_saved');
                 return;
@@ -660,6 +672,25 @@ async function main() {
                     const b = document.querySelector(sel);
                     return b && !b.disabled && !b.className.includes('disabled');
                 }, confirmSel, { timeout: 6000 }).catch(() => {});
+                // 诊断（只读，不改点击/延迟节奏）：dump 确认按钮状态 + 当前所有分类结果项文本。
+                // 用于定位"点选报成功但按钮不激活"（如末级未真正选中/关键词非末级）——不影响反风控流程。
+                try {
+                    const diag = await page.evaluate((sel) => {
+                        const b = document.querySelector(sel);
+                        const btn = b ? { disabled: b.disabled, cls: (b.className || '').slice(0, 120), text: (b.textContent || '').replace(/\s+/g, '') } : null;
+                        const names = [...document.querySelectorAll('.c-name')]
+                            .filter(el => el.offsetParent !== null)
+                            .map(el => (el.textContent || '').replace(/\s+/g, '')).slice(0, 20);
+                        // 已选中态标签（beast-core 选中项常带 active/selected/checked class）
+                        const selected = [...document.querySelectorAll('[class*="active"],[class*="selected"],[class*="checked"]')]
+                            .filter(el => el.offsetParent !== null && (el.textContent || '').trim().length < 30)
+                            .map(el => (el.textContent || '').replace(/\s+/g, '')).filter(Boolean).slice(0, 10);
+                        return { btn, names, selected };
+                    }, confirmSel);
+                    log('v2 诊断-确认按钮: ' + JSON.stringify(diag.btn));
+                    log('v2 诊断-分类结果项(前20): ' + JSON.stringify(diag.names));
+                    log('v2 诊断-疑似已选中: ' + JSON.stringify(diag.selected));
+                } catch (_) {}
                 let entered = false;
                 for (let a = 0; a < 3 && !entered; a++) {
                     try {
@@ -678,7 +709,10 @@ async function main() {
                         if (!entered) log(`v2 点确认后未进表单，重试 ${a + 1}`);
                     } catch (e) { log(`v2 确认按钮点击重试 ${a + 1}: ${e.message.split('\n')[0]}`); await page.waitForTimeout(1500); }
                 }
-                if (!entered) error('v2 未能进入商品表单：「确认发布该类商品」点击后页面未跳转，请确认末级品类「' + keyword + '」已选中（按钮需选中末级才激活）');
+                if (!entered) {
+                    try { await page.screenshot({ path: 'step_v2_cat_fail.png' }); log('截图: step_v2_cat_fail.png（分类未进表单现场，核对末级/按钮）'); } catch (_) {}
+                    error('v2 未能进入商品表单：「确认发布该类商品」点击后页面未跳转，请确认末级品类「' + keyword + '」已选中（按钮需选中末级才激活）');
+                }
                 log('v2 已进入商品表单');
                 await page.waitForTimeout(2000);
                 await closePddPopups();

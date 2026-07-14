@@ -270,6 +270,8 @@ public class FlowController {
             for (String k : keys) if (k != null) { ctx.getVisual().getMainImages().add(k); okCount++; }
         }
         contextService.save(ctx);
+        // 诊断：存主图后打印 contextId + 主图数，便于测试后从日志直接定位该 context 是否存住图。
+        log.info("[诊断] step1 存主图完成 contextId={} 主图数={}", ctx.getId(), ctx.getVisual().getMainImages().size());
         // P0-A：有白底图却一张主图都没出 = 真失败，必须抛出让 step1 置 task=error，
         // 而不是静默标 done 让前端误以为成功（"图没生成还假装完成"的黑洞根因）。
         if (okCount == 0) {
@@ -441,8 +443,10 @@ public class FlowController {
                 }, imageGen.getExecutor()));
             }
             java.util.concurrent.CompletableFuture.allOf(dFutures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
-            for (String k : dKeys) if (k != null) ctx.getVisual().getDetailImages().add(k);
+            int dOk = 0;
+            for (String k : dKeys) if (k != null) { ctx.getVisual().getDetailImages().add(k); dOk++; }
             contextService.save(ctx);
+            log.info("[诊断] step2 存详情图完成 contextId={} 详情生成={}/{} 累计详情={}", ctx.getId(), dOk, dTotal, ctx.getVisual().getDetailImages().size());
         }
 
         // SKU 图：乐羽成熟 generateSkuImage，对【选定方案】生。
@@ -512,6 +516,8 @@ public class FlowController {
             }
             java.util.concurrent.CompletableFuture.allOf(sFutures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
             contextService.save(ctx);
+            long skuWithImg = plan.getItems().stream().filter(x -> x.getImgDir() != null && !x.getImgDir().isBlank()).count();
+            log.info("[诊断] step2 存SKU图完成 contextId={} SKU有图={}/{}", ctx.getId(), skuWithImg, plan.getItems().size());
         }
     }
 

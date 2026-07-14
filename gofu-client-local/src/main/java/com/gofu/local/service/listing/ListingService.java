@@ -240,7 +240,7 @@ public class ListingService {
             browserBusy.set(true);   // M15：登录也占用 profile，保活跳过
             try {
                 ProcessBuilder pb = new ProcessBuilder(resolveNodeExe(), scriptFile.getAbsolutePath(), "--login-only")
-                    .directory(projectRoot).redirectErrorStream(false);
+                    .directory(projectRoot).redirectErrorStream(true);   // stderr 并入 stdout，脚本报错也能在控制台看到
                 Map<String, Object> cfg = new java.util.HashMap<>();
                 cfg.put("cookiesPath", cp);
                 if (udd != null && !udd.isBlank()) cfg.put("userDataDir", udd);
@@ -250,10 +250,12 @@ public class ListingService {
                         new InputStreamReader(proc.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = reader.readLine()) != null) {
+                        log.info("[pdd_listing] {}", line);   // 打到控制台，便于看 SHOPNAME_DIAG 等登录诊断
                         if (line.startsWith("SHOPNAME:") && prof != null && !prof.isBlank()) {
                             String shopName = line.substring("SHOPNAME:".length()).trim();
                             if (!shopName.isBlank()) {
-                                try { storeService.renameStore(prof, shopName); } catch (Exception ignore) {}
+                                try { storeService.renameStore(prof, shopName); log.info("[登录] 已回填店铺名 profile={} name={}", prof, shopName); }
+                                catch (Exception ex) { log.warn("[登录] 回填店铺名失败: {}", ex.getMessage()); }
                                 task.addResult(Map.of("type", "log", "message", "已识别店铺名：" + shopName));
                             }
                         } else if (!line.isBlank()) {
