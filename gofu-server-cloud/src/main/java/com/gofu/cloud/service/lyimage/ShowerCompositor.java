@@ -238,12 +238,13 @@ public class ShowerCompositor {
         g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
 
-        // 主件框：右下区圆角白卡（宽 W*0.30、4:3），避开顶部文字带和底部通栏
-        int cardW = (int)(W * 0.30);
+        // 主件框：放「左侧功能栏与中间主体之间、偏下」的空位（架类版式：最左功能小图栏≈0~26%，
+        // 中间主体≈30%~75%）。卡片缩窄至 W*0.24 塞进这条竖缝，靠下但不压底部通栏，尽量不遮主体。
+        int cardW = (int)(W * 0.24);
         int cardH = (int)(cardW * 3.0 / 4.0);
-        int cx = W - cardW - (int)(W * 0.05);
-        int cy = (int)(H * 0.86) - cardH;         // 卡底不压底部通栏(86%线)
-        if (cy < (int)(H * 0.34)) cy = (int)(H * 0.34);
+        int cx = (int)(W * 0.27);                 // 左栏(≈26%)右侧起，落在功能栏与主体之间的缝隙
+        int cy = (int)(H * 0.84) - cardH;         // 偏下，卡底不压底部通栏(84%线)
+        if (cy < (int)(H * 0.45)) cy = (int)(H * 0.45);   // 不上探到主体核心区(45%线以下)
         int arc = (int)(Math.min(cardW, cardH) * 0.10);
         int sh  = (int)(Math.min(cardW, cardH) * 0.025);
         g.setColor(new Color(0, 0, 0, 45));

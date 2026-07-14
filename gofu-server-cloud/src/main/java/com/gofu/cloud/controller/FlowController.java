@@ -169,6 +169,7 @@ public class FlowController {
         String aspect = resolveAutoAspect(mainAspect, white);   // R3：auto→按白底图真实宽高吸附
         // M19：细杆/框架类品类（架类/挂钩）——主图强制正面系 + 白底图强锁结构，防旋转臆造变形。
         boolean structLock = isStructuralRigidCategory(ctx.getCategory());
+        boolean isShower = isShowerCategory(ctx.getCategory());   // #1 花洒出水物理约束用
         final String fStyleReq = styleReq;
         log.info("主图组装: aspect={}, subjectLock={}字, negative={}字, style={}", aspect,
                 subjectLock.length(), negative.length(), styleReq == null ? "" : styleReq);
@@ -219,7 +220,7 @@ public class FlowController {
             task.setCurrentProduct("主图 1/" + mainTotal);
             String out = new File(tmpOut, "main-0.jpg").getAbsolutePath();
             String base = !segPrompts.isEmpty() ? segPrompts.get(0) : buildMainPrompt(ctx, 1, fSeriesPlan);
-            String prompt = buildSeriesPrompt(base, 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true, structLock);
+            String prompt = buildSeriesPrompt(base, 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true, structLock, isShower);
             if (genWithRetry(prompt, List.of(white), white, out, aspect, 2)) {
                 keys[0] = uploadIfCos(out);
                 firstRef = localizeWhite(keys[0]);
@@ -243,7 +244,7 @@ public class FlowController {
                         task.setCurrentProduct("主图 " + (idx + 1) + "/" + mainTotal);
                         String out = new File(tmpOut, "main-" + idx + ".jpg").getAbsolutePath();
                         String base = idx < segPrompts.size() ? segPrompts.get(idx) : buildMainPrompt(ctx, idx + 1, fSeriesPlan);
-                        String prompt = buildSeriesPrompt(base, idx + 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true, structLock);
+                        String prompt = buildSeriesPrompt(base, idx + 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true, structLock, isShower);
                         List<String> refs = new ArrayList<>();
                         refs.add(white);
                         if (fFirstRef != null) refs.add(fFirstRef);
@@ -594,7 +595,8 @@ public class FlowController {
                 String negative = lyImageGen.ecNegative(ctx.getCategory());
                 mainAspect = resolveAutoAspect(mainAspect, white);
                 boolean structLock = isStructuralRigidCategory(ctx.getCategory());   // M19：重生与初次一致
-                String prompt = buildSeriesPrompt(base, index + 1, total, seriesPlan, subjectLock, negative, styleReq, true, structLock);
+                boolean isShower = isShowerCategory(ctx.getCategory());
+                String prompt = buildSeriesPrompt(base, index + 1, total, seriesPlan, subjectLock, negative, styleReq, true, structLock, isShower);
                 // A1：白底图进 refs（首图重生 ref=白底图；非首图 ref=白底图+第1张，双锚定保一致）
                 String firstRef = (index > 0 && !mains.isEmpty()) ? localizeWhite(mains.get(0)) : null;
                 List<String> refs = new ArrayList<>();
@@ -839,7 +841,7 @@ public class FlowController {
      */
     private String buildSeriesPrompt(String basePrompt, int currentIndex, int totalCount, String seriesPlan,
                                      String subjectLock, String negative, String styleReq, boolean withText,
-                                     boolean structLock) {
+                                     boolean structLock, boolean isShower) {
         String base = basePrompt == null ? "" : basePrompt.trim();
         StringBuilder sb = new StringBuilder();
         // R5：品类主体一致性约束前置（最高优先级锚点，锁产品结构/材质/logo/物理合理性）
@@ -874,6 +876,13 @@ public class FlowController {
                 7. 最终效果：同一场景不同角度/景别拍同一产品的连续镜头，每张用不同营销文案强调不同卖点
                 """.trim(), currentIndex, totalCount));
         sb.append(buildAngleConstraint(currentIndex, totalCount, structLock));
+        // 花洒出水物理（#1）：若本张演示出水，水流必须从喷面正下方成束喷出、强劲有力如瀑布，
+        // 不得从侧面/斜向乱喷、不得软弱无力或雾化飘散。仅花洒品类追加，不污染其它品类。
+        if (isShower)
+            sb.append("\n\n【出水形态·仅当画面展示出水时】若本张展示花洒喷水：水流必须自喷头面板正下方垂直向下、"
+                    + "成密集平行的强劲水柱束（瀑布/大水量花洒既视感），水流饱满有力、方向笔直向下；"
+                    + "严禁水流从花洒侧面或斜向喷出、严禁水流软弱稀疏/雾化飘散/方向散乱；"
+                    + "喷头出水面朝向合理（面朝下或斜向使用者），符合真实手持花洒的出水物理。");
         // R1：文字渲染指令（补回画面文案）
         if (withText) sb.append("\n\n").append(TEXT_RENDER_INSTRUCTION);
         // 品类禁止项收尾
