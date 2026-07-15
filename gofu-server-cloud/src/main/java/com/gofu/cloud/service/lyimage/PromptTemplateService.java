@@ -138,6 +138,18 @@ public class PromptTemplateService {
         return null;
     }
 
+    /** 通用素材落地：classpath assets/<relPath> → 用户目录 sku-base/asset/<relPath>。找不到返回 null。 */
+    public File assetByPath(String relPath) {
+        if (relPath == null || relPath.isBlank()) return null;
+        String res = "assets/" + relPath;
+        try (java.io.InputStream is = getClass().getClassLoader().getResourceAsStream(res)) {
+            if (is == null) return null;
+            File f = new File(appProperties.getPaths().getUserDataDir(), "sku-base/asset/" + relPath);
+            if (!f.isFile()) { f.getParentFile().mkdirs(); Files.write(f.toPath(), is.readAllBytes()); }
+            return f;
+        } catch (Exception e) { log.warn("素材落地失败({}): {}", res, e.getMessage()); return null; }
+    }
+
     /**
      * 架类品种 prompt：从 classpath prompt/shelf-prompts.json 读指定品种(kind)的构图文案段。
      * 找不到该品种返回 null。文案取自架类防比价 xlsx，卖点标签已写死其中。

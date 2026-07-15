@@ -8,6 +8,7 @@ import java.awt.Color;
 import java.awt.Font;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
+import java.awt.Shape;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.util.List;
@@ -553,6 +554,113 @@ public class ShowerCompositor {
         }
         return out;
     }
+
+    // ===== M20 架类 Java 合成：落地锅盖架（做法一 = 代码摆件 + 上层AI只换背景）=====
+
+    /** 斜插槽坐标：均为相对「架体贴入后 bbox」的比例(0~1)；angleDeg 预留斜插旋转。 */
+    public record Slot(double xRatio, double yRatio, double wRatio, double hRatio, double angleDeg) {}
+
+    /**
+     * 落地锅盖架「构图底」合成（路线2）：Java 只保证架体1:1不变形 + 大致摆放收纳物，
+     * 输出作为 AI 图生图的构图参考底 —— 由 AI 理顺卡位/遮挡/比例（各用所长）。
+     * 架体抠图：优先原生 alpha；无 alpha 则中性抠（保护暖白架体）。收纳物白底抠透明后粗摆到右侧槽区。
+     * @param collectibles 收纳物白底图（锅盖/砧板侧视），可空→只出架体
+     * @param slots        与 collectibles 一一对应的粗摆位置（比例，相对架体bbox）；null→用默认三槽
+     */
+    public String compositeShelfFloorLid(File rackImg, List<File> collectibles, List<Slot> slots,
+                                         String batch, int seq, String skuName) throws Exception {
+        int W = 1024, H = 1024;
+        BufferedImage canvas = new BufferedImage(W, H, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = canvas.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g.setColor(new Color(245, 245, 245));   // 浅底占位，AI 后续替换成真实场景
+        g.fillRect(0, 0, W, H);
+
+        // 架体：抠透明 + 裁到内容 bbox（去掉大片透明边），居中放大，比例真实
+        BufferedImage rack = cropToContent(rackToTransparent(ImageIO.read(rackImg)));
+        int rackH = (int) (H * 0.90);
+        int rackW = (int) (rackH * rack.getWidth() / (double) rack.getHeight());
+        int rx = (W - rackW) / 2, ry = (H - rackH) / 2;
+        g.drawImage(rack, rx, ry, rackW, rackH, null);
+
+        // 收纳物粗摆（构图底，不求精确；AI 会理顺卡位）：默认右侧三槽从上到下
+        List<Slot> useSlots = (slots != null && !slots.isEmpty()) ? slots : List.of(
+                new Slot(0.50, 0.10, 0.52, 0.30, -14),
+                new Slot(0.50, 0.34, 0.52, 0.30, -14),
+                new Slot(0.50, 0.57, 0.52, 0.30, -14));
+        placeCollectiblesInSlots(g, rx, ry, rackW, rackH, collectibles, useSlots);
+        // 收纳物贴完后，把架体右侧槽区再画一遍盖顶 → 细杆压在收纳物上，产生"卡进杆缝"的遮挡层次
+        if (collectibles != null && !collectibles.isEmpty()) {
+            Shape old = g.getClip();
+            g.setClip(rx + (int)(rackW * 0.42), ry, (int)(rackW * 0.62), rackH);
+            g.drawImage(rack, rx, ry, rackW, rackH, null);
+            g.setClip(old);
+        }
+
+        g.dispose();
+        return writeJpg(canvas, batch, seq, skuName).getAbsolutePath();
+    }
+
+    /** 裁到非透明内容的最小 bbox（去掉抠图后四周大片透明区）。 */
+    private BufferedImage cropToContent(BufferedImage s) {
+        if (s == null) return null;
+        int w = s.getWidth(), h = s.getHeight(), mnx = w, mny = h, mxx = 0, mxy = 0;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                if (((s.getRGB(x, y) >>> 24) & 0xFF) > 16) {
+                    if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+                    if (y < mny) mny = y; if (y > mxy) mxy = y;
+                }
+        if (mxx < mnx || mxy < mny) return s;
+        return s.getSubimage(mnx, mny, mxx - mnx + 1, mxy - mny + 1);
+    }
+
+    /** 架体抠图：有原生 alpha 直接用；否则抠"中性亮背景"(白/灰棋盘格)，保护暖白架体(R 明显>B)。 */
+    private BufferedImage rackToTransparent(BufferedImage src) {
+        if (src == null) return null;
+        int W = src.getWidth(), H = src.getHeight();
+        boolean hasAlpha = src.getColorModel().hasAlpha();
+        BufferedImage out = new BufferedImage(W, H, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < H; y++) {
+            for (int x = 0; x < W; x++) {
+                int argb = src.getRGB(x, y);
+                if (hasAlpha && ((argb >>> 24) & 0xFF) < 16) { out.setRGB(x, y, 0x00FFFFFF); continue; }
+                int r = (argb >> 16) & 0xFF, gg = (argb >> 8) & 0xFF, b = argb & 0xFF;
+                // 中性亮像素(棋盘格白/浅灰)：三通道接近且都较亮 → 抠。暖白架体 R-B 差≥8 予以保留。
+                boolean neutral = Math.abs(r - gg) <= 6 && Math.abs(gg - b) <= 6 && Math.abs(r - b) <= 6;
+                boolean bright = r >= 225 && gg >= 225 && b >= 225;
+                if (neutral && bright) out.setRGB(x, y, 0x00FFFFFF);
+                else out.setRGB(x, y, argb);
+            }
+        }
+        return out;
+    }
+
+    /** 把收纳物贴进斜插槽。侧视素材+槽坐标就绪后填坐标即可，逻辑已通。 */
+    private void placeCollectiblesInSlots(Graphics2D g, int rx, int ry, int rackW, int rackH,
+                                          List<File> collectibles, List<ShowerCompositor.Slot> slots) throws Exception {
+        if (collectibles == null || slots == null) return;
+        int n = Math.min(collectibles.size(), slots.size());
+        for (int i = 0; i < n; i++) {
+            File c = collectibles.get(i);
+            if (c == null || !c.isFile()) continue;
+            Slot s = slots.get(i);
+            BufferedImage item = cropToContent(whiteToTransparent(ImageIO.read(c)));
+            if (item == null) continue;
+            int sx = rx + (int) (rackW * s.xRatio());
+            int sy = ry + (int) (rackH * s.yRatio());
+            int sw = (int) (rackW * s.wRatio());
+            int sh = (int) (rackH * s.hRatio());
+            // 斜插旋转：绕槽区中心转 angleDeg（构图底，AI 会理顺细节）
+            Graphics2D gg = (Graphics2D) g.create();
+            gg.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            gg.rotate(Math.toRadians(s.angleDeg()), sx + sw / 2.0, sy + sh / 2.0);
+            drawImageFit(gg, item, sx, sy, sw, sh);
+            gg.dispose();
+        }
+    }
+
 
     /** 把 BufferedImage 压成 1024 JPG 存到 sku-gen/<batch>/<seq>_<name>.jpg。 */
     private File writeJpg(BufferedImage img, String batch, int seq, String skuName) throws Exception {

@@ -425,7 +425,32 @@ public class ImageGenService {
             // 参考图作构图底（refs 第一张权重最高）+ 商品白底图锁主体
             File shelfBase = templateService.builtinBaseByName("shelf-" + kind);
             List<File> shelfRefs = new java.util.ArrayList<>();
-            if (shelfBase != null && shelfBase.isFile()) shelfRefs.add(shelfBase);
+
+            // ── 路线2（落地锅盖架）：Java 先合成「架体+粗摆收纳物」构图底，作为最高权重参考图，
+            //    prompt 强约束"保架体/收纳物 1:1、只理顺卡位遮挡与背景"。绕开 AI 重画架体必崩。
+            if ("落地锅盖架".equals(kind)) {
+                try {
+                    File rackImg = (shelfBase != null && shelfBase.isFile()) ? shelfBase
+                            : templateService.assetByPath("base/shelf-落地锅盖架-米奇款.png");
+                    java.util.List<File> collectibles = new java.util.ArrayList<>();
+                    File lid = templateService.assetByPath("collectibles/锅盖-侧立白底.png");
+                    File board = templateService.assetByPath("collectibles/砧板-侧立白底.png");
+                    if (lid != null) collectibles.add(lid);
+                    if (board != null) collectibles.add(board);
+                    if (lid != null) collectibles.add(lid);   // 三槽：锅盖/砧板/锅盖
+                    if (rackImg != null && rackImg.isFile()) {
+                        String baseImg = compositor.compositeShelfFloorLid(rackImg, collectibles, null, batch, seq, skuName + "-构图底");
+                        shelfRefs.add(new File(baseImg));       // 构图底权重最高
+                        shelfPrompt = PromptLoader.load("prompt/image-shelf-floorlid.txt")
+                                .replace("{{shelfPrompt}}", shelfSeg).replace("{{colorName}}", colorOnly);
+                        log.info("落地锅盖架 路线2：构图底={}", baseImg);
+                    }
+                } catch (Exception ce) {
+                    log.warn("落地锅盖架构图底合成失败，回退整图AI: {}", ce.getMessage());
+                }
+            }
+
+            if (shelfRefs.isEmpty() && shelfBase != null && shelfBase.isFile()) shelfRefs.add(shelfBase);
             if (hasWhiteBg) shelfRefs.add(whiteBgRef);
             else if (hasRef) shelfRefs.add(ref);
             log.info("架类生图: kind={}, 参考图={}, 白底={}", kind, shelfBase != null, hasWhiteBg);
