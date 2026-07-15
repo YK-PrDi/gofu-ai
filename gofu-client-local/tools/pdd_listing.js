@@ -89,6 +89,40 @@ async function gotoWithRetry(page, url, opts, retries = 3) {
     throw lastErr;
 }
 
+/**
+ * 只读抓取商家店铺名，三路兜底：顶栏昵称容器 / 全局注入对象 / document.title。
+ * 抽成独立函数供 #1a 登录后带重试轮询调用（原为内联，落地页太早抓不到）。
+ */
+async function captureShopNameDiag(page) {
+    return page.evaluate(() => {
+        const clean = (t) => (t || '').replace(/\s+/g, '').trim();
+        const out = { title: document.title || '', bySel: '', byGlobal: '', byTitle: '' };
+        // 1) 顶栏商家昵称常见容器（多套 class 命名，逐个尝试）。
+        //    拼多多首页右上角实测：<span class="user-name-text">店铺名</span>，故 user-name-text 优先。
+        const sels = [
+            '.user-name-text', '[class*="user-name-text"]', '[class*="user-name-name"]',
+            '[class*="mallName"]', '[class*="shopName"]', '[class*="mall-name"]',
+            '[class*="userName"]', '[class*="nickname"]', '[class*="storeName"]',
+            '[class*="mall-info"]', '[class*="mallInfo"]', '[class*="shop-name"]',
+        ];
+        for (const s of sels) {
+            const el = document.querySelector(s);
+            const t = clean(el && el.textContent);
+            if (t && t.length >= 2 && t.length <= 40) { out.bySel = t; break; }
+        }
+        // 2) 全局注入的商家信息对象
+        try {
+            const g = window.__GLOBAL__ || window.rawData || {};
+            const nm = g.mallName || (g.mallInfo && g.mallInfo.mallName) || (g.userInfo && g.userInfo.mallName);
+            if (nm) out.byGlobal = clean(nm);
+        } catch (e) {}
+        // 3) document.title 兜底：拼多多后台标题常形如「店铺名-拼多多商家后台」。
+        const m = (document.title || '').match(/^([^-_|·]+?)\s*[-_|·].*?(?:拼多多|商家|后台|管理)/);
+        if (m && m[1]) out.byTitle = clean(m[1]);
+        return out;
+    });
+}
+
 /** 强制设置 React 受控输入框的值（避免追加 bug） */
 async function setInputValue(page, selector, value) {
     await page.evaluate(({ sel, val }) => {
@@ -147,12 +181,19 @@ async function uploadImagesToArea(page, areaIndex, imgDir) {
         // 若 count 不随 i 递增(始终1或不增)，说明 setInputFiles 单张互相覆盖 → 详情只上到最后几张的根因。
         try {
             const thumbCnt = await page.evaluate(() => {
-                // 上传区常见缩略图容器：含 preview/thumb/img-item/uploaded 的元素，或上传列表里的 img
+                // 主信号：上传成功后生成的预览缩略图几乎都是 blob:/data: 的 <img>（跨版本最稳）。
+                // 旧探针用 uploadList/thumb 等 class 恒为 0（没匹配到拼多多真实 DOM），故改用 src 特征为主。
+                let blobImgs = 0;
+                for (const img of document.querySelectorAll('img')) {
+                    const s = img.currentSrc || img.src || '';
+                    if (s.startsWith('blob:') || s.startsWith('data:image')) blobImgs++;
+                }
+                // 兜底：仍保留 class 选择器取最大值，双口径谁大用谁。
                 const sels = ['[class*="uploadList"] img', '[class*="preview"] img', '[class*="thumb"] img',
                               '[class*="img-item"]', '[class*="uploaded"] img', '.beast-core-image img'];
-                let max = 0;
-                for (const s of sels) { const n = document.querySelectorAll(s).length; if (n > max) max = n; }
-                return max;
+                let byClass = 0;
+                for (const s of sels) { const n = document.querySelectorAll(s).length; if (n > byClass) byClass = n; }
+                return Math.max(blobImgs, byClass);
             });
             log(`详情图诊断: 已传第 ${i + 1}/${files.length} 张，页面当前缩略图约 ${thumbCnt} 个`);
         } catch (_) {}
@@ -271,8 +312,8 @@ async function pickPortalOption(page, val) {
  */
 async function detectListingVersion(page) {
     try {
-        const url = page.url();
-        const sig = await page.evaluate(() => {
+        // 采集页面版本信号（一次性只读）。
+        const grab = () => page.evaluate(() => {
             const txt = document.body ? document.body.innerText : '';
             const has = (s) => txt.indexOf(s) >= 0;
             const hasCatSearch = !!document.querySelector('input[placeholder*="搜索分类"], input[placeholder*="关键词搜索分类"]');
@@ -286,6 +327,18 @@ async function detectListingVersion(page) {
                      hasRecommendCat: has('推荐分类') || has('智能推荐') || has('为你推荐'),
                      hasUploadMain: !!document.querySelector('.uploadImgEnter, input[type="file"]') };
         });
+        const url = page.url();
+        // 修：SPA 渲染慢时若过早检测，7 信号会全 false → 兜底误判 v1 →
+        // 主图/标题在空表单上填空 → 提交报"轮播图/标题为空"没链接。
+        // 故轮询等「至少一个信号为真」(=页面渲染出来)再判版本；最多 ~12s。
+        let sig = await grab();
+        const anyReady = (s) => s.hasCatSearch || s.hasTitleInput || s.hasConfirmCatBtn
+            || s.hasSelectCategoryBtn || s.hasNextStep || s.hasRecommendCat || s.hasUploadMain;
+        for (let i = 0; i < 12 && !anyReady(sig); i++) {
+            await page.waitForTimeout(1000);
+            sig = await grab();
+        }
+        if (!anyReady(sig)) log('⚠ 版本检测：等待 ~12s 后页面仍无任何信号，按兜底判定（可能页面异常）');
         log('版本检测信号: ' + JSON.stringify(sig) + ' url=' + url);
         // 注意：v2 与 v3 初始 URL 都是 /goods/category，不能只靠 URL 区分，必须看页面元素。
         // 版本二：分类前置——进入即为「分类搜索页」（有分类搜索框 或「确认发布该类商品」按钮，且还没标题框）。
@@ -350,6 +403,16 @@ async function main() {
     // 否则每次启动都把可能已过期的旧 pdd_cookies.json 叠加覆盖到活登录态上，反而缩短登录寿命。
     const profileCookieDb = path.join(userDataDir, 'Default', 'Network', 'Cookies');
     const profileHasLogin = fs.existsSync(profileCookieDb);
+    // #1b 修：判断 pdd_cookies.json 是否比持久化 profile 的 Cookies 库「更新」。
+    // 场景：店铺管理刚扫码登录 → runLoginOnly 把最新 cookies 写进 pdd_cookies.json，
+    // 但持久化 profile 的 Cookies 库可能是更早那次留下的旧登录态。此时若沿用旧 guard
+    // （profile 存在就跳过重灌），上架 run 拿到的就是旧/失效登录态 → 逼用户重新扫码。
+    let cookiesFileNewer = false;
+    try {
+        if (fs.existsSync(cookiesPath) && profileHasLogin) {
+            cookiesFileNewer = fs.statSync(cookiesPath).mtimeMs > fs.statSync(profileCookieDb).mtimeMs;
+        }
+    } catch (_) {}
     if (fs.existsSync(cookiesPath) && !profileHasLogin) {
         try {
             const cookies = JSON.parse(fs.readFileSync(cookiesPath, 'utf8'));
@@ -358,8 +421,17 @@ async function main() {
         } catch (e) {
             log('旧 cookies 迁移失败（忽略，将走登录）: ' + e.message);
         }
+    } else if (cookiesFileNewer) {
+        // pdd_cookies.json 更新（刚扫码）→ 重灌，把最新登录态带进本次 run，避免重复扫码。
+        try {
+            const cookies = JSON.parse(fs.readFileSync(cookiesPath, 'utf8'));
+            await context.addCookies(cookies);
+            log('检测到 pdd_cookies.json 比持久化登录态更新（刚扫码），已重灌最新 cookie（#1b 避免重复扫码）');
+        } catch (e) {
+            log('最新 cookies 重灌失败（忽略，将走登录）: ' + e.message);
+        }
     } else if (profileHasLogin) {
-        log('持久化目录已有登录态，跳过旧 cookie 重灌（M15 guard，避免旧cookie覆盖活登录态）');
+        log('持久化目录已有登录态且不比 cookie 文件旧，跳过重灌（M15 guard，避免旧cookie覆盖活登录态）');
     }
 
     const page = await context.newPage();
@@ -436,36 +508,20 @@ async function main() {
                 // 登录成功后「尽力」抓店铺名回填（只读，不碰登录/反风控逻辑）。
                 // 不同店铺后台布局不一，抓不到不影响登录成功——Java 侧回退占位名。
                 try {
-                    // 有些商家信息登录后异步渲染，稍等再抓（不影响反风控节奏）。
-                    await page.waitForTimeout(1500);
-                    const diag = await page.evaluate(() => {
-                        const clean = (t) => (t || '').replace(/\s+/g, '').trim();
-                        const out = { title: document.title || '', bySel: '', byGlobal: '', byTitle: '' };
-                        // 1) 顶栏商家昵称常见容器（多套 class 命名，逐个尝试）。
-                        //    拼多多首页右上角实测：<span class="user-name-text">店铺名</span>，故 user-name-text 优先。
-                        const sels = [
-                            '.user-name-text', '[class*="user-name-text"]', '[class*="user-name-name"]',
-                            '[class*="mallName"]', '[class*="shopName"]', '[class*="mall-name"]',
-                            '[class*="userName"]', '[class*="nickname"]', '[class*="storeName"]',
-                            '[class*="mall-info"]', '[class*="mallInfo"]', '[class*="shop-name"]',
-                        ];
-                        for (const s of sels) {
-                            const el = document.querySelector(s);
-                            const t = clean(el && el.textContent);
-                            if (t && t.length >= 2 && t.length <= 40) { out.bySel = t; break; }
+                    // #1a 修：登录刚完成时常停在通用落地页(title=「拼多多 商家后台」，昵称未渲染)，
+                    // 三种抓取全落空。先显式进 /home 让顶栏商家信息渲染，再带重试轮询抓取。
+                    try {
+                        if (!page.url().includes('/home')) {
+                            await gotoWithRetry(page, 'https://mms.pinduoduo.com/home/', { waitUntil: 'domcontentloaded', timeout: 30000 });
                         }
-                        // 2) 全局注入的商家信息对象
-                        try {
-                            const g = window.__GLOBAL__ || window.rawData || {};
-                            const nm = g.mallName || (g.mallInfo && g.mallInfo.mallName) || (g.userInfo && g.userInfo.mallName);
-                            if (nm) out.byGlobal = clean(nm);
-                        } catch (e) {}
-                        // 3) document.title 兜底：拼多多后台标题常形如「店铺名-拼多多商家后台」。
-                        const m = (document.title || '').match(/^([^-_|·]+?)\s*[-_|·].*?(?:拼多多|商家|后台|管理)/);
-                        if (m && m[1]) out.byTitle = clean(m[1]);
-                        return out;
-                    });
-                    // 诊断：把 title 和三种抓取结果都打印，便于没命中时据真实 DOM 精修。
+                    } catch (_) {}
+                    // 商家信息异步渲染：最多轮询 6 次(每次 1.5s)，抓到非空即停。
+                    let diag = { title: '', bySel: '', byGlobal: '', byTitle: '' };
+                    for (let attempt = 0; attempt < 6; attempt++) {
+                        await page.waitForTimeout(1500);
+                        diag = await captureShopNameDiag(page);
+                        if (diag.bySel || diag.byGlobal || diag.byTitle) break;
+                    }
                     console.log('SHOPNAME_DIAG:' + JSON.stringify(diag));
                     const shopName = diag.bySel || diag.byGlobal || diag.byTitle || '';
                     if (shopName) console.log('SHOPNAME:' + shopName);
@@ -475,6 +531,7 @@ async function main() {
                 return;
             }
         }
+
 
         // ── STEP 1：进入发布新商品页 ────────────────────────────────────
         progress(10, '进入发布新商品页');
