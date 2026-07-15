@@ -453,7 +453,11 @@ public class ListingService {
                 if (rf.isFile()) f = rf;
             }
         }
-        if (!f.isFile()) { log.warn("产品信息填写参考.xlsx 未找到: {}", f.getAbsolutePath()); return presets; }
+        if (!f.isFile()) {
+            // 兜底：xlsx 未随包拷到（换机/漏拷）→ 读随 jar 走的 classpath JSON，保证属性预设永不为空。
+            log.warn("产品信息填写参考.xlsx 未找到({}), 回退 classpath product-info-presets.json", f.getAbsolutePath());
+            return readProductInfoPresetsFromJson();
+        }
 
         try (java.io.FileInputStream fis = new java.io.FileInputStream(f);
              org.apache.poi.xssf.usermodel.XSSFWorkbook wb = new org.apache.poi.xssf.usermodel.XSSFWorkbook(fis)) {
@@ -478,6 +482,9 @@ public class ListingService {
                 if (idx >= 0) { name = line.substring(0, idx).trim(); value = line.substring(idx + 1).trim(); }
                 else { name = line.trim(); value = ""; }
 
+                // 第 6 列(index 5)：人工选择项的默认值(如"默认碳钢"/"通用")。非空则自动填该默认、不再留空。
+                String def = getCellStr(row.getCell(5)).trim().replaceFirst("^默认", "").trim();
+
                 Map<String, Object> attr = new LinkedHashMap<>();
                 attr.put("name", name);
                 List<String> options = new ArrayList<>();
@@ -496,13 +503,40 @@ public class ListingService {
                 } else {
                     fixed = value;
                 }
+                // 有默认值则自动填(转为非人工)：新店无「一键复用」也不留空；options 保留供商家后台改。
+                if (!def.isEmpty()) { fixed = def; manual = false; }
                 attr.put("value", fixed);
                 attr.put("options", options);
                 attr.put("manual", manual);
                 presets.get(curCat).add(attr);
             }
         } catch (Exception e) {
-            log.warn("读取产品信息参考表失败: {}", e.getMessage());
+            log.warn("读取产品信息参考表失败: {}, 回退 classpath JSON", e.getMessage());
+            return readProductInfoPresetsFromJson();
+        }
+        return presets;
+    }
+
+    /**
+     * 兜底：从 classpath prompt/product-info-presets.json 读预设属性（随 jar 走，绝不会漏拷）。
+     * JSON 结构：{ "_v":n, "<类目路径>": [ {name,value,options,manual}, ... ] }，与 xlsx 解析结果同形。
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, List<Map<String, Object>>> readProductInfoPresetsFromJson() {
+        Map<String, List<Map<String, Object>>> presets = new LinkedHashMap<>();
+        try {
+            String json = PromptLoader.load("prompt/product-info-presets.json");
+            Map<String, Object> root = objectMapper.readValue(json, Map.class);
+            for (Map.Entry<String, Object> e : root.entrySet()) {
+                if (e.getKey().startsWith("_")) continue; // 跳过 _v 等元字段
+                if (e.getValue() instanceof List<?> list) {
+                    List<Map<String, Object>> attrs = new ArrayList<>();
+                    for (Object o : list) if (o instanceof Map<?, ?> m) attrs.add((Map<String, Object>) m);
+                    presets.put(e.getKey(), attrs);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("classpath product-info-presets.json 读取失败(属性留空继续): {}", e.getMessage());
         }
         return presets;
     }

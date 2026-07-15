@@ -74,6 +74,20 @@ for d in "$TOOLS_SRC"/browsers/chromium-* "$TOOLS_SRC"/browsers/ffmpeg-* "$TOOLS
 done
 echo "tools 大小: $(du -sh "$TOOLS_DST" | cut -f1)"
 
+echo "===================== [5.5/6] 拷贝底层参考文件 ====================="
+# 商品关键属性/标题等底层参考。ListingService 从 app.resources-path(=app/) 或 user.dir 读
+# 「产品信息填写参考.xlsx」等；不拷则新店无「一键复用」时属性填不上（换店铺就空）。
+# classpath 已内置 product-info-presets.json 作兜底，此处再拷 xlsx 让运营可用 Excel 现场改。
+REF_SRC="$ROOT/底层信息"
+REF_DST="$DIST/GOFU/app"
+if [ -d "$REF_SRC" ]; then
+  for x in "产品信息填写参考.xlsx" "商品标题库.xlsx"; do
+    [ -f "$REF_SRC/$x" ] && cp "$REF_SRC/$x" "$REF_DST/$x" && echo "  拷贝 $x"
+  done
+else
+  echo "  ⚠ 未找到 $REF_SRC，跳过（打包版将靠 classpath JSON 兜底）"
+fi
+
 echo "===================== [6/6] 完成 ====================="
 echo "exe 路径: $DIST/GOFU/GOFU.exe"
 du -sh "$DIST/GOFU"
