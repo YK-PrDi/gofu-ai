@@ -554,6 +554,29 @@ public class ListingService {
         return new ArrayList<>();
     }
 
+    /**
+     * (C #3) 把文件夹名里写的品类（可为叶子如"锅盖架"、或全路径）解析成预设库里的**全路径**。
+     * 索引来源就是 product-info-presets 的 key 集（同一份数据既给属性也给路径，无需另建品类树）。
+     * 命中(叶子精确/末段相等/包含)返回全路径；无匹配原样返回入参（脚本仍可按末段搜类目）。
+     */
+    public String resolveCategoryPath(String catInput) {
+        if (catInput == null || catInput.isBlank()) return catInput;
+        String in = catInput.replace("›", ">").replace("　", " ").replaceAll("\\s*>\\s*", ">").trim();
+        String leaf = in.contains(">") ? in.substring(in.lastIndexOf('>') + 1).trim() : in;
+        Map<String, List<Map<String, Object>>> all = readProductInfoPresets();
+        // 1) 叶子精确等于某 key 的末段
+        for (String k : all.keySet()) {
+            String kl = k.replaceAll("\\s*>\\s*", ">");
+            String klLeaf = kl.contains(">") ? kl.substring(kl.lastIndexOf('>') + 1) : kl;
+            if (klLeaf.equals(leaf)) return k;
+        }
+        // 2) 退化：key 全路径包含输入串
+        for (String k : all.keySet()) {
+            if (k.replaceAll("\\s*>\\s*", ">").contains(in)) return k;
+        }
+        return catInput;   // 无匹配：原样返回（末段仍可用于脚本搜类目）
+    }
+
     private String getCellStr(org.apache.poi.ss.usermodel.Cell cell) {
         if (cell == null) return "";
         return switch (cell.getCellType()) {

@@ -114,7 +114,25 @@ public class SemiAutoOrchestrator {
     private ListingConfig buildConfig(SemiAutoScan.Product prod, List<SemiAutoScan.SkuCheck> skus,
                                       SemiAutoScan.ShopGroup shop) {
         ListingConfig cfg = new ListingConfig();
-        cfg.setProductName(prod.name());
+        // (C #3) 从文件夹名解析 品类-主件名 / 品类-主件1+主件2，批量上新不再需要人工选品。
+        FolderMeta meta = parseFolderName(prod.name());
+        cfg.setProductName(meta.productName);
+        if (meta.category != null && !meta.category.isBlank()) {
+            String fullCat = listingService.resolveCategoryPath(meta.category);
+            cfg.setCategory(fullCat);
+            cfg.setProductType(fullCat.contains(">") ? fullCat.substring(fullCat.lastIndexOf('>') + 1).trim() : fullCat);
+            // 品类预设属性(材质/表面工艺/产地…)自动填，与单品上新一致
+            Map<String, String> attrs = new java.util.LinkedHashMap<>();
+            try {
+                for (Map<String, Object> a : listingService.productInfoFor(fullCat)) {
+                    boolean manual = Boolean.TRUE.equals(a.get("manual"));
+                    String n = String.valueOf(a.getOrDefault("name", "")).trim();
+                    String v = String.valueOf(a.getOrDefault("value", "")).trim();
+                    if (!manual && !n.isEmpty() && !v.isEmpty()) attrs.put(n, v);
+                }
+            } catch (Exception e) { log.warn("批量上新读品类预设属性失败(留空继续): {}", e.getMessage()); }
+            if (!attrs.isEmpty()) cfg.setAttributes(attrs);
+        }
         cfg.setSkuSpecType("款式");
         cfg.setMainImgDir(prod.mainImgDir());
         cfg.setDetailImgDir(prod.detailImgDir());
@@ -131,5 +149,28 @@ public class SemiAutoOrchestrator {
         }
         cfg.setSkus(items);
         return cfg;
+    }
+
+    /** 文件夹名解析结果：品类(可空) + 商品名(多主件用+连接)。 */
+    private record FolderMeta(String category, String productName) {}
+
+    /**
+     * (C #3) 解析商品文件夹名的「品类-主件名」约定：
+     *  - "锅盖架-落地锅盖架"        → category=锅盖架, productName=落地锅盖架
+     *  - "锅盖架-落地款+吸盘款"      → category=锅盖架, productName=落地款+吸盘款(多主件保留+)
+     *  - "家装主材>厨房>厨房挂件>锅盖架-落地款" → category=全路径, productName=落地款
+     *  - 无"-"(旧命名)              → category=null, productName=整个文件夹名(退化，仍需人工选品)
+     * 规则：**第一个"-"**分隔品类与主件（品类名一般不含"-"，主件名可含"+"表多主件）。
+     */
+    private FolderMeta parseFolderName(String folderName) {
+        if (folderName == null || folderName.isBlank()) return new FolderMeta(null, folderName);
+        String s = folderName.trim();
+        int dash = s.indexOf('-');
+        if (dash <= 0 || dash >= s.length() - 1) {
+            return new FolderMeta(null, s);   // 无有效"-"：退化为旧行为
+        }
+        String cat = s.substring(0, dash).trim();
+        String name = s.substring(dash + 1).trim();
+        return new FolderMeta(cat, name);
     }
 }
