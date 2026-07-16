@@ -239,8 +239,10 @@ public class FlowController {
             final int idx = i;
             futures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
                 try {
+                    if (task.isCancelled()) return; // #15 已停止：跳过剩余主图（finally 仍 incrementProgress）
                     GEN_CONC.acquire();
                     try {
+                        if (task.isCancelled()) return;
                         task.setCurrentProduct("主图 " + (idx + 1) + "/" + mainTotal);
                         String out = new File(tmpOut, "main-" + idx + ".jpg").getAbsolutePath();
                         String base = idx < segPrompts.size() ? segPrompts.get(idx) : buildMainPrompt(ctx, idx + 1, fSeriesPlan);
@@ -493,6 +495,7 @@ public class FlowController {
             final int idx = i;
             fs.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
                 try {
+                    if (task.isCancelled()) return; // #15 已停止：跳过剩余换风格（finally 仍 incrementProgress）
                     String local = localizeWhite(imgs.get(idx));   // COS key/URL → 本地文件
                     if (local == null) return;
                     String outPath = new File(tmpOut, prefix + "-" + idx + ".jpg").getAbsolutePath();
@@ -536,8 +539,10 @@ public class FlowController {
                 final int idx = i;
                 dFutures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
                     try {
+                        if (task.isCancelled()) return; // #15 已停止：跳过剩余详情图（finally 仍 incrementProgress）
                         GEN_CONC.acquire();
                         try {
+                            if (task.isCancelled()) return;
                             task.setCurrentProduct("详情图 " + (idx + 1) + "/" + dTotal);
                             String mainLocal = localizeWhite(mainImgs.get(idx));
                             List<String> refs = mainLocal != null ? List.of(mainLocal) : (refMain.isBlank() ? List.of() : List.of(refMain));
@@ -615,8 +620,10 @@ public class FlowController {
                 final List<Map<String, Object>> fAccParts = accParts;
                 sFutures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
                     try {
+                        if (task.isCancelled()) return; // #15 已停止：跳过剩余SKU（finally 仍会 incrementProgress）
                         GEN_CONC.acquire();
                         try {
+                            if (task.isCancelled()) return; // 拿到令牌后再确认一次，避免停止后仍发起生图
                             task.setCurrentProduct("SKU：" + fName);
                             String path = lyImageGen.generateSkuImage(refMain, fName, it.getSpec2(), fProductType,
                                     fBatch, idx + 1, "", fSkuWhite, fAccImagePaths, "", fBgStyle, it.getItemCode(), fAccParts, templateId, it.getMainQty());
@@ -650,6 +657,21 @@ public class FlowController {
         resp.put("currentProduct", t.getCurrentProduct());
         resp.put("results", t.getResults());
         return ResponseEntity.ok(resp);
+    }
+
+    /**
+     * (#15) 停止生成：把任务标记为 cancelled，各生图循环在下一次检查点跳过剩余项、尽快收尾。
+     * 已在途的单张生图不强杀（等它自然结束），但不再启动新的、不再写覆盖。前端据此复位按钮。
+     */
+    @PostMapping("/cancel/{taskId}")
+    public ResponseEntity<Map<String, Object>> flowCancel(@PathVariable String taskId) {
+        GenerationTask t = flowTasks.get(taskId);
+        if (t == null) return ResponseEntity.notFound().build();
+        t.cancel();
+        t.setStatus("stopped");
+        t.setCurrentProduct("已请求停止…");
+        log.info("[停止生成] taskId={} 已标记 cancelled", taskId);
+        return ResponseEntity.ok(Map.of("taskId", taskId, "status", "stopped"));
     }
 
     /**

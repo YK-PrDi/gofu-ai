@@ -361,6 +361,7 @@
         <div v-if="!canGenerate" class="hint">需先选品类、选主件、备齐主件白底图</div>
         <div v-if="layoutDone" class="hint">已出布局和主图。在右侧预览切换/选定方案后，点②生成该方案的 SKU 图和详情图。</div>
         <div v-if="genRunning || genDone" class="progress"><div class="bar" :style="{width: genProgress+'%'}"></div></div>
+        <button v-if="genRunning && flowTaskId" class="btn btn-ghost btn-lg" @click="stopGen" style="width:100%;margin-top:8px;color:#dc2626;border-color:#dc2626">■ 停止生成（选错了想重来点这）</button>
         <div class="hint" v-if="genMsg">{{ genMsg }}</div>
       </div>
 
@@ -712,7 +713,7 @@ createApp({
         { id: 'beige', name: '米黄色' },
       ],
       antipriceTemplates: [],   // 防比价模板库(从云端 /api/listing/antiprice-templates 拉)
-      genRunning: false, genDone: false, layoutDone: false, genProgress: 0, genMsg: '',
+      genRunning: false, genDone: false, layoutDone: false, genProgress: 0, genMsg: '', flowTaskId: '',
       imgBusy: false,
       profitRate: 0.58,  // 利润率(=二级利润/价格)，后端反解百分比=0.93-利润率；默认58%(对应百分比0.35)
       erpRefreshing: false,
@@ -1144,6 +1145,7 @@ createApp({
     // 对齐羽刃进度条：N/total + 已用时 + 预计剩余(ETA线性外推) + 当前在生成哪张(currentProduct)。
     async pollFlowTask(taskId, total, lo, hi) {
       lo = lo || 5; hi = hi || 98;
+      this.flowTaskId = taskId;   // #15 记录当前任务，供停止按钮用
       const startAt = Date.now();
       const fmtSec = s => { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
       for (let tries = 0; tries < 1200; tries++) {
@@ -1166,10 +1168,21 @@ createApp({
         this.genMsg = `生图中… ${t.progress}/${t.total} · 已用时 ${fmtSec(elapsedSec)} · 预计剩余 ${eta}`
                     + (cur ? ` · 正在生成 ${cur}` : '');
         if (t.progress > 0) { try { await this.loadContext(); } catch (e) {} }  // 流式刷新预览
-        if (t.status === 'done') return;
+        if (t.status === 'done') { this.flowTaskId = ''; return; }
+        if (t.status === 'stopped') { this.genMsg = '已停止生成（已生成的图保留）'; this.flowTaskId = ''; return; }  // #15
         if (t.status === 'error') throw new Error((t.results || []).map(x => x.message).join('；') || '生图失败');
       }
       throw new Error('生图轮询超时（超过30分钟）');
+    },
+
+    // #15 停止生成：调云端 cancel，各生图循环在检查点跳过剩余项。已生成的图保留。
+    async stopGen() {
+      if (!this.flowTaskId) return;
+      if (!confirm('停止本次生成？已生成的图会保留，未生成的不再继续。')) return;
+      try {
+        await fetch('/api/flow/cancel/' + this.flowTaskId, { method: 'POST' });
+        this.genMsg = '停止中…（等在途的最后一张收尾）';
+      } catch (e) { this.setMsg('停止请求失败：' + e.message, 'err'); }
     },
 
     // 配件自动搭配：主件+ERP单品池 → 规则库匹配真实配件单品
