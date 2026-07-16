@@ -421,11 +421,26 @@ public class FlowController {
 
         List<String> mains = new ArrayList<>(ctx.getVisual().getMainImages());
         List<String> details = new ArrayList<>(ctx.getVisual().getDetailImages());
-        if (mains.isEmpty() && details.isEmpty())
-            return ResponseEntity.badRequest().body(Map.of("error", "当前商品没有成品图（主图/详情），无法做风格迁移"));
+        // #2c 修：风格迁移也覆盖 SKU 图——原来只换主图/详情，SKU 图没换、且用户再点"生成布局+主图"会
+        // 清掉刚迁的主图。现在收集所有方案的 SKU item.imgDir 一并换风格，回写各 item，全套统一基调。
+        List<com.gofu.shared.context.SkuItem> skuItems = new ArrayList<>();
+        List<String> skuImgs = new ArrayList<>();
+        if (ctx.getStructure() != null && ctx.getStructure().getPlans() != null) {
+            for (var pl : ctx.getStructure().getPlans()) {
+                if (pl.getItems() == null) continue;
+                for (var it : pl.getItems()) {
+                    if (it.getImgDir() != null && !it.getImgDir().isBlank()) {
+                        skuItems.add(it);
+                        skuImgs.add(it.getImgDir());
+                    }
+                }
+            }
+        }
+        if (mains.isEmpty() && details.isEmpty() && skuImgs.isEmpty())
+            return ResponseEntity.badRequest().body(Map.of("error", "当前商品没有成品图（主图/详情/SKU），无法做风格迁移"));
 
         String taskId = "style-" + System.nanoTime();
-        GenerationTask task = new GenerationTask(taskId, mains.size() + details.size());
+        GenerationTask task = new GenerationTask(taskId, mains.size() + details.size() + skuImgs.size());
         task.setStatus("running");
         flowTasks.put(taskId, task);
         File tmpOut = new File(appProperties.getPaths().getTempOutputDir(), taskId);
@@ -440,6 +455,7 @@ public class FlowController {
                         + "只改变背景色调、光影氛围、材质质感等风格层面；不得改动产品本身、不得挪动或改写文案、不得增删元素。";
                 String[] newMains = transferList(mains, prompt, tmpOut, "st-main", task);
                 String[] newDetails = transferList(details, prompt, tmpOut, "st-detail", task);
+                String[] newSkus = transferList(skuImgs, prompt, tmpOut, "st-sku", task);
                 // 覆盖回写（换风格后的图直接进 visual，能接着上新）。任一张失败则保留原图不动。
                 synchronized (ctx) {
                     ctx.getVisual().getMainImages().clear();
@@ -448,9 +464,12 @@ public class FlowController {
                     ctx.getVisual().getDetailImages().clear();
                     for (int i = 0; i < newDetails.length; i++)
                         ctx.getVisual().getDetailImages().add(newDetails[i] != null ? newDetails[i] : details.get(i));
+                    // SKU 图逐个回写各自 item（失败位保留原图）
+                    for (int i = 0; i < newSkus.length; i++)
+                        if (newSkus[i] != null) skuItems.get(i).setImgDir(newSkus[i]);
                 }
                 contextService.save(ctx);
-                log.info("[风格迁移] contextId={} style={} 主图{}张 详情{}张 完成", ctx.getId(), styleId, newMains.length, newDetails.length);
+                log.info("[风格迁移] contextId={} style={} 主图{}张 详情{}张 SKU{}张 完成", ctx.getId(), styleId, newMains.length, newDetails.length, newSkus.length);
                 task.setStatus("done");
             } catch (Exception e) {
                 log.error("风格迁移失败: {}", e.getMessage(), e);
@@ -461,7 +480,7 @@ public class FlowController {
 
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("taskId", taskId);
-        resp.put("total", mains.size() + details.size());
+        resp.put("total", mains.size() + details.size() + skuImgs.size());
         resp.put("contextId", ctx.getId());
         return ResponseEntity.ok(resp);
     }

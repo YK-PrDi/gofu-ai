@@ -1389,7 +1389,7 @@ createApp({
         const d = await r.json();
         if (d.error) throw new Error(d.error);
         if (!d.contextId) throw new Error('未返回 contextId');
-        this.imp.msg = '✓ 已导入：主图 ' + d.mainCount + ' 张、详情 ' + d.detailCount + ' 张。已加载，可在右侧「🎨风格迁移」换风格或直接上新。';
+        this.imp.msg = '✓ 已导入：主图 ' + d.mainCount + ' 张、详情 ' + d.detailCount + ' 张、白底 ' + (d.whiteCount||0) + ' 张。已加载，可在右侧「🎨风格迁移」换风格或直接上新。';
         this.imp.msgType = 'ok';
         this.contextId = d.contextId;
         await this.loadContext();   // 加载新建商品，右栏出现成品图 + 风格迁移区块
@@ -1403,8 +1403,20 @@ createApp({
     // ── 🎨 风格迁移：对当前商品整套成品图换基调，覆盖回写后刷新预览 ──
     async runStyleTransfer() {
       if (!this.ctx || !this.styleTransfer.styleId) return;
-      const n = (this.ctx.visual.mainImages||[]).length + (this.ctx.visual.detailImages||[]).length;
-      if (!confirm('将对当前商品 ' + n + ' 张成品图整套换风格，换完覆盖原图（可接着上新）。继续？')) return;
+      const hasSku = (this.ctx.visual?.whiteImages||[]).length > 0 || (this.ctx.structure?.plans||[]).length > 0;
+      const hasCat = !!(this.ctx.category && String(this.ctx.category).trim());
+      // #2a：有 SKU（白底/方案）时，提醒把图按商品名命名，便于换风格后对应回填。
+      if (hasSku) {
+        if (!confirm('检测到本商品含 SKU（白底/方案）。请确认成品图已按【商品名称】命名，换风格后才能正确对应。已命名好？点确定继续。')) return;
+      } else if (!hasCat) {
+        // #2b：无 SKU 且未选品类/主件 → 先提示去选，别在信息不全时换风格。
+        this.setMsg('本商品还没有 SKU、也没选品类/主件。请先在左侧选好品类与主件（或先生成布局）再做风格迁移。', 'err');
+        this.styleTransfer.msg = '请先选品类与主件再换风格'; this.styleTransfer.msgType = 'err';
+        return;
+      }
+      const skuN = (this.ctx.structure?.plans||[]).reduce((s,p)=>s+(p.items||[]).filter(it=>it.imgDir).length,0);
+      const n = (this.ctx.visual.mainImages||[]).length + (this.ctx.visual.detailImages||[]).length + skuN;
+      if (!confirm('将对当前商品 ' + n + ' 张成品图（含主图/详情/SKU）整套换风格，换完覆盖原图（可接着上新）。继续？')) return;
       this.styleTransfer.running = true;
       this.styleTransfer.msg = '风格迁移中…'; this.styleTransfer.msgType = '';
       try {

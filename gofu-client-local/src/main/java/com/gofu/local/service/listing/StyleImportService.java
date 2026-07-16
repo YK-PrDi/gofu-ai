@@ -56,12 +56,17 @@ public class StyleImportService {
                 ? List.of() : semiAutoService.listImages(p.mainImgDir());
         List<String> detailImgs = p.detailImgDir() == null || p.detailImgDir().isEmpty()
                 ? List.of() : semiAutoService.listImages(p.detailImgDir());
-        if (mainImgs.isEmpty() && detailImgs.isEmpty())
-            throw new IllegalStateException("文件夹里没找到主图/详情图（需含\"主图\"/\"详情\"子目录）");
+        // #1 修：原来只扫主图/详情、白底图目录被丢弃(whiteImages写死空)→"文件夹里有sku(白底)却没检测到"。
+        // 现在也扫 白底图/，作为 SKU 白底带进 context，后续上新/风格迁移可用。
+        List<String> whiteImgs = p.whiteImgDir() == null || p.whiteImgDir().isEmpty()
+                ? List.of() : semiAutoService.listImages(p.whiteImgDir());
+        if (mainImgs.isEmpty() && detailImgs.isEmpty() && whiteImgs.isEmpty())
+            throw new IllegalStateException("文件夹里没找到主图/详情图/白底图（需含\"主图\"/\"详情\"/\"白底图\"子目录）");
 
         // 逐张上传云端 → 拿公网 URL（作为 context 图 key）
         List<String> mainKeys = uploadAll(mainImgs);
         List<String> detailKeys = uploadAll(detailImgs);
+        List<String> whiteKeys = uploadAll(whiteImgs);
 
         // 组 context（visual 填上传后的 URL），调云端建
         Map<String, Object> visual = new LinkedHashMap<>();
@@ -69,7 +74,7 @@ public class StyleImportService {
         visual.put("detailImages", detailKeys);
         visual.put("title", productName == null || productName.isBlank() ? dir.getName() : productName);
         visual.put("sellingPoints", List.of());
-        visual.put("whiteImages", List.of());
+        visual.put("whiteImages", whiteKeys);
 
         Map<String, Object> ctx = new LinkedHashMap<>();
         ctx.put("mainItem", productName == null || productName.isBlank() ? dir.getName() : productName);
@@ -78,8 +83,10 @@ public class StyleImportService {
 
         Map<String, Object> saved = postJson("/api/context", ctx);
         String contextId = String.valueOf(saved.get("id"));
-        log.info("[导入建context] 文件夹={} → contextId={} 主图{}张 详情{}张", folderPath, contextId, mainKeys.size(), detailKeys.size());
+        log.info("[导入建context] 文件夹={} → contextId={} 主图{}张 详情{}张 白底{}张",
+                folderPath, contextId, mainKeys.size(), detailKeys.size(), whiteKeys.size());
         return Map.of("contextId", contextId, "mainCount", mainKeys.size(), "detailCount", detailKeys.size(),
+                "whiteCount", whiteKeys.size(),
                 "warnings", p.warnings() == null ? List.of() : p.warnings());
     }
 
