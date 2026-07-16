@@ -85,14 +85,61 @@ public class GofuLauncher {
         log("服务就绪，打开浏览器: " + WORKBENCH);
         openBrowser(WORKBENCH);
 
+        // #16：装系统托盘图标，给"彻底退出"入口。关浏览器标签不停服务(服务在后台)，
+        // 用户要真正停掉全部服务，右键托盘→彻底退出(或双击托盘重开工作台)。
+        setupTray();
+
         log("");
         log("==== GOFU-AI 已启动，可开始测试 ====");
         log("  工作台: " + WORKBENCH);
-        log("  关闭此窗口将停止所有服务。");
+        log("  关闭浏览器不会停止服务；彻底退出请右键系统托盘图标→彻底退出。");
         log("====================================");
 
         // 主线程驻留，保持子进程存活；子进程异常退出则本进程也退出
         for (Process p : children) p.waitFor();
+    }
+
+    /**
+     * #16 系统托盘：解决"关了浏览器/窗口但服务还在后台跑"——给用户一个明确的彻底退出入口。
+     * 双击托盘=重新打开工作台；右键菜单=打开工作台 / 彻底退出(停所有服务后 System.exit)。
+     * 托盘不可用(无头环境等)时静默跳过，不影响服务运行。
+     */
+    private static void setupTray() {
+        try {
+            if (!java.awt.SystemTray.isSupported()) { log("系统托盘不可用，跳过（彻底退出请关闭本启动器窗口）"); return; }
+            java.awt.SystemTray tray = java.awt.SystemTray.getSystemTray();
+            // 简单生成一个图标（无图标资源时用纯色方块，避免依赖打包图片）
+            int sz = tray.getTrayIconSize().width > 0 ? tray.getTrayIconSize().width : 16;
+            java.awt.image.BufferedImage img = new java.awt.image.BufferedImage(sz, sz, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+            java.awt.Graphics2D g = img.createGraphics();
+            g.setColor(new java.awt.Color(0x2d, 0x6c, 0xdf));
+            g.fillRoundRect(0, 0, sz, sz, 4, 4);
+            g.setColor(java.awt.Color.WHITE);
+            g.setFont(new java.awt.Font("SansSerif", java.awt.Font.BOLD, sz - 4));
+            g.drawString("G", 3, sz - 3);
+            g.dispose();
+
+            java.awt.PopupMenu menu = new java.awt.PopupMenu();
+            java.awt.MenuItem openItem = new java.awt.MenuItem("打开工作台");
+            openItem.addActionListener(e -> openBrowser(WORKBENCH));
+            java.awt.MenuItem exitItem = new java.awt.MenuItem("彻底退出（停止所有服务）");
+            exitItem.addActionListener(e -> {
+                log("用户从托盘选择彻底退出，停止所有服务…");
+                stopAll();
+                System.exit(0);
+            });
+            menu.add(openItem);
+            menu.addSeparator();
+            menu.add(exitItem);
+
+            java.awt.TrayIcon icon = new java.awt.TrayIcon(img, "GOFU-AI 工作台（双击打开 / 右键退出）", menu);
+            icon.setImageAutoSize(true);
+            icon.addActionListener(e -> openBrowser(WORKBENCH));   // 双击托盘=重开工作台
+            tray.add(icon);
+            log("系统托盘已就绪：右键图标可『彻底退出』停止所有服务。");
+        } catch (Exception e) {
+            log("系统托盘初始化失败(不影响服务): " + e.getMessage());
+        }
     }
 
     /** 用内嵌 JRE 起一个 fat jar，stdout/stderr 重定向到 data/logs/<tag>.log。 */
