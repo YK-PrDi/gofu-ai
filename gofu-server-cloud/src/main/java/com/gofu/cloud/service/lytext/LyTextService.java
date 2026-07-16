@@ -119,9 +119,14 @@ public class LyTextService {
         } catch (Exception e) {
             log.error("AI 生成标题失败: {}", e.getMessage(), e);
             Map<String, Object> fallback = new LinkedHashMap<>();
-            fallback.put("title", brandStr + productName + (colorsStr.isEmpty() ? "" : " " + colorsStr));
+            // 修(#4)：AI 额度耗尽等失败时，标题**绝不拼 SKU 名**——否则把每个 SKU displayName
+            // 用"、"串成一大坨当标题(Image#20)，脏标题传拼多多直接上新失败。
+            // fallback 只给"品牌+品名"的干净短标题(≤30字)，宁可朴素也要合法。
+            String fbTitle = (brandStr + productName).trim();
+            if (fbTitle.length() > 30) fbTitle = fbTitle.substring(0, 30);
+            fallback.put("title", fbTitle);
             Map<String, String> skuMap = new LinkedHashMap<>();
-            if (skuColors != null) skuColors.forEach(c -> skuMap.put(c, brandStr + productName + c));
+            if (skuColors != null) skuColors.forEach(c -> skuMap.put(c, c)); // 款式名沿用传入值，不再前缀品名
             fallback.put("skuNames", skuMap);
             fallback.put("error", e.getMessage());
             return fallback;

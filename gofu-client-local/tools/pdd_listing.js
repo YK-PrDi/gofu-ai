@@ -1954,6 +1954,34 @@ async function main() {
         } else {
             const joined = realErrors.join(' | ');
             log('页面校验错误项: ' + joined);
+            // 诊断(#4)：汇总常只给"N个错误项未处理去处理"，抓不到具体字段。
+            // 点「去处理」展开定位到第一个出错字段，再抓该字段名/红字，打印真凶。
+            try {
+                const clicked = await page.evaluate(() => {
+                    const el = [...document.querySelectorAll('a,button,span,div')]
+                        .find(e => /去处理/.test(e.textContent || '') && e.offsetParent !== null);
+                    if (el) { el.click(); return true; }
+                    return false;
+                });
+                if (clicked) await page.waitForTimeout(1500);
+                const detail = await page.evaluate(() => {
+                    const out = [];
+                    // 出错字段常有 aria-invalid / error 类，取其最近的表单项标签文字
+                    document.querySelectorAll('[aria-invalid="true"], [class*="error"], [class*="Error"], [class*="invalid"], [class*="form-explain"]').forEach(el => {
+                        let label = '';
+                        let p = el;
+                        for (let i = 0; i < 6 && p; i++) {
+                            const lb = p.querySelector && p.querySelector('label, [class*="label"], [class*="title"]');
+                            if (lb && (lb.textContent || '').trim()) { label = lb.textContent.trim(); break; }
+                            p = p.parentElement;
+                        }
+                        const t = (el.textContent || '').trim();
+                        if (t && t.length < 120) out.push((label ? '[' + label.slice(0, 20) + '] ' : '') + t);
+                    });
+                    return [...new Set(out)].slice(0, 20);
+                }).catch(() => []);
+                log('错误项诊断(展开后具体字段): ' + (detail.length ? detail.join(' || ') : '(仍未抓到，见 submit_result.png)'));
+            } catch (de) { log('错误项诊断异常: ' + de.message.split('\n')[0]); }
             error('上架未成功：存在未处理的必填/校验项(' + submitResultUrl + ')。页面提示: ' + joined);
         }
 

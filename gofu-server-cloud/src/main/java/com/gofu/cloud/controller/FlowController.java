@@ -576,8 +576,12 @@ public class FlowController {
                 final int idx = i;
                 final var it = items.get(i);
                 String name = it.getSkuDisplayName() != null ? it.getSkuDisplayName() : it.getName();
+                // 修(#8)：SKU 白底图按主件匹配——原来 whiteImgDir 为空就一律回退 white(池里第一张)，
+                // 导致 30cm/40cm/50cm/60cm 挂钩全用同一张(如都用60cm)。改为按 itemCode/尺寸从白底池匹配对应那张。
                 String skuWhite = (it.getWhiteImgDir() != null && !it.getWhiteImgDir().isBlank())
-                        ? localizeWhite(it.getWhiteImgDir()) : white;
+                        ? localizeWhite(it.getWhiteImgDir())
+                        : localizeWhite(matchWhiteForItem(whiteImages, it.getItemCode(), it.getSpec1()));
+                if (skuWhite == null) skuWhite = white; // 匹配不到再回退池首张(不至于漏图)
                 if (skuWhite == null) { log.info("SKU「{}」无可用白底图，跳过", name); task.incrementProgress(); continue; }
                 final String fName = name;
                 final String fSkuWhite = skuWhite;
@@ -720,6 +724,37 @@ public class FlowController {
      * 支持四类：data:URL(前端拖拽/base64)→解码落地；本地文件→原样；http URL→下载；COS key→signKey 换 URL 再下载。
      * 任何一类失败返回 null（调用方据此跳过并如实标注，不抛断整个编排）。
      */
+    /**
+     * (#8) 按 SKU 主件从白底图池挑对应那张：优先 itemCode 主件段命中文件名，再退化到尺寸 token(如"30CM")。
+     * 命中返回该白底 ref；匹配不到返回 null(调用方再回退池首张)。防止不同尺寸 SKU 共用同一张白底。
+     */
+    private String matchWhiteForItem(List<String> whiteImages, String itemCode, String spec1) {
+        if (whiteImages == null || whiteImages.isEmpty()) return null;
+        // 候选关键词：itemCode 主件段(去掉 + 后的配件) + spec1，抽取字母数字/尺寸 token
+        String key = "";
+        if (itemCode != null && !itemCode.isBlank()) key = itemCode.split("\\+")[0].trim();
+        if (key.isBlank() && spec1 != null) key = spec1.trim();
+        if (key.isBlank()) return null;
+        String keyU = key.toUpperCase();
+        // 1) 文件名(去路径)包含完整主件码 → 最精确
+        for (String w : whiteImages) {
+            if (w == null) continue;
+            String base = w.substring(Math.max(w.lastIndexOf('/'), w.lastIndexOf('\\')) + 1).toUpperCase();
+            if (base.contains(keyU)) return w;
+        }
+        // 2) 退化：抽尺寸 token(如 30CM/50CM)分别匹配，避免整码不同但尺寸对得上
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d{2,3}\\s*CM)").matcher(keyU);
+        if (m.find()) {
+            String size = m.group(1).replaceAll("\\s+", "");
+            for (String w : whiteImages) {
+                if (w == null) continue;
+                String base = w.substring(Math.max(w.lastIndexOf('/'), w.lastIndexOf('\\')) + 1).toUpperCase().replaceAll("\\s+", "");
+                if (base.contains(size)) return w;
+            }
+        }
+        return null;
+    }
+
     private String localizeWhite(String white) {
         if (white == null || white.isBlank()) return null;
         try {
