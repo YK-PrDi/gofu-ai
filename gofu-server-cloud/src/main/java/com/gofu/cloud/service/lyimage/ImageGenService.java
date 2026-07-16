@@ -49,22 +49,8 @@ public class ImageGenService {
         return aiClient.geminiText(prompt, imagePaths);
     }
 
-    /**
-     * 架类品种匹配：按叶子类目 + SKU 名关键词，映射到 shelf-prompts.json 的品种键。
-     * 锅盖架按名含"吸盘/壁挂/墙"→吸盘款，否则落地款；其余按关键词。兜底返回"刀架"（避免空）。
-     */
-    private static String matchShelfKind(String leaf, String skuName) {
-        String s = ((leaf == null ? "" : leaf) + " " + (skuName == null ? "" : skuName));
-        if (s.contains("锅盖")) {
-            return (s.contains("吸盘") || s.contains("壁挂") || s.contains("墙") || s.contains("免钉")) ? "吸盘锅盖架" : "落地锅盖架";
-        }
-        if (s.contains("刀架") || s.contains("刀具")) return "刀架";
-        if (s.contains("挂钩") || s.contains("门后")) return "挂钩";
-        if (s.contains("沥水") || s.contains("收纳架")) return "沥水收纳架";
-        if (s.contains("转角") || s.contains("置物") || s.contains("浴室")) return "浴室转角置物架";
-        if (s.contains("刀")) return "刀架";
-        return null;   // M18-P0-C：兜底不再猜"刀架"，返回 null 让上层"品种 prompt 缺失"显式暴露，避免挂钩误套刀架构图
-    }
+    // M17 重构：原 matchShelfKind(品种关键词猜测)已废弃，改为 PromptTemplateService.shelfPick
+    // 按叶子类目命中 + 款式分组 + 组内配对随机（防关键词误判、防文不对图）。
 
     /** 从 compDesc（如"全配+5支滤芯【可用1年】"）提取滤芯数量，无匹配返回 0 */
     private static int parseFilterCount(String compDesc) {
@@ -413,22 +399,28 @@ public class ImageGenService {
 
         // ── 架类品防比价：整图 AI（品种专属 prompt + 参考图作构图底 + 白底图锁主体），不走 Java 贴图 ──
         if (isShelf) {
-            String leaf = productType.contains(":") ? productType.substring(productType.indexOf(':') + 1).trim() : "";
-            String kind = matchShelfKind(leaf, skuName);
-            String shelfSeg = templateService.shelfPrompt(kind);
-            if (shelfSeg == null || shelfSeg.isBlank())
-                throw new RuntimeException("架类品种 prompt 缺失(kind=" + kind + ")，请检查 shelf-prompts.json");
+            // M17 重构：类目-keyed + 款式分组 + 组内配对随机(shelfPick)。
+            // productType 形如 "架类:<叶子> <主件名>"(deriveProductTypeForGen 把主件名并入)。
+            // 取冒号后首段(空格前)作叶子类目键，主件名并入 skuName 供款式分组(吸盘/落地)判定。
+            String ptTail = productType.contains(":") ? productType.substring(productType.indexOf(':') + 1).trim() : "";
+            int sp = ptTail.indexOf(' ');
+            String leaf = sp > 0 ? ptTail.substring(0, sp).trim() : ptTail;
+            String shelfSkuHint = ((sp > 0 ? ptTail.substring(sp + 1) : "") + " " + (skuName == null ? "" : skuName)).trim();
+            com.gofu.cloud.service.lyimage.PromptTemplateService.ShelfPick pick = templateService.shelfPick(leaf, shelfSkuHint);
+            if (pick == null)
+                throw new RuntimeException("架类构图缺失(叶子类目=" + leaf + ")，请检查 shelf-prompts.json 是否含该类目");
+            String shelfSeg = pick.prompt();
             String shelfTpl = PromptLoader.load("prompt/image-shelf-main.txt");
             String shelfPrompt = shelfTpl
                 .replace("{{shelfPrompt}}", shelfSeg)
                 .replace("{{colorName}}", colorOnly);
-            // 参考图作构图底（refs 第一张权重最高）+ 商品白底图锁主体
-            File shelfBase = templateService.builtinBaseByName("shelf-" + kind);
+            // 配套参考图作构图底（refs 第一张权重最高）+ 商品白底图锁主体
+            File shelfBase = templateService.shelfRefFile(leaf, pick.group(), pick.ref());
             List<File> shelfRefs = new java.util.ArrayList<>();
 
-            // ── 路线2（落地锅盖架）：Java 先合成「架体+粗摆收纳物」构图底，作为最高权重参考图，
+            // ── 路线2（锅盖架·落地组）：Java 先合成「架体+粗摆收纳物」构图底，作为最高权重参考图，
             //    prompt 强约束"保架体/收纳物 1:1、只理顺卡位遮挡与背景"。绕开 AI 重画架体必崩。
-            if ("落地锅盖架".equals(kind)) {
+            if (leaf.contains("锅盖架") && "落地".equals(pick.group())) {
                 try {
                     File rackImg = (shelfBase != null && shelfBase.isFile()) ? shelfBase
                             : templateService.assetByPath("base/shelf-落地锅盖架-米奇款.png");
@@ -453,7 +445,7 @@ public class ImageGenService {
             if (shelfRefs.isEmpty() && shelfBase != null && shelfBase.isFile()) shelfRefs.add(shelfBase);
             if (hasWhiteBg) shelfRefs.add(whiteBgRef);
             else if (hasRef) shelfRefs.add(ref);
-            log.info("架类生图: kind={}, 参考图={}, 白底={}", kind, shelfBase != null, hasWhiteBg);
+            log.info("架类生图: 叶子={}, 组={}, 参考图={}({}), 白底={}", leaf, pick.group(), shelfBase != null, pick.ref(), hasWhiteBg);
             Exception lastShelf = null;
             int maxBackoff = 4;
             for (int attempt = 0; attempt < keys.size() * (1 + maxBackoff); attempt++) {

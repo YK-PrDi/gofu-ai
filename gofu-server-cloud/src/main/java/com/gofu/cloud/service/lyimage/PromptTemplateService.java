@@ -150,19 +150,59 @@ public class PromptTemplateService {
         } catch (Exception e) { log.warn("素材落地失败({}): {}", res, e.getMessage()); return null; }
     }
 
+    /** 架类防比价选中的构图：一段 prompt + 配套参考图名 + 命中的款式组。 */
+    public record ShelfPick(String prompt, String ref, String group) {}
+
     /**
-     * 架类品种 prompt：从 classpath prompt/shelf-prompts.json 读指定品种(kind)的构图文案段。
-     * 找不到该品种返回 null。文案取自架类防比价 xlsx，卖点标签已写死其中。
+     * 架类防比价构图选择（类目-keyed + 款式分组 + 组内配对随机）：
+     * 1) 按叶子类目从 shelf-prompts.json 命中类目节点(key 末段==leaf)；
+     * 2) 锅盖架等多组类目：skuName 含 吸盘/壁挂/墙/免钉 → "吸附"组，否则 "落地"；单组类目取 "默认"；
+     * 3) 组内随机选一套 {prompt, ref}（配对随机，防文不对图）。
+     * 参考图在 classpath assets/shelf-ref/<leaf>/<group>/<ref>。找不到返回 null。
      */
     @SuppressWarnings("unchecked")
-    public String shelfPrompt(String kind) {
-        if (kind == null || kind.isBlank()) return null;
+    public ShelfPick shelfPick(String category, String skuName) {
+        if (category == null || category.isBlank()) return null;
         try {
-            String json = PromptLoader.load("prompt/shelf-prompts.json");
-            Map<String, Object> map = om.readValue(json, Map.class);
-            Object v = map.get(kind.trim());
-            return v == null ? null : String.valueOf(v);
-        } catch (Exception e) { log.warn("架类 prompt 读取失败(kind={}): {}", kind, e.getMessage()); return null; }
+            Map<String, Object> map = om.readValue(PromptLoader.load("prompt/shelf-prompts.json"), Map.class);
+            String leaf = category.replace('＞', '>').replace('›', '>');
+            leaf = leaf.contains(">") ? leaf.substring(leaf.lastIndexOf('>') + 1).trim() : leaf.trim();
+            // 命中类目节点：key 末段 == leaf
+            Map<String, Object> catNode = null;
+            for (Map.Entry<String, Object> e : map.entrySet()) {
+                if (e.getKey().startsWith("_") || !(e.getValue() instanceof Map)) continue;
+                String k = e.getKey();
+                String kl = k.contains(">") ? k.substring(k.lastIndexOf('>') + 1).trim() : k.trim();
+                if (kl.equals(leaf)) { catNode = (Map<String, Object>) e.getValue(); break; }
+            }
+            if (catNode == null) return null;
+            // 选款式组
+            String s = skuName == null ? "" : skuName;
+            String group;
+            if (catNode.containsKey("落地") || catNode.containsKey("吸附")) {
+                group = (s.contains("吸盘") || s.contains("壁挂") || s.contains("墙") || s.contains("免钉")) ? "吸附" : "落地";
+                if (!catNode.containsKey(group)) group = catNode.containsKey("落地") ? "落地" : "吸附";
+            } else {
+                group = catNode.containsKey("默认") ? "默认" : catNode.keySet().iterator().next();
+            }
+            Object arr = catNode.get(group);
+            if (!(arr instanceof List) || ((List<?>) arr).isEmpty()) return null;
+            List<Map<String, Object>> items = (List<Map<String, Object>>) arr;
+            Map<String, Object> pick = items.get((int) (Math.random() * items.size()));  // 组内随机
+            String prompt = String.valueOf(pick.getOrDefault("prompt", ""));
+            String ref = String.valueOf(pick.getOrDefault("ref", ""));
+            if (prompt.isBlank()) return null;
+            return new ShelfPick(prompt, ref, group);
+        } catch (Exception e) {
+            log.warn("架类构图选择失败(category={}): {}", category, e.getMessage());
+            return null;
+        }
+    }
+
+    /** 架类参考图落地：classpath assets/shelf-ref/<leaf>/<group>/<ref> → 用户目录。找不到返回 null。 */
+    public File shelfRefFile(String leaf, String group, String ref) {
+        if (ref == null || ref.isBlank()) return null;
+        return assetByPath("shelf-ref/" + leaf + "/" + group + "/" + ref);
     }
 
     // ── M18 品类库（subjectLock/negative）：从羽刃前端 EC_CATALOG 移植为后端 ec-catalog.json ──

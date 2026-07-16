@@ -982,7 +982,7 @@ public class FlowController {
         boolean isShelf = category.contains("厨房挂件") || category.contains("挂钩") || category.contains("锅盖架")
                 || category.contains("刀架") || category.contains("置物架") || category.contains("收纳架")
                 || category.contains("沥水") || leaf.contains("架");
-        // 架类品种细分（如吸盘/落地锅盖架）靠主件名区分，把主件名一并带上供下游 matchShelfKind 判定。
+        // 架类款式细分（如吸盘/落地锅盖架）靠主件名区分，把主件名一并带上供下游 shelfPick 款式分组判定。
         if (isShelf) return ("架类:" + (leaf.isBlank() ? "" : leaf) + " " + (mainItem == null ? "" : mainItem)).trim();
         return leaf.isBlank() ? "未知" : leaf;
     }
