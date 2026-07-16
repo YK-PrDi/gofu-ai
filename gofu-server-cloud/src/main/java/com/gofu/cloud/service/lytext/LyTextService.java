@@ -374,6 +374,42 @@ public class LyTextService {
     }
 
     /**
+     * 按品类取卖点清单(classpath prompt/selling-points-lib.json)，拼成 prompt 参考块。
+     * key 命中规则：productType 包含清单里某品类关键词(如"花洒")即用那份。无匹配返回空串。
+     */
+    @SuppressWarnings("unchecked")
+    private String sellingPointLibBlock(String productType) {
+        if (productType == null || productType.isBlank()) return "";
+        try {
+            Map<String, Object> lib = objectMapper.readValue(PromptLoader.load("prompt/selling-points-lib.json"), Map.class);
+            for (Map.Entry<String, Object> e : lib.entrySet()) {
+                String cat = e.getKey();
+                if (cat.startsWith("_") || !(e.getValue() instanceof Map)) continue;
+                if (!productType.contains(cat)) continue;   // 品类命中
+                Map<String, Object> node = (Map<String, Object>) e.getValue();
+                StringBuilder sb = new StringBuilder("【卖点清单·按品类·优先从中选贴合的】\n");
+                Object groups = node.get("groups");
+                if (groups instanceof Map) {
+                    for (Map.Entry<String, Object> g : ((Map<String, Object>) groups).entrySet()) {
+                        if (g.getValue() instanceof List) {
+                            sb.append("· ").append(g.getKey()).append("：")
+                              .append(String.join("、", (List<String>) g.getValue())).append("\n");
+                        }
+                    }
+                }
+                Object hc = node.get("highConversion");
+                if (hc instanceof List && !((List<?>) hc).isEmpty()) {
+                    sb.append("· 高转化组合(整句可直接用于文案)：").append(String.join("、", (List<String>) hc)).append("\n");
+                }
+                return sb.toString();
+            }
+        } catch (Exception ex) {
+            log.warn("卖点清单读取失败(不影响,AI自由提炼): {}", ex.getMessage());
+        }
+        return "";
+    }
+
+    /**
      * 从标题/产品/主图提取结构化核心营销卖点（写入 ProductContext.visual.sellingPoints）。
      * 这是"视觉流→结构流"数据链的起点：卖点由此产出，供 SKU 规划反哺（M5c）。
      *
@@ -381,12 +417,15 @@ public class LyTextService {
      */
     @SuppressWarnings("unchecked")
     public List<String> extractSellingPoints(String title, String productType, List<String> imagePaths) {
+        String libBlock = sellingPointLibBlock(productType);   // 按品类取卖点清单，非空则注入作参考
         String prompt =
             "你是拼多多电商运营专家。请从以下商品信息中提取 3-6 个【核心营销卖点】关键词。\n" +
             "商品类型：" + (productType == null ? "" : productType) + "\n" +
             "商品标题：" + (title == null ? "" : title) + "\n" +
             (imagePaths != null && !imagePaths.isEmpty() ? "并结合所给商品图观察到的功能特征。\n" : "") +
+            libBlock +
             "要求：每个卖点是 2-4 字的精炼关键词（如\"过滤\"\"增压\"\"抑菌\"\"一键止水\"），不要整句。\n" +
+            (libBlock.isEmpty() ? "" : "优先从上方【卖点清单】里挑选与本商品真实相符的词；清单没有合适的才自行补充。\n") +
             "严格按 JSON 数组返回，不要其他内容：[\"卖点1\",\"卖点2\",\"卖点3\"]";
         try {
             String content = imageGenService.geminiText(prompt, imagePaths);
