@@ -382,6 +382,11 @@
           <label><input type="checkbox" v-model="settings.reviewImages" @change="saveSettings" /> 生图后必须人工过图</label>
           <label><input type="checkbox" v-model="settings.confirmBeforeListing" @change="saveSettings" /> 上新前二次确认</label>
           <label><input type="checkbox" v-model="listingDryRun" /> 诊断模式(不提交)</label>
+          <div class="hint" style="color:var(--text-faint)">
+            ⓘ 以上开关仅对<b>手动上新</b>(本页「确认上新」)生效。
+            <b>导入全自动</b>会读前两项决定是否停下等人工；
+            <b>文件夹批量上新</b>为连续自动流程，<b>不受这三项约束</b>(一路自动到完成)。
+          </div>
         </div>
         <button class="btn btn-primary btn-lg" @click="submitListing" :disabled="listingRunning || !currentItems.length" style="width:100%">
           {{ listingRunning ? '上新中…' : '确认上新' }}

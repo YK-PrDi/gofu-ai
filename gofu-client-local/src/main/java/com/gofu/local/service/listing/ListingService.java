@@ -80,7 +80,22 @@ public class ListingService {
             // 之前 submit 只要进程正常退出就标 done，与"真实发品成功"脱钩 → 前端误报成功。
             final boolean[] sawDone = {false};
             final String[] lastError = {null};
-            browserBusy.set(true);   // M15：占用 profile，保活此时会跳过
+            // M6修：taskService 是 newFixedThreadPool(10)，批量上新会并发提交多个 runListing→
+            // 原来只 set(true) 不检查，多进程抢同一 pdd_browser_profile/浏览器(反风控雷区)。
+            // 改为串行闸：抢不到 browserBusy 就等前一个释放(最多等30分钟)，保证同一时刻只一个上新进程真正跑。
+            try {
+                long waitDeadline = System.currentTimeMillis() + 30 * 60 * 1000L;
+                while (!browserBusy.compareAndSet(false, true)) {
+                    if (System.currentTimeMillis() > waitDeadline) {
+                        task.addResult(Map.of("type", "error", "message", "等待浏览器空闲超时(30分钟)，跳过"));
+                        task.setStatus("error");
+                        return;
+                    }
+                    task.addResult(Map.of("type", "log", "message", "浏览器被其他上新占用，排队等待…"));
+                    Thread.sleep(5000);
+                }
+            } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
+            // 已抢到 browserBusy（占用 profile，保活此时会跳过）
             try {
                 ProcessBuilder pb = dryRun
                     ? new ProcessBuilder(resolveNodeExe(), scriptFile.getAbsolutePath(), "--dry-run")
