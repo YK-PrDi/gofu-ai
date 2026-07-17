@@ -596,15 +596,22 @@ public class FlowController {
             final List<String> fAccImagePaths = accImagePaths;
             List<java.util.concurrent.CompletableFuture<Void>> sFutures = new ArrayList<>();
             var items = plan.getItems();
+            // 修(#2)：SKU 白底图按主件匹配。原来仅按文件名找编码/尺寸token，遇到
+            //   (a) 导入路径白底被上传成 UUID 名(编码丢失) 或
+            //   (b) SKU 尺寸刻度(AI名 28/38/48) 与白底文件名刻度(30/40/50) 对不上
+            // 时全落空→都回退池首张→各尺寸共用一张。改为循环前预计算「名次配对表」：
+            // 每 SKU 与每白底各自提尺寸数字、各自升序、按名次一一配(28→30/38→40/…)，天然容忍刻度差。
+            Map<Integer, String> rankWhiteByItem = rankPairWhites(items, whiteImages);
             for (int i = 0; i < items.size(); i++) {
                 final int idx = i;
                 final var it = items.get(i);
                 String name = it.getSkuDisplayName() != null ? it.getSkuDisplayName() : it.getName();
-                // 修(#8)：SKU 白底图按主件匹配——原来 whiteImgDir 为空就一律回退 white(池里第一张)，
-                // 导致 30cm/40cm/50cm/60cm 挂钩全用同一张(如都用60cm)。改为按 itemCode/尺寸从白底池匹配对应那张。
+                // 优先级：显式 whiteImgDir → 精确码匹配(路径B快麦直连) → 名次尺寸配对(兜底,容忍刻度差) → 池首张
+                String matched = matchWhiteForItem(whiteImages, it.getItemCode(), it.getSpec1());
+                if (matched == null) matched = rankWhiteByItem.get(i);
                 String skuWhite = (it.getWhiteImgDir() != null && !it.getWhiteImgDir().isBlank())
                         ? localizeWhite(it.getWhiteImgDir())
-                        : localizeWhite(matchWhiteForItem(whiteImages, it.getItemCode(), it.getSpec1()));
+                        : localizeWhite(matched);
                 if (skuWhite == null) skuWhite = white; // 匹配不到再回退池首张(不至于漏图)
                 if (skuWhite == null) { log.info("SKU「{}」无可用白底图，跳过", name); task.incrementProgress(); continue; }
                 final String fName = name;
@@ -793,6 +800,57 @@ public class FlowController {
                 if (base.contains(size)) return w;
             }
         }
+        return null;
+    }
+
+    /**
+     * 修(#2) 名次尺寸配对：当精确码匹配失败(导入UUID/刻度不一致)时的兜底。
+     * 每个 SKU 从 itemCode→spec1→spec2→显示名 里提尺寸数字，每张白底从文件名提尺寸数字，
+     * 两边各自按尺寸升序，按名次一一配(28→30/38→40/48→50/58→60)——不依赖两套刻度相等。
+     * 仅当 SKU 与白底数量相等且都能提到尺寸时才配(否则返回空 map，走原回退，不乱配)。
+     */
+    private Map<Integer, String> rankPairWhites(List<com.gofu.shared.context.SkuItem> items, List<String> whiteImages) {
+        Map<Integer, String> out = new LinkedHashMap<>();
+        if (items == null || whiteImages == null || items.isEmpty() || whiteImages.isEmpty()) return out;
+        // 白底：提尺寸→(size, ref)，按 size 升序
+        List<int[]> whiteIdxSize = new ArrayList<>();   // [whiteListIndex, size]
+        for (int j = 0; j < whiteImages.size(); j++) {
+            Integer s = extractSize(whiteImages.get(j));
+            if (s != null) whiteIdxSize.add(new int[]{j, s});
+        }
+        // SKU：提尺寸→(itemIndex, size)，按 size 升序
+        List<int[]> itemIdxSize = new ArrayList<>();     // [itemIndex, size]
+        for (int i = 0; i < items.size(); i++) {
+            var it = items.get(i);
+            Integer s = extractSize(it.getItemCode());
+            if (s == null) s = extractSize(it.getSpec1());
+            if (s == null) s = extractSize(it.getSpec2());
+            if (s == null) s = extractSize(it.getSkuDisplayName());
+            if (s != null) itemIdxSize.add(new int[]{i, s});
+        }
+        // 只在"数量相等且都提到尺寸"时按名次配，避免数量不齐时乱配
+        if (whiteIdxSize.size() != itemIdxSize.size() || whiteIdxSize.isEmpty()) return out;
+        whiteIdxSize.sort(java.util.Comparator.comparingInt(a -> a[1]));
+        itemIdxSize.sort(java.util.Comparator.comparingInt(a -> a[1]));
+        for (int k = 0; k < itemIdxSize.size(); k++) {
+            int itemIndex = itemIdxSize.get(k)[0];
+            String whiteRef = whiteImages.get(whiteIdxSize.get(k)[0]);
+            out.put(itemIndex, whiteRef);
+            log.info("[#2 白底名次配对] SKU#{}(尺寸{}) → 白底(尺寸{}) {}", itemIndex,
+                    itemIdxSize.get(k)[1], whiteIdxSize.get(k)[1],
+                    whiteRef.substring(Math.max(whiteRef.lastIndexOf('/'), whiteRef.lastIndexOf('\\')) + 1));
+        }
+        return out;
+    }
+
+    /** 从字符串提第一个尺寸数字：优先 "30CM/30厘米" 形式，退化取第一段 2~3 位数字。提不到返回 null。 */
+    private Integer extractSize(String s) {
+        if (s == null || s.isBlank()) return null;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d{2,3})\\s*(?:CM|厘米|cm)").matcher(s);
+        if (m.find()) return Integer.parseInt(m.group(1));
+        // 退化：取【】/[]内或任意 2~3 位数字(避免撞到编码里长数字，限 2~3 位)
+        m = java.util.regex.Pattern.compile("(?<!\\d)(\\d{2,3})(?!\\d)").matcher(s);
+        if (m.find()) return Integer.parseInt(m.group(1));
         return null;
     }
 

@@ -23,7 +23,8 @@ echo "cloud.jar / local.jar / launcher.jar 就绪"
 echo "===================== [2/5] jlink 精简JRE ====================="
 rm -rf "$RUNTIME"
 # Spring Boot fat jar 非模块化，jdeps 无法精确分析，直接纳入运行期常用模块（覆盖 web/jpa/xml/crypto/desktop/sql 等）
-MODS="java.base,java.desktop,java.instrument,java.logging,java.management,java.naming,java.net.http,java.prefs,java.rmi,java.scripting,java.security.jgss,java.security.sasl,java.sql,java.sql.rowset,java.transaction.xa,java.xml,java.xml.crypto,jdk.crypto.ec,jdk.crypto.cryptoki,jdk.unsupported,jdk.management,jdk.jfr,jdk.zipfs,jdk.httpserver,jdk.naming.dns"
+# jdk.charsets 必带：中文Windows下 AWT 托盘菜单/原生文字走 GBK(MS936)，缺它托盘右键菜单变豆腐块(#9)
+MODS="java.base,java.desktop,java.instrument,java.logging,java.management,java.naming,java.net.http,java.prefs,java.rmi,java.scripting,java.security.jgss,java.security.sasl,java.sql,java.sql.rowset,java.transaction.xa,java.xml,java.xml.crypto,jdk.charsets,jdk.crypto.ec,jdk.crypto.cryptoki,jdk.unsupported,jdk.management,jdk.jfr,jdk.zipfs,jdk.httpserver,jdk.naming.dns"
 "$JHOME/bin/jlink.exe" \
   --add-modules "$MODS" \
   --strip-debug --no-header-files --no-man-pages --compress=zip-6 \

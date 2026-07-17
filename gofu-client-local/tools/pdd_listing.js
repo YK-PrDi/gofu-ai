@@ -1910,6 +1910,24 @@ async function main() {
             return;
         }
         await submitBtn.evaluate(el => el.click());
+        await sleep(2000);
+
+        // #假成功修：点"提交并上架"后 PDD 常弹二次确认框("确认发布该商品?")，不点则商品只存草稿箱→
+        //   脚本误判成功。这里主动找并点确认按钮(确认发布/确定/继续/立即发布)，最多两轮。
+        for (let cf = 0; cf < 2; cf++) {
+            const confirmed = await page.evaluate(() => {
+                const modals = [...document.querySelectorAll('[class*="modal"],[class*="Modal"],[class*="dialog"],[class*="Dialog"],[role="dialog"]')]
+                    .filter(m => m.offsetParent !== null);
+                for (const m of modals) {
+                    const btn = [...m.querySelectorAll('button,[role="button"],a')]
+                        .find(b => /确认发布|确定发布|继续发布|立即发布|确认提交|确定|继续|发布/.test((b.textContent||'').replace(/\s+/g,'')) && b.offsetParent !== null);
+                    if (btn) { btn.click(); return (btn.textContent||'').trim(); }
+                }
+                return '';
+            });
+            if (confirmed) { log('已点提交确认弹窗按钮: ' + confirmed); await sleep(2500); }
+            else break;
+        }
 
         // 等待成功页面
         progress(95, '等待发布结果');
@@ -1943,8 +1961,29 @@ async function main() {
             /不能为空|请输入|请选择|请上传|未处理|必填|超过|不合法|格式错误/.test(t));
         const hasRealError = realErrors.length > 0;
 
-        // 成功：URL 明确跳成功页/列表页，或有成功弹窗，或【提交后无必填校验错误】(停原页即成功)
-        const isSuccess = okUrl || !!successModal || !hasRealError;
+        // #假成功修：正向发布成功信号 + 草稿信号双判，不再靠"无错误"兜底。
+        //   之前 !hasRealError 就算成功，但草稿箱商品也无校验错误 → 误判成功(商品其实在草稿箱)。
+        const signals = await page.evaluate(() => {
+            const txt = document.body ? document.body.innerText : '';
+            const has = (s) => txt.indexOf(s) >= 0;
+            // 正向成功文案(toast/弹窗)
+            const posOk = has('发布成功') || has('提交成功') || has('上架成功') || has('商品已发布') || has('创建成功');
+            // 草稿/存稿信号：明确说存草稿，或页面还留着"提交并上架/存草稿"按钮(=没真正发布)
+            const savedDraft = has('已存草稿') || has('保存草稿成功') || has('存入草稿');
+            const stillSubmitBtn = [...document.querySelectorAll('button,[role="button"]')]
+                .some(b => /提交并上架|发布商品/.test((b.textContent||'').replace(/\s+/g,'')) && b.offsetParent !== null);
+            return { posOk, savedDraft, stillSubmitBtn };
+        }).catch(() => ({ posOk:false, savedDraft:false, stillSubmitBtn:false }));
+        log('发布结果诊断: 正向成功=' + signals.posOk + ' 草稿信号=' + signals.savedDraft
+            + ' 提交按钮仍在=' + signals.stillSubmitBtn + ' okUrl=' + okUrl + ' 成功弹窗=' + !!successModal
+            + ' 校验错误=' + (realErrors.join('/') || '无'));
+
+        // 草稿信号：存草稿文案，或"提交并上架"按钮点完还在(=没真发布,停编辑页=草稿箱)。
+        //   这是区分"真发布"vs"假成功(草稿)"的可靠判据——真发布后该按钮消失/页面变。
+        const draftLike = signals.savedDraft || signals.stillSubmitBtn;
+        // 成功：无校验错误 且 非草稿态。(保留旧"停原页无错=成功"，但草稿态一票否决,修假成功)
+        //   有正向信号(okUrl/成功弹窗/成功文案)则更笃定，但不强制要求(防误伤旧机正常流程)。
+        const isSuccess = !hasRealError && !draftLike;
 
         if (isSuccess) {
             progress(100, '商品发布成功');
@@ -1982,7 +2021,13 @@ async function main() {
                 }).catch(() => []);
                 log('错误项诊断(展开后具体字段): ' + (detail.length ? detail.join(' || ') : '(仍未抓到，见 submit_result.png)'));
             } catch (de) { log('错误项诊断异常: ' + de.message.split('\n')[0]); }
-            error('上架未成功：存在未处理的必填/校验项(' + submitResultUrl + ')。页面提示: ' + joined);
+            if (!hasRealError && draftLike) {
+                // 无校验错误但是草稿态：提交没真正发布(常因二次确认弹窗没点/账号需资质)，商品留在草稿箱。
+                error('上架未成功：商品疑似只存入草稿箱未发布(提交按钮仍在=' + signals.stillSubmitBtn
+                    + ', 存草稿信号=' + signals.savedDraft + ')。请看 submit_result.png 确认是否有未点的确认弹窗，日志把发布结果诊断行发回排查。');
+            } else {
+                error('上架未成功：存在未处理的必填/校验项(' + submitResultUrl + ')。页面提示: ' + joined);
+            }
         }
 
     } catch (e) {

@@ -1,5 +1,6 @@
 package com.gofu.cloud.controller;
 
+import com.gofu.cloud.config.AppProperties;
 import com.gofu.cloud.service.CosService;
 import com.gofu.cloud.service.ImageGenerationService;
 import com.gofu.cloud.service.PromptTemplateLoader;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.File;
+import java.nio.file.Files;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -36,15 +38,17 @@ public class GenController {
     private final ContextService contextService;
     private final PromptTemplateLoader promptTemplateLoader;
     private final GptImageAgent gptImageAgent;
+    private final AppProperties appProperties;
 
     public GenController(ImageGenerationService imageGenerationService, CosService cosService,
                          ContextService contextService, PromptTemplateLoader promptTemplateLoader,
-                         GptImageAgent gptImageAgent) {
+                         GptImageAgent gptImageAgent, AppProperties appProperties) {
         this.imageGenerationService = imageGenerationService;
         this.cosService = cosService;
         this.contextService = contextService;
         this.promptTemplateLoader = promptTemplateLoader;
         this.gptImageAgent = gptImageAgent;
+        this.appProperties = appProperties;
     }
 
     /**
@@ -200,10 +204,50 @@ public class GenController {
      */
     @GetMapping("/sign")
     public ResponseEntity<String> sign(@RequestParam String key) {
-        if (!cosService.isEnabled()) {
-            return ResponseEntity.ok(key); // 未启用 COS，key 即本地路径
+        // #4 根因B：COS 启用但生图产物上传失败会回退存**本地绝对路径**(FlowController.uploadIfCos)。
+        // 若对本地路径调 signKey 会返回指向不存在对象的坏签名URL→前端黑图。故先识别本地路径原样返回，
+        // 让前端走 /api/gen/local-image 兜底。COS key 形如 "目录/名"(无盘符、无反斜杠、非绝对路径)。
+        if (!cosService.isEnabled() || isLocalPath(key)) {
+            return ResponseEntity.ok(key);
         }
         return ResponseEntity.ok(cosService.signKey(key));
+    }
+
+    /** 判断 ref 是本地文件绝对路径(Windows 盘符/反斜杠 或 已存在的文件)而非 COS key。 */
+    private boolean isLocalPath(String key) {
+        if (key == null || key.isBlank()) return false;
+        if (key.contains("\\") || key.matches("^[A-Za-z]:.*")) return true;  // Windows 盘符/反斜杠
+        if (key.startsWith("/")) return true;                                 // *nix 绝对路径
+        return false;
+    }
+
+    /**
+     * #4 预览图：COS 不可用时生图产物 ref 是**云端进程目录**下的本地绝对路径，
+     * 本地 5021 的 /api/erp/local-image 读不到云端目录(且不在其安全基目录内→404 空白)。
+     * 故云端自己提供图片服务：读 output-dir/temp/history 内的文件返回字节，前端经 cloudgw 转发到这里。
+     * 安全：canonical 路径必须落在这三个允许目录之内，否则 403，防路径穿越。
+     */
+    @GetMapping("/local-image")
+    public ResponseEntity<byte[]> localImage(@RequestParam String path) {
+        try {
+            File f = new File(path).getCanonicalFile();
+            if (!f.isFile()) return ResponseEntity.notFound().build();
+            AppProperties.Paths p = appProperties.getPaths();
+            boolean allowed = false;
+            for (String dir : new String[]{p.getOutputDir(), p.getTempOutputDir(), p.getHistoryRefsDir()}) {
+                if (dir == null || dir.isBlank()) continue;
+                if (f.getPath().startsWith(new File(dir).getCanonicalFile().getPath())) { allowed = true; break; }
+            }
+            if (!allowed) { log.warn("local-image 拒绝越界路径: {}", path); return ResponseEntity.status(403).build(); }
+            String name = f.getName().toLowerCase();
+            String ct = name.endsWith(".png") ? "image/png" : "image/jpeg";
+            return ResponseEntity.ok()
+                    .header("Content-Type", ct)
+                    .body(Files.readAllBytes(f.toPath()));
+        } catch (Exception e) {
+            log.warn("local-image 读取失败({}): {}", path, e.getMessage());
+            return ResponseEntity.status(500).build();
+        }
     }
 
     /** 用 SKU 生图模板拼 prompt。填充 productType/skuName/compDesc。 */

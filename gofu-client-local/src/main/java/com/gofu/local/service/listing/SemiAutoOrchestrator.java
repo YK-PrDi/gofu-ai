@@ -83,10 +83,33 @@ public class SemiAutoOrchestrator {
                 // 3) 完整性强校验（北极星）
                 List<SemiAutoScan.SkuCheck> skus = skusByProduct == null ? List.of()
                         : skusByProduct.getOrDefault(prod.name(), List.of());
+                // (#5.1/#7) 前端没传 SKU 但商品有 SKU 图目录 → 自动按文件名反推快麦编码，
+                // 命名对不上时明确报"请按 ERP 编码规范命名"(像风格迁移的命名提醒)，不再笼统报"没有任何 SKU"。
+                List<String> nameHints = new ArrayList<>();
+                if (skus.isEmpty() && prod.skuImgDir() != null && !prod.skuImgDir().isBlank()) {
+                    List<String> skuImgs = semiAutoService.listImages(prod.skuImgDir());
+                    if (!skuImgs.isEmpty()) {
+                        List<Map<String, Object>> rows = semiAutoService.reverseSkuFromImages(skuImgs, "架类");
+                        long unmatched = rows.stream().filter(r -> !Boolean.TRUE.equals(r.get("matched"))).count();
+                        for (Map<String, Object> r : rows) {
+                            if (!Boolean.TRUE.equals(r.get("matched"))) nameHints.add(String.valueOf(r.get("error")));
+                        }
+                        if (unmatched == 0) {
+                            // 全部命名规范但无售价：批量流不内联定价，提示去预览页定价后重跑
+                            nameHints.add("已识别 " + rows.size() + " 个 SKU 图且命名规范，但批量流不含定价——请在预览页完成定价后上新");
+                        }
+                    }
+                }
                 SemiAutoScan.Completeness c = semiAutoService.checkCompleteness(
                         prod.name(), prod.mainImgDir(), prod.detailImgDir(), skus);
                 if (!c.ready()) {
-                    outcomes.add(new ProductOutcome(shop.shopName(), prod.name(), "blocked", null, c.missing()));
+                    // 有命名/定价提示则用它替换笼统的"没有任何 SKU"，让用户知道具体怎么改
+                    List<String> missing = new ArrayList<>(c.missing());
+                    if (!nameHints.isEmpty()) {
+                        missing.removeIf(m -> m.contains("没有任何 SKU"));
+                        missing.addAll(nameHints);
+                    }
+                    outcomes.add(new ProductOutcome(shop.shopName(), prod.name(), "blocked", null, missing));
                     continue;
                 }
                 // 4) 齐全 → 组本地 config 上新（预检模式只标 ready 不真上）

@@ -200,13 +200,27 @@ public class GofuLauncher {
     }
 
     private static void stopAll() {
+        // #9B：进程树是 GOFU.exe → cloud/local.jar → node.exe → chrome.exe(+N helper)。
+        // Windows 上 Process.destroy() 只杀单个 PID 不杀子树，node/chromium 会成孤儿常驻。
+        // 故先快照每个子进程的全部后代(descendants 必须在 destroy 前抓，杀掉后就枚举不到了)，
+        // 优雅 destroy 父进程 → 等一会 → destroyForcibly 父+全部后代 → 最后 taskkill /T 兜底。
+        List<ProcessHandle> descendants = new ArrayList<>();
+        for (Process p : children) {
+            try { p.descendants().forEach(descendants::add); } catch (Exception ignore) {}
+        }
         for (Process p : children) {
             try { if (p.isAlive()) p.destroy(); } catch (Exception ignore) {}
         }
-        // 给一点时间优雅退出，再强杀
         sleep(1500);
         for (Process p : children) {
             try { if (p.isAlive()) p.destroyForcibly(); } catch (Exception ignore) {}
+        }
+        // 强杀所有后代(node.exe/chrome.exe 及其 renderer/gpu 子进程)
+        for (ProcessHandle h : descendants) {
+            try { if (h.isAlive()) h.destroyForcibly(); } catch (Exception ignore) {}
+            // taskkill /T /F 按 PID 连子树一起杀，兜底 destroyForcibly 漏掉的孙子进程
+            try { new ProcessBuilder("taskkill", "/T", "/F", "/PID", String.valueOf(h.pid())).start(); }
+            catch (Exception ignore) {}
         }
     }
 

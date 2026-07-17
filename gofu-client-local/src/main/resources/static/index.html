@@ -224,6 +224,8 @@
                  style="flex:1;min-width:300px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)" />
           <input type="text" v-model="imp.productName" placeholder="商品名（选填，默认取文件夹名）"
                  style="width:180px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)" />
+          <input type="text" v-model="imp.category" placeholder="品类（选填，如 锅盖架）"
+                 style="width:150px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)" />
           <button class="btn btn-primary" @click="runImport" :disabled="!imp.folderPath||imp.running">
             {{ imp.running ? '导入中…' : '导入并建商品' }}
           </button>
@@ -358,7 +360,7 @@
         <button v-if="layoutDone" class="btn btn-primary btn-lg" @click="runSkuImages" :disabled="genRunning" style="width:100%;margin-top:8px">
           {{ genRunning ? '生成中…' : '② 生成选定方案的 SKU 图 + 详情图' }}
         </button>
-        <div v-if="!canGenerate" class="hint">需先选品类、选主件、备齐主件白底图</div>
+        <div v-if="!canGenerate" class="hint" style="color:#dc2626">① 布局+主图 由本系统生成，你只需备齐输入即可点。还差：{{ genBlockReason }}</div>
         <div v-if="layoutDone" class="hint">已出布局和主图。在右侧预览切换/选定方案后，点②生成该方案的 SKU 图和详情图。</div>
         <div v-if="genRunning || genDone" class="progress"><div class="bar" :style="{width: genProgress+'%'}"></div></div>
         <button v-if="genRunning && flowTaskId" class="btn btn-ghost btn-lg" @click="stopGen" style="width:100%;margin-top:8px;color:#dc2626;border-color:#dc2626">■ 停止生成（选错了想重来点这）</button>
@@ -720,7 +722,7 @@ createApp({
       listingDryRun: true, listingRunning: false, listingMsg: '', listingMsgType: '', listingLog: '',
       settings: { reviewImages: true, confirmBeforeListing: true },
       styleTransfer: { styleId: '', running: false, msg: '', msgType: '' },   // 🎨 风格迁移
-      imp: { open: false, folderPath: '', productName: '', running: false, msg: '', msgType: '' },   // 📥 导入成品图建商品
+      imp: { open: false, folderPath: '', productName: '', category: '', running: false, msg: '', msgType: '' },   // 📥 导入成品图建商品
     };
   },
   computed: {
@@ -732,6 +734,15 @@ createApp({
     mainItemName() { const m = this.entry.skus.find(s => s.role === 'main'); return m ? m.name : ''; },
     mainCodes() { return this.entry.skus.filter(s => s.role === 'main').map(s => s.itemCode); },
     canGenerate() { return this.cat.path.length && this.entry.skus.length && this.entry.whites.length; },
+    // (#5.2b) 生成布局按钮点不了时，精确告诉用户缺哪一项(而非笼统"选品类/选主件/白底图")。
+    genBlockReason() {
+      const miss = [];
+      if (!this.cat.path.length) miss.push('选品类');
+      if (!this.entry.skus.length) miss.push('选主件/配件');
+      else if (!this.mainCodes.length) miss.push('把至少一个单品标为「主件」');
+      if (!this.entry.whites.length) miss.push('备齐主件白底图');
+      return miss.join('、');
+    },
     // 主件与品类一致性软校验（问题1）：按名称关键词判定，不一致给提示、不阻断。
     // 品类叶子/路径含某品类关键词，但主件名不含对应关键词、却含另一品类关键词 → 疑似选错品类。
     categoryMismatch() {
@@ -843,9 +854,11 @@ createApp({
         let url = key;
         try { const r = await fetch('/api/gen/sign?key=' + encodeURIComponent(key)); if (r.ok) url = await r.text(); }
         catch {}
-        // COS 未启用/欠费时 signedUrl 是本地文件路径,<img>无法直接加载→走 local-image 端点(07.08)
+        // COS 未启用/欠费时 signedUrl 是**云端**进程目录下的本地路径,<img>无法直接加载。
+        // 这些是云端生图产物(主图/详情/SKU)，须走**云端** /api/gen/local-image(经 cloudgw 转发到5020读云端目录)；
+        // 本地 /api/erp/local-image 读不到云端目录会 404(#4 预览图空白根因)。
         if (url && !url.startsWith('http') && !url.startsWith('data:')) {
-          url = '/api/erp/local-image?path=' + encodeURIComponent(url);
+          url = '/api/gen/local-image?path=' + encodeURIComponent(url);
         }
         this.signed[key] = url;
       }
@@ -1061,9 +1074,16 @@ createApp({
         n++;
       });
       this.picker.open = false;
-      this.setMsg('已加入 ' + n + ' 个单品', 'ok');
       // 选了主件即自动拉快麦白底图（预览在右侧，缺图右侧提示导入）
-      if (n > 0 && this.mainCodes.length) this.autoFetchWhite();
+      if (n > 0 && this.mainCodes.length) {
+        this.setMsg('已加入 ' + n + ' 个单品', 'ok');
+        this.autoFetchWhite();
+      } else if (n > 0) {
+        // (#5.2a) 只加了配件没主件：过去这里静默、白底不拉也不提示，用户以为没反应。明确提示。
+        this.setMsg('已加入 ' + n + ' 个单品，但还没选「主件」——请把至少一个单品标为主件，才会自动拉取白底图/SKU', 'err');
+      } else {
+        this.setMsg('未选择任何单品', 'err');
+      }
     },
 
     // ── 第一步：配件搭配 → step1(布局+全部主图,并行,异步) → 回填定价+标题。出来后用户在预览选方案。──
@@ -1398,7 +1418,7 @@ createApp({
       this.imp.msg = '导入中（读图→上传云端→建商品）…'; this.imp.msgType = '';
       try {
         const r = await fetch('/api/semi-auto/import-to-context', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ folderPath: this.imp.folderPath.trim(), productName: this.imp.productName.trim() }) });
+          body: JSON.stringify({ folderPath: this.imp.folderPath.trim(), productName: this.imp.productName.trim(), category: this.imp.category.trim() }) });
         const d = await r.json();
         if (d.error) throw new Error(d.error);
         if (!d.contextId) throw new Error('未返回 contextId');
@@ -1418,13 +1438,16 @@ createApp({
       if (!this.ctx || !this.styleTransfer.styleId) return;
       const hasSku = (this.ctx.visual?.whiteImages||[]).length > 0 || (this.ctx.structure?.plans||[]).length > 0;
       const hasCat = !!(this.ctx.category && String(this.ctx.category).trim());
+      // (#5.2c) 有成品图(主图/详情)就能换风格——风格迁移只需成品图，不强求品类/主件。
+      // 导入外部成品图的商品既无白底/plans 也无 category，过去被 !hasSku&&!hasCat 误拦，这里放行。
+      const hasFinishedImg = (this.ctx.visual?.mainImages||[]).length > 0 || (this.ctx.visual?.detailImages||[]).length > 0;
       // #2a：有 SKU（白底/方案）时，提醒把图按商品名命名，便于换风格后对应回填。
       if (hasSku) {
         if (!confirm('检测到本商品含 SKU（白底/方案）。请确认成品图已按【商品名称】命名，换风格后才能正确对应。已命名好？点确定继续。')) return;
-      } else if (!hasCat) {
-        // #2b：无 SKU 且未选品类/主件 → 先提示去选，别在信息不全时换风格。
-        this.setMsg('本商品还没有 SKU、也没选品类/主件。请先在左侧选好品类与主件（或先生成布局）再做风格迁移。', 'err');
-        this.styleTransfer.msg = '请先选品类与主件再换风格'; this.styleTransfer.msgType = 'err';
+      } else if (!hasCat && !hasFinishedImg) {
+        // #2b：既无 SKU、无品类、也无成品图 → 信息全空才拦，提示去补。
+        this.setMsg('本商品还没有 SKU、也没选品类/主件、也没有成品图。请先在左侧选好品类与主件（或先生成布局/导入成品图）再做风格迁移。', 'err');
+        this.styleTransfer.msg = '请先备齐品类/主件或成品图再换风格'; this.styleTransfer.msgType = 'err';
         return;
       }
       const skuN = (this.ctx.structure?.plans||[]).reduce((s,p)=>s+(p.items||[]).filter(it=>it.imgDir).length,0);
