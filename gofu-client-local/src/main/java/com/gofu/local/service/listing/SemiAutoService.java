@@ -80,7 +80,9 @@ public class SemiAutoService {
             return new SemiAutoScan.Result(rootPath, shops, warnings);
         }
 
-        File[] shopDirs = root.listFiles(File::isDirectory);
+        // 低危修：过滤系统/隐藏目录($RECYCLE.BIN、System Volume Information、__MACOSX、.git 等)，
+        // 别当店铺产生噪音告警、污染计数。
+        File[] shopDirs = root.listFiles(f -> f.isDirectory() && !isSystemOrHidden(f));
         if (shopDirs == null || shopDirs.length == 0) {
             warnings.add("大文件夹下没有店铺子目录");
             return new SemiAutoScan.Result(rootPath, shops, warnings);
@@ -94,18 +96,48 @@ public class SemiAutoService {
             if (!matched) warnings.add("店铺目录「" + shopName + "」未匹配到 stores.json，将无法上新（请核对店铺名或先登录该店铺）");
 
             List<SemiAutoScan.Product> products = new ArrayList<>();
-            File[] prodDirs = shopDir.listFiles(File::isDirectory);
+            File[] prodDirs = shopDir.listFiles(f -> f.isDirectory() && !isSystemOrHidden(f));
             if (prodDirs != null) {
                 Arrays.sort(prodDirs, Comparator.comparing(File::getName, SemiAutoService::naturalCompare));
                 for (File p : prodDirs) products.add(scanProduct(p));
             }
             if (products.isEmpty()) warnings.add("店铺「" + shopName + "」下没有商品文件夹");
+            // 低危修·错层检测：店铺目录下若直接有 主图/详情/白底/sku 角色子目录，八成是"商品文件夹误放到一级"
+            // (少套了一层店铺)。否则会被当成"店铺→把主图/详情当商品"静默错扫。
+            else if (looksLikeProductFolder(shopDir))
+                warnings.add("目录「" + shopName + "」下直接含 主图/详情/白底/sku 子目录，疑似把【商品文件夹】放到了【店铺】层"
+                        + "(应为 大文件夹/店铺名/商品名/主图…)，请检查层级");
 
             shops.add(new SemiAutoScan.ShopGroup(shopName, matched, matched ? profile : "", products));
         }
-        log.info("[半自动扫描] {} → {} 店铺, 共 {} 商品", rootPath, shops.size(),
-                shops.stream().mapToInt(s -> s.products().size()).sum());
+        int totalProducts = shops.stream().mapToInt(s -> s.products().size()).sum();
+        // 低危修·数量上限提醒：几十个以上商品串行上新要很久(每个错开+上新几十分钟)，让用户有预期
+        if (totalProducts > 50)
+            warnings.add("共扫到 " + totalProducts + " 个商品，批量串行上新耗时很长(每个数分钟~数十分钟)，请确认后再开始，或分批处理");
+        log.info("[半自动扫描] {} → {} 店铺, 共 {} 商品", rootPath, shops.size(), totalProducts);
         return new SemiAutoScan.Result(rootPath, shops, warnings);
+    }
+
+    /** 系统/隐藏目录：$RECYCLE.BIN、System Volume Information、__MACOSX、.git 等，不当店铺/商品。 */
+    private static boolean isSystemOrHidden(File d) {
+        String n = d.getName();
+        if (n.startsWith(".") || n.startsWith("$")) return true;
+        if (d.isHidden()) return true;
+        String u = n.toUpperCase();
+        return u.equals("SYSTEM VOLUME INFORMATION") || u.equals("__MACOSX") || u.equals("RECYCLER");
+    }
+
+    /** 目录下是否直接含角色子目录(主图/详情/白底/sku)——用于错层检测(商品文件夹误放到店铺层)。 */
+    private static boolean looksLikeProductFolder(File dir) {
+        File[] subs = dir.listFiles(File::isDirectory);
+        if (subs == null) return false;
+        for (File d : subs) {
+            String n = d.getName().toLowerCase();
+            if (n.contains("主图") || n.contains("main") || n.contains("详情") || n.contains("detail")
+                    || n.contains("白底") || n.contains("white") || n.contains("sku") || n.contains("款式"))
+                return true;
+        }
+        return false;
     }
 
     /** 扫某目录下的图片，按文件名自然数字序返回绝对路径（迁自乐羽）。 */

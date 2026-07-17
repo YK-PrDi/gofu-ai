@@ -1484,6 +1484,10 @@ createApp({
       if (!this.imp.folderName.includes('-')) {
         if (!confirm('文件夹名「' + this.imp.folderName + '」没按「品类-主件名」命名（如 锅盖架-圣诞树收纳架），识别不出品类，SKU方案/属性/标题会不准。\n\n建议取消→给文件夹改名后重选。仍要继续导入吗？')) return;
       }
+      // 低危修·重复导入防呆:同名文件夹刚导过会新建重复商品(脏context)。提醒确认。
+      if (this._lastImportedFolder === this.imp.folderName) {
+        if (!confirm('文件夹「' + this.imp.folderName + '」刚导入过，再次导入会新建一个重复商品。确认再导一次吗？')) return;
+      }
       this.imp.running = true;
       this.imp.msg = '导入中（上传云端→反推SKU→出方案+AI标题）…'; this.imp.msgType = '';
       try {
@@ -1498,6 +1502,7 @@ createApp({
           + ((d.warnings&&d.warnings.length) ? ' ⚠'+d.warnings.length+'张白底命名对不上快麦编码(见控制台)。' : '');
         this.imp.msgType = 'ok';
         if (d.warnings && d.warnings.length) d.warnings.forEach(w => console.warn('[导入]', w));
+        this._lastImportedFolder = this.imp.folderName;   // 记录已导入,重复导入时防呆提醒
         this.contextId = d.contextId;
         await this.loadContext();   // 加载新建商品，右栏出现成品图 + 风格迁移区块
         // #1/#3 导入后自动链：自动随机风格迁移 →(若两个复选框都没勾)自动上新，中途不停。
