@@ -137,6 +137,24 @@ public class SemiAutoService {
      * 接北极星：未命中不静默跳过，交由调用方明确提示用户规范命名。
      */
     public List<Map<String, Object>> reverseSkuFromImages(List<String> imagePaths, String productType) {
+        List<Map<String, Object>> out = reverseOnce(imagePaths);
+        // 自动刷缓存重试：首轮有未命中(可能是刚在快麦建的新编码，本地缓存旧)→强制 reload 一次 ERP 缓存再重试。
+        // 导入是自动链，不该停下让人工手动点"刷新缓存"(用户要求)。只在确有 unmatched 时刷，避免每次都拉全量。
+        boolean anyUnmatched = out.stream().anyMatch(r -> !Boolean.TRUE.equals(r.get("matched")));
+        if (anyUnmatched) {
+            try {
+                log.info("[反推SKU] 有编码未命中缓存，自动刷新一次 ERP 缓存后重试…");
+                kuaimaiService.reloadSkuItems();
+                out = reverseOnce(imagePaths);
+            } catch (Exception e) {
+                log.warn("[反推SKU] 自动刷新 ERP 缓存失败(用旧缓存结果): {}", e.getMessage());
+            }
+        }
+        return out;
+    }
+
+    /** 单轮反推：逐图提编码→查快麦缓存(不刷新)。 */
+    private List<Map<String, Object>> reverseOnce(List<String> imagePaths) {
         List<Map<String, Object>> out = new ArrayList<>();
         for (String path : imagePaths) {
             File f = new File(path);
