@@ -149,23 +149,31 @@ public class DualTrackController {
             return ResponseEntity.ok(Map.of("attached", 0, "note", "无方案可挂"));
         List<SkuItem> items = plans.get(planIdx).getItems();
 
-        // 各自提尺寸→按名次配对
+        // H4修：各自提尺寸。仅在【数量相等 + 两边每个都能提到真实尺寸】时才按名次配(对齐 rankPairWhites 的保护)，
+        // 否则宁可不挂也不乱挂——原来数量不等按 min 静默截断、提不到尺寸并列 MAX_VALUE 按上传序瞎配，会错挂图。
         List<int[]> itemRank = new ArrayList<>();   // [itemIndex, size]
         for (int i = 0; i < items.size(); i++) {
             Integer s = sizeOf(items.get(i).getSkuDisplayName());
             if (s == null) s = sizeOf(items.get(i).getSpec1());
             if (s == null) s = sizeOf(items.get(i).getItemCode());
-            itemRank.add(new int[]{i, s == null ? Integer.MAX_VALUE : s});
+            if (s != null) itemRank.add(new int[]{i, s});
         }
         List<Object[]> imgRank = new ArrayList<>();  // [ref, size]
         for (Map<String, Object> im : skuImages) {
             Integer s = sizeOf(String.valueOf(im.get("name")));
-            imgRank.add(new Object[]{String.valueOf(im.get("ref")), s == null ? Integer.MAX_VALUE : s});
+            if (s != null) imgRank.add(new Object[]{String.valueOf(im.get("ref")), s});
+        }
+        if (itemRank.size() != items.size() || imgRank.size() != skuImages.size()
+                || itemRank.size() != imgRank.size() || itemRank.isEmpty()) {
+            log.warn("[导入·挂SKU图] 尺寸配对放弃(方案SKU={} 可提尺寸={}, sku图={} 可提尺寸={}) → 不乱挂,留空待人工/生成",
+                    items.size(), itemRank.size(), skuImages.size(), imgRank.size());
+            return ResponseEntity.ok(Map.of("attached", 0,
+                    "note", "SKU数与图数不等或尺寸提取不全，未自动挂图（避免错挂），可人工指定或走生成"));
         }
         itemRank.sort(java.util.Comparator.comparingInt(a -> a[1]));
         imgRank.sort(java.util.Comparator.comparingInt(a -> (int) a[1]));
         int attached = 0;
-        for (int k = 0; k < itemRank.size() && k < imgRank.size(); k++) {
+        for (int k = 0; k < itemRank.size(); k++) {
             items.get(itemRank.get(k)[0]).setImgDir((String) imgRank.get(k)[0]);
             attached++;
         }

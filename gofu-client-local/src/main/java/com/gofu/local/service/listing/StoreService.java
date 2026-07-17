@@ -85,13 +85,24 @@ public class StoreService {
      */
     public String resolveProfileByName(String shopName) {
         if (shopName == null || shopName.isBlank()) return null;
+        String key = shopName.trim();
         List<Store> stores = loadStores();
-        for (Store s : stores) if (shopName.equals(s.getName())) return s.getProfile();
+        // 1) 精确匹配(trim)优先
+        for (Store s : stores) if (key.equals(s.getName() == null ? null : s.getName().trim())) return s.getProfile();
+        // 2) H1修：子串仅在【唯一命中】时采用。原来双向 contains 会让"旗舰店A""旗舰店B"都匹配"旗舰店"→
+        //    多个店文件夹上到同一家、且无告警。现在多于一个候选=歧义,返回 null(上层标"店铺未匹配"),
+        //    且短店名(≤2字)不走子串,避免"GF""小店"这种误匹配。
+        if (key.length() <= 2) return null;
+        String hit = null;
         for (Store s : stores) {
-            String n = s.getName();
-            if (n != null && !n.isBlank() && (shopName.contains(n) || n.contains(shopName))) return s.getProfile();
+            String n = s.getName() == null ? "" : s.getName().trim();
+            if (n.length() <= 2) continue;
+            if (key.contains(n) || n.contains(key)) {
+                if (hit != null && !hit.equals(s.getProfile())) return null;   // 命中多于一个不同店 → 歧义，不猜
+                hit = s.getProfile();
+            }
         }
-        return null;
+        return hit;
     }
 
     /** 某店独立 user-data-dir（浏览器 profile，登录态存这）。 */

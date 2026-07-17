@@ -132,9 +132,10 @@ public class StyleImportService {
     /** 解析「品类-主件名」(与 SemiAutoOrchestrator 一致)：第一个"-"分隔，无"-"则整名为主件名、品类空。 */
     private FolderMeta parseFolderName(String folderName) {
         if (folderName == null || folderName.isBlank()) return new FolderMeta(null, folderName);
-        String s = folderName.trim();
+        // M3：全角连字符－/全角空格归一化(中文输入法常打全角横线)
+        String s = folderName.trim().replace('－', '-').replace('　', ' ');
         int dash = s.indexOf('-');
-        if (dash <= 0 || dash >= s.length() - 1) return new FolderMeta(null, s);
+        if (dash <= 0 || dash >= s.length() - 1) return new FolderMeta(null, s.replaceAll("^-+|-+$", "").trim());
         return new FolderMeta(s.substring(0, dash).trim(), s.substring(dash + 1).trim());
     }
     /**

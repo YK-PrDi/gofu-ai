@@ -561,7 +561,7 @@ public class ListingService {
      */
     public String resolveCategoryPath(String catInput) {
         if (catInput == null || catInput.isBlank()) return catInput;
-        String in = catInput.replace("›", ">").replace("　", " ").replaceAll("\\s*>\\s*", ">").trim();
+        String in = catInput.replace("›", ">").replace("＞", ">").replace("　", " ").replaceAll("\\s*>\\s*", ">").trim();   // M3:补全角＞
         String leaf = in.contains(">") ? in.substring(in.lastIndexOf('>') + 1).trim() : in;
         Map<String, List<Map<String, Object>>> all = readProductInfoPresets();
         // 1) 叶子精确等于某 key 的末段

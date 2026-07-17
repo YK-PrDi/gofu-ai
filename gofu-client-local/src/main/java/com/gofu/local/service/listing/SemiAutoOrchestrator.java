@@ -82,7 +82,15 @@ public class SemiAutoOrchestrator {
                             List.of("店铺「" + shop.shopName() + "」未登录，请先在半自动页登录")));
                     continue;
                 }
-                // 3) 完整性强校验（北极星）
+                // 3) H2修：品类必填。文件夹名缺"-"(解析不出品类)→类目/属性会残缺,拼多多必填属性缺失
+                //    会拖到 Playwright 提交才炸。前置拦下,别静默放行上残品。
+                FolderMeta meta0 = parseFolderName(prod.name());
+                if (meta0.category() == null || meta0.category().isBlank()) {
+                    outcomes.add(new ProductOutcome(shop.shopName(), prod.name(), "blocked", null,
+                            List.of("商品文件夹名「" + prod.name() + "」缺『品类-』前缀，无法确定拼多多类目/属性。请按「品类-主件名」命名(如 锅盖架-圣诞树收纳架)")));
+                    continue;
+                }
+                // 4) 完整性强校验（北极星）
                 List<SemiAutoScan.SkuCheck> skus = skusByProduct == null ? List.of()
                         : skusByProduct.getOrDefault(prod.name(), List.of());
                 // (#5.1/#7 + C1定价断链) 前端没传 SKU 但商品有 SKU 图目录 → 自动按文件名反推快麦编码：
@@ -198,10 +206,11 @@ public class SemiAutoOrchestrator {
      */
     private FolderMeta parseFolderName(String folderName) {
         if (folderName == null || folderName.isBlank()) return new FolderMeta(null, folderName);
-        String s = folderName.trim();
+        // M3：全角连字符－/全角空格 归一化，中文输入法常打出全角横线导致 indexOf('-') 落空→误判无品类
+        String s = folderName.trim().replace('－', '-').replace('　', ' ');
         int dash = s.indexOf('-');
         if (dash <= 0 || dash >= s.length() - 1) {
-            return new FolderMeta(null, s);   // 无有效"-"：退化为旧行为
+            return new FolderMeta(null, s.replaceAll("^-+|-+$", "").trim());   // 无有效"-"：退化,且去掉首尾脏横线
         }
         String cat = s.substring(0, dash).trim();
         String name = s.substring(dash + 1).trim();

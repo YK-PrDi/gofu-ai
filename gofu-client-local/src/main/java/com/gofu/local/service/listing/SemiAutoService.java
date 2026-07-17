@@ -44,18 +44,24 @@ public class SemiAutoService {
         List<String> warnings = new ArrayList<>();
 
         File[] subs = dir.listFiles(File::isDirectory);
+        List<String> unknownDirs = new ArrayList<>();   // M1：未识别为任何角色的子目录，收集后告警(别静默吞掉用户放错的图)
         if (subs != null) {
             for (File d : subs) {
                 String n = d.getName().toLowerCase();
-                if (n.contains("主图") || n.equals("main")) mainImgDir = d.getAbsolutePath();
+                if (n.contains("主图") || n.contains("main")) mainImgDir = d.getAbsolutePath();   // M2:equals→contains,认得 main-images/mainpic
                 else if (n.contains("sku") || n.contains("款式") || n.contains("颜色")) skuImgDir = d.getAbsolutePath();
                 else if (n.contains("详情") || n.contains("detail")) detailImgDir = d.getAbsolutePath();
                 else if (n.contains("白底") || n.contains("white")) whiteImgDir = d.getAbsolutePath();
+                else if (!d.isHidden() && !d.getName().startsWith(".")) unknownDirs.add(d.getName());
             }
         }
         if (mainImgDir.isEmpty()) warnings.add("缺主图目录（命名需含\"主图\"/\"main\"）");
         if (detailImgDir.isEmpty()) warnings.add("缺详情图目录（命名需含\"详情\"/\"detail\"）");
         // SKU 图缺失不告警：允许走 AI 生成（P2）。
+        // M1：未识别子目录告警——用户可能把主图放在"效果图""场景图"里，别静默丢让他以为缺图
+        if (!unknownDirs.isEmpty())
+            warnings.add("以下子目录未被识别为任何角色(主图/详情/白底/sku)，已忽略：" + String.join("、", unknownDirs)
+                    + "。若里面有图请改名含 主图/详情/白底/sku 关键词");
 
         return new SemiAutoScan.Product(dir.getName(), dir.getAbsolutePath(),
                 mainImgDir, detailImgDir, skuImgDir, whiteImgDir, warnings);
