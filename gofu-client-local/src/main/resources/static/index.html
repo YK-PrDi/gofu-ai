@@ -216,17 +216,17 @@
       </div>
       <div v-show="imp.open" style="margin-top:10px">
         <div class="hint" style="margin-bottom:8px">
-          导入外部已做好的成品图 → 建成商品，然后可在右侧「🎨风格迁移」换基调、或直接上新。
-          文件夹需含 <b>主图</b>/<b>详情</b> 子目录（命名含"主图""详情"）。
+          导入外部已做好的成品图 → 自动建商品（出 SKU 方案 + AI 标题），然后可在右侧「🎨风格迁移」换基调、或直接上新。
+          文件夹用 <b>「品类-主件名」</b>命名（如 <b>锅盖架-圣诞树收纳架</b>，与批量上新一致），内含
+          <b>主图</b>/<b>详情</b>/<b>白底图</b>/<b>sku</b>(可选) 子目录。白底图名=快麦编码，据此反推 SKU 方案。
         </div>
         <div class="field" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <input type="text" v-model="imp.folderPath" placeholder="粘贴商品文件夹绝对路径（内含 主图/ 详情/ 子目录）"
-                 style="flex:1;min-width:300px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)" />
-          <input type="text" v-model="imp.productName" placeholder="商品名（选填，默认取文件夹名）"
-                 style="width:180px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)" />
-          <input type="text" v-model="imp.category" placeholder="品类（选填，如 锅盖架）"
-                 style="width:150px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)" />
-          <button class="btn btn-primary" @click="runImport" :disabled="!imp.folderPath||imp.running">
+          <button class="btn btn-ghost" @click="pickImportFolder" :disabled="imp.running">📁 选择文件夹</button>
+          <span v-if="imp.folderName" style="font-size:13px">
+            已选：<b>{{ imp.folderName }}</b>
+            <span style="color:var(--text-faint)">（主图{{ imp.counts.main }}·详情{{ imp.counts.detail }}·白底{{ imp.counts.white }}·sku{{ imp.counts.sku }}）</span>
+          </span>
+          <button class="btn btn-primary" @click="runImport" :disabled="!imp.folderName||imp.running">
             {{ imp.running ? '导入中…' : '导入并建商品' }}
           </button>
         </div>
@@ -722,7 +722,7 @@ createApp({
       listingDryRun: true, listingRunning: false, listingMsg: '', listingMsgType: '', listingLog: '',
       settings: { reviewImages: true, confirmBeforeListing: true },
       styleTransfer: { styleId: '', running: false, msg: '', msgType: '' },   // 🎨 风格迁移
-      imp: { open: false, folderPath: '', productName: '', category: '', running: false, msg: '', msgType: '' },   // 📥 导入成品图建商品
+      imp: { open: false, folderName: '', groups: null, counts: { main: 0, detail: 0, white: 0, sku: 0 }, running: false, msg: '', msgType: '' },   // 📥 导入成品图建商品(webkitdirectory 选文件夹)
     };
   },
   computed: {
@@ -851,16 +851,12 @@ createApp({
       const keys = [...(this.ctx.visual.mainImages || []), ...(this.ctx.visual.detailImages || []), ...this.skuImages];
       for (const key of keys) {
         if (!key || this.signed[key]) continue;
-        let url = key;
-        try { const r = await fetch('/api/gen/sign?key=' + encodeURIComponent(key)); if (r.ok) url = await r.text(); }
-        catch {}
-        // COS 未启用/欠费时 signedUrl 是**云端**进程目录下的本地路径,<img>无法直接加载。
-        // 这些是云端生图产物(主图/详情/SKU)，须走**云端** /api/gen/local-image(经 cloudgw 转发到5020读云端目录)；
-        // 本地 /api/erp/local-image 读不到云端目录会 404(#4 预览图空白根因)。
-        if (url && !url.startsWith('http') && !url.startsWith('data:')) {
-          url = '/api/gen/local-image?path=' + encodeURIComponent(url);
-        }
-        this.signed[key] = url;
+        // #1 一律走云端统一图片代理 /api/gen/img(经 cloudgw 转发到5020)：
+        // COS key/URL 云端用凭证 getObject 取(绕过防盗链/ACL——桶开防盗链时浏览器直连COS会403图变黑)，
+        // 本地路径云端读产物目录。不再前端直连 COS、也不再靠 sign 出预签名URL(那仍会被防盗链拦)。
+        // data:URL(极少数导入残留) 原样用。
+        this.signed[key] = key.startsWith('data:') ? key
+          : '/api/gen/img?ref=' + encodeURIComponent(key);
       }
     },
 
@@ -1412,20 +1408,94 @@ createApp({
     },
 
     // ── 📥 导入外部成品图 → 建商品 → 自动加载(接着可风格迁移/上新) ──
+    // webkitdirectory 图形选文件夹：读顶层文件夹名(=品类-主件名)+按子目录分组读 base64。
+    pickImportFolder() {
+      const inp = document.createElement('input');
+      inp.type = 'file'; inp.multiple = true; inp.webkitdirectory = true;
+      inp.onchange = () => this._processImportFiles([...inp.files]);
+      inp.click();
+    },
+    async _processImportFiles(files) {
+      const imgs = files.filter(f => f.type && f.type.startsWith('image/'));
+      if (!imgs.length) { this.imp.msg = '该文件夹没有图片'; this.imp.msgType = 'err'; return; }
+      // webkitRelativePath: "锅盖架-圣诞树收纳架/白底图/GF-...-30CM.jpg" → 顶层名 + 角色子目录 + 文件名
+      this.imp.folderName = (imgs[0].webkitRelativePath || '').split('/')[0] || '';
+      const groups = { main: [], detail: [], white: [], sku: [] };
+      const roleOf = (seg) => {
+        const s = (seg || '').toLowerCase();
+        if (s.includes('主图') || s.includes('main')) return 'main';
+        if (s.includes('详情') || s.includes('detail')) return 'detail';
+        if (s.includes('白底') || s.includes('white')) return 'white';
+        if (s.includes('sku') || s.includes('款式')) return 'sku';
+        return null;
+      };
+      for (const f of imgs) {
+        const parts = (f.webkitRelativePath || f.name).split('/');
+        const role = roleOf(parts.length >= 2 ? parts[parts.length - 2] : '');
+        if (!role) continue;   // 不在已知子目录的图跳过
+        const b64 = await this._fileToB64(f);
+        const ext = f.name.toLowerCase().endsWith('.png') ? 'png' : 'jpg';
+        groups[role].push({ name: parts[parts.length - 1], b64, ext });
+      }
+      this.imp.groups = groups;
+      this.imp.counts = { main: groups.main.length, detail: groups.detail.length, white: groups.white.length, sku: groups.sku.length };
+      // 健壮性·当场校验命名/结构，命名错误立即提醒(别等导入完)
+      const total = groups.main.length + groups.detail.length + groups.white.length + groups.sku.length;
+      if (total === 0) {
+        // 没识别到任一角色子目录 → 无法导入，清空 folderName 使按钮禁用
+        this.imp.folderName = ''; this.imp.groups = null;
+        this.imp.msg = '❌ 文件夹里没识别到 主图/详情/白底图/sku 子目录的图。请确认结构：商品文件夹内含名字含「主图」「详情」「白底」「sku」的子目录，图放子目录里。';
+        this.imp.msgType = 'err';
+        return;
+      }
+      const warns = [];
+      if (!this.imp.folderName.includes('-')) {
+        warns.push('文件夹名「' + this.imp.folderName + '」没按「品类-主件名」命名（缺"-"）。示例：锅盖架-圣诞树收纳架。否则识别不出品类，属性/标题/方案会不准。建议改名后重选。');
+      }
+      if (groups.white.length === 0) {
+        warns.push('没有「白底图」子目录——SKU 方案靠白底图名(=快麦编码)反推，缺它则出不了 SKU 方案。');
+      }
+      if (groups.main.length === 0) warns.push('没有「主图」——上新缺主图会被拦。');
+      if (warns.length) {
+        this.imp.msg = '⚠ 已读「' + this.imp.folderName + '」（主图' + groups.main.length + '·详情' + groups.detail.length
+          + '·白底' + groups.white.length + '·sku' + groups.sku.length + '）。注意：' + warns.join(' ');
+        this.imp.msgType = 'err';
+      } else {
+        this.imp.msg = '✓ 已读「' + this.imp.folderName + '」，命名/结构正常，点「导入并建商品」上传。';
+        this.imp.msgType = 'ok';
+      }
+    },
+    _fileToB64(f) {
+      return new Promise((resolve) => {
+        const rd = new FileReader();
+        rd.onload = () => resolve(String(rd.result).split(',')[1] || '');   // 去 data:...;base64, 前缀
+        rd.readAsDataURL(f);
+      });
+    },
     async runImport() {
-      if (!this.imp.folderPath.trim()) return;
+      if (!this.imp.folderName || !this.imp.groups) return;
+      // 健壮性·命名错误二次拦(品类识别不出会连累属性/标题/方案)
+      if (!this.imp.folderName.includes('-')) {
+        if (!confirm('文件夹名「' + this.imp.folderName + '」没按「品类-主件名」命名（如 锅盖架-圣诞树收纳架），识别不出品类，SKU方案/属性/标题会不准。\n\n建议取消→给文件夹改名后重选。仍要继续导入吗？')) return;
+      }
       this.imp.running = true;
-      this.imp.msg = '导入中（读图→上传云端→建商品）…'; this.imp.msgType = '';
+      this.imp.msg = '导入中（上传云端→反推SKU→出方案+AI标题）…'; this.imp.msgType = '';
       try {
+        const g = this.imp.groups;
         const r = await fetch('/api/semi-auto/import-to-context', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ folderPath: this.imp.folderPath.trim(), productName: this.imp.productName.trim(), category: this.imp.category.trim() }) });
+          body: JSON.stringify({ folderName: this.imp.folderName, main: g.main, detail: g.detail, white: g.white, sku: g.sku }) });
         const d = await r.json();
         if (d.error) throw new Error(d.error);
         if (!d.contextId) throw new Error('未返回 contextId');
-        this.imp.msg = '✓ 已导入：主图 ' + d.mainCount + ' 张、详情 ' + d.detailCount + ' 张、白底 ' + (d.whiteCount||0) + ' 张。已加载，可在右侧「🎨风格迁移」换风格或直接上新。';
+        this.imp.msg = '✓ 已导入「' + (d.productName||this.imp.folderName) + '」：主图' + d.mainCount + '·详情' + d.detailCount + '·白底' + (d.whiteCount||0)
+          + '，SKU方案' + (d.skuPlanCount||0) + '个。已加载，可换风格或直接上新。'
+          + ((d.warnings&&d.warnings.length) ? ' ⚠'+d.warnings.length+'张白底命名对不上快麦编码(见控制台)。' : '');
         this.imp.msgType = 'ok';
+        if (d.warnings && d.warnings.length) d.warnings.forEach(w => console.warn('[导入]', w));
         this.contextId = d.contextId;
         await this.loadContext();   // 加载新建商品，右栏出现成品图 + 风格迁移区块
+        // #1/#3 导入后自动链：自动随机风格迁移 →(若两个复选框都没勾)自动上新，中途不停。
+        await this.autoAfterImport();
       } catch (e) {
         this.imp.msg = '导入失败：' + e.message; this.imp.msgType = 'err';
       } finally {
@@ -1433,16 +1503,46 @@ createApp({
       }
     },
 
+    /**
+     * #1/#3 导入后自动流水线：目的"人工只导文件夹，其余全自动"。
+     * 1) 自动随机选一个具体风格 → 静默风格迁移(不满意人工可再手动覆盖)。
+     * 2) 按设置区复选框决定是否继续自动上新：两个都没勾=一路自动上新到底；
+     *    勾了「人工过图」或「上新前二次确认」=停在这，等人工在预览确认后手动点上新。
+     */
+    async autoAfterImport() {
+      try {
+        // 1) 随机挑一个具体风格(排除 random/original 占位)，静默迁移
+        const pickable = this.styleOptions.filter(o => o.id !== 'random' && o.id !== 'original');
+        if (pickable.length) {
+          this.styleTransfer.styleId = pickable[Math.floor(Math.random() * pickable.length)].id;
+          this.imp.msg = '导入完成，自动风格迁移中（不满意可在右侧🎨重新换风格）…';
+          await this.runStyleTransfer({ auto: true });
+        }
+      } catch (e) { console.warn('[导入自动迁移] 失败(不阻断):', e); }
+      // 2) 复选框全没勾 → 一路自动上新到底；否则停下等人工
+      const needHuman = this.settings.reviewImages || this.settings.confirmBeforeListing;
+      if (needHuman) {
+        this.imp.msg = '✓ 导入+自动风格迁移完成。设置要求人工确认，请在预览区检查后点「确认上新」。';
+        this.imp.msgType = 'ok';
+        return;
+      }
+      // 全自动上新：关诊断模式(真上)，静默提交
+      this.listingDryRun = false;
+      this.imp.msg = '✓ 已导入+迁移，按设置全自动上新中…';
+      await this.submitListing({ auto: true });
+    },
+
     // ── 🎨 风格迁移：对当前商品整套成品图换基调，覆盖回写后刷新预览 ──
-    async runStyleTransfer() {
+    async runStyleTransfer(opts) {
+      const auto = opts && opts.auto;   // 自动模式(导入后自动迁移)：跳过所有 confirm，静默跑
       if (!this.ctx || !this.styleTransfer.styleId) return;
       const hasSku = (this.ctx.visual?.whiteImages||[]).length > 0 || (this.ctx.structure?.plans||[]).length > 0;
       const hasCat = !!(this.ctx.category && String(this.ctx.category).trim());
       // (#5.2c) 有成品图(主图/详情)就能换风格——风格迁移只需成品图，不强求品类/主件。
       // 导入外部成品图的商品既无白底/plans 也无 category，过去被 !hasSku&&!hasCat 误拦，这里放行。
       const hasFinishedImg = (this.ctx.visual?.mainImages||[]).length > 0 || (this.ctx.visual?.detailImages||[]).length > 0;
-      // #2a：有 SKU（白底/方案）时，提醒把图按商品名命名，便于换风格后对应回填。
-      if (hasSku) {
+      // #2a：有 SKU（白底/方案）时，提醒把图按商品名命名，便于换风格后对应回填。(自动模式跳过提醒)
+      if (hasSku && !auto) {
         if (!confirm('检测到本商品含 SKU（白底/方案）。请确认成品图已按【商品名称】命名，换风格后才能正确对应。已命名好？点确定继续。')) return;
       } else if (!hasCat && !hasFinishedImg) {
         // #2b：既无 SKU、无品类、也无成品图 → 信息全空才拦，提示去补。
@@ -1452,7 +1552,7 @@ createApp({
       }
       const skuN = (this.ctx.structure?.plans||[]).reduce((s,p)=>s+(p.items||[]).filter(it=>it.imgDir).length,0);
       const n = (this.ctx.visual.mainImages||[]).length + (this.ctx.visual.detailImages||[]).length + skuN;
-      if (!confirm('将对当前商品 ' + n + ' 张成品图（含主图/详情/SKU）整套换风格，换完覆盖原图（可接着上新）。继续？')) return;
+      if (!auto && !confirm('将对当前商品 ' + n + ' 张成品图（含主图/详情/SKU）整套换风格，换完覆盖原图（可接着上新）。继续？')) return;
       this.styleTransfer.running = true;
       this.styleTransfer.msg = '风格迁移中…'; this.styleTransfer.msgType = '';
       try {
@@ -1472,12 +1572,13 @@ createApp({
     },
 
     // ── 上新 ──
-    async submitListing() {
+    async submitListing(opts) {
+      const auto = opts && opts.auto;   // 自动链(导入→迁移→上新)：跳过二次确认弹窗；但 reviewImages 勾选仍拦(那是人工要求过图)
       if (!this.ctx) return;
       if (this.settings.reviewImages && !this.listingDryRun && !(this.ctx.visual.mainImages || []).length) {
         this.setMsg('设置要求生图后人工过图：当前无主图，不允许上新', 'err'); return;
       }
-      if (!this.listingDryRun && this.settings.confirmBeforeListing && !confirm('将真实提交上新到拼多多，确认继续？')) return;
+      if (!auto && !this.listingDryRun && this.settings.confirmBeforeListing && !confirm('将真实提交上新到拼多多，确认继续？')) return;
       this.listingRunning = true; this.listingLog = ''; this.listingMsg = this.listingDryRun ? '启动诊断…' : '启动上新…'; this.listingMsgType = '';
       try {
         const r = await fetch('/api/listing/from-context', { method: 'POST', headers: { 'Content-Type': 'application/json' },

@@ -3,10 +3,14 @@ package com.gofu.cloud.controller;
 import com.gofu.cloud.service.context.ContextService;
 import com.gofu.cloud.service.lytext.LyTextService;
 import com.gofu.shared.context.ProductContext;
+import com.gofu.shared.context.SkuItem;
 import com.gofu.shared.context.SkuPlan;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -21,6 +25,8 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/gen")
 public class DualTrackController {
+
+    private static final Logger log = LoggerFactory.getLogger(DualTrackController.class);
 
     private final LyTextService lyTextService;
     private final ContextService contextService;
@@ -122,5 +128,59 @@ public class DualTrackController {
             }
         }
         return ResponseEntity.ok(result);
+    }
+
+    /**
+     * 导入重构：把上传的 sku 成品图按尺寸名次挂到选定方案的 item.imgDir。
+     * 入参：{ contextId, skuImages:[{name(文件名,带尺寸),ref(已上传URL)}] }。
+     * 匹配：方案 item 与 sku 图各自从(名/尺寸)提数字、各自升序、按名次一一配(容忍AI名与文件名刻度差)。
+     * 数量不齐时按序尽量配，不乱配剩余。
+     */
+    @PostMapping("/attach-sku-images")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<Map<String, Object>> attachSkuImages(@RequestBody Map<String, Object> body) {
+        String contextId = (String) body.get("contextId");
+        List<Map<String, Object>> skuImages = (List<Map<String, Object>>) body.getOrDefault("skuImages", List.of());
+        ProductContext ctx = contextId == null ? null : contextService.findById(contextId);
+        if (ctx == null) return ResponseEntity.badRequest().body(Map.of("error", "context 不存在"));
+        int planIdx = Math.max(0, ctx.getStructure().getSelectedPlanIndex());
+        List<SkuPlan> plans = ctx.getStructure().getPlans();
+        if (plans == null || plans.isEmpty() || planIdx >= plans.size())
+            return ResponseEntity.ok(Map.of("attached", 0, "note", "无方案可挂"));
+        List<SkuItem> items = plans.get(planIdx).getItems();
+
+        // 各自提尺寸→按名次配对
+        List<int[]> itemRank = new ArrayList<>();   // [itemIndex, size]
+        for (int i = 0; i < items.size(); i++) {
+            Integer s = sizeOf(items.get(i).getSkuDisplayName());
+            if (s == null) s = sizeOf(items.get(i).getSpec1());
+            if (s == null) s = sizeOf(items.get(i).getItemCode());
+            itemRank.add(new int[]{i, s == null ? Integer.MAX_VALUE : s});
+        }
+        List<Object[]> imgRank = new ArrayList<>();  // [ref, size]
+        for (Map<String, Object> im : skuImages) {
+            Integer s = sizeOf(String.valueOf(im.get("name")));
+            imgRank.add(new Object[]{String.valueOf(im.get("ref")), s == null ? Integer.MAX_VALUE : s});
+        }
+        itemRank.sort(java.util.Comparator.comparingInt(a -> a[1]));
+        imgRank.sort(java.util.Comparator.comparingInt(a -> (int) a[1]));
+        int attached = 0;
+        for (int k = 0; k < itemRank.size() && k < imgRank.size(); k++) {
+            items.get(itemRank.get(k)[0]).setImgDir((String) imgRank.get(k)[0]);
+            attached++;
+        }
+        contextService.save(ctx);
+        log.info("[导入·挂SKU图] contextId={} 方案SKU={} sku图={} 挂上={}", contextId, items.size(), skuImages.size(), attached);
+        return ResponseEntity.ok(Map.of("attached", attached));
+    }
+
+    /** 从字符串提尺寸数字：优先 \d+CM/厘米，退化取 2~3 位数字；提不到 null。 */
+    private Integer sizeOf(String s) {
+        if (s == null || s.isBlank()) return null;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d{2,3})\\s*(?:CM|cm|厘米)").matcher(s);
+        if (m.find()) return Integer.parseInt(m.group(1));
+        m = java.util.regex.Pattern.compile("(?<!\\d)(\\d{2,3})(?!\\d)").matcher(s);
+        if (m.find()) return Integer.parseInt(m.group(1));
+        return null;
     }
 }

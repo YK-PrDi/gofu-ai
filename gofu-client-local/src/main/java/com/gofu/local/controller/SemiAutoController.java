@@ -43,16 +43,34 @@ public class SemiAutoController {
      * 文件夹需含 主图/详情 子目录（复用 scanProduct 角色识别）。
      */
     @PostMapping("/import-to-context")
+    @SuppressWarnings("unchecked")
     public ResponseEntity<?> importToContext(@RequestBody Map<String, Object> body) {
-        String folderPath = String.valueOf(body.getOrDefault("folderPath", ""));
-        if (folderPath.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "folderPath 不能为空"));
-        String productName = body.get("productName") != null ? String.valueOf(body.get("productName")) : "";
-        String category = body.get("category") != null ? String.valueOf(body.get("category")) : "";
+        // 重构(webkitdirectory 上传模型)：入参 { folderName, main/detail/white/sku:[{name,b64,ext}] }。
+        String folderName = String.valueOf(body.getOrDefault("folderName", ""));
+        if (folderName.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "folderName 不能为空"));
         try {
-            return ResponseEntity.ok(styleImportService.importToContext(folderPath, productName, category));
+            return ResponseEntity.ok(styleImportService.importToContext(folderName,
+                    toUpImgs(body.get("main")), toUpImgs(body.get("detail")),
+                    toUpImgs(body.get("white")), toUpImgs(body.get("sku"))));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(Map.of("error", "导入失败：" + e.getMessage()));
         }
+    }
+
+    /** 把前端传的图数组解析成 UpImg 列表。 */
+    @SuppressWarnings("unchecked")
+    private List<com.gofu.local.service.listing.StyleImportService.UpImg> toUpImgs(Object raw) {
+        List<com.gofu.local.service.listing.StyleImportService.UpImg> out = new java.util.ArrayList<>();
+        if (!(raw instanceof List)) return out;
+        for (Object o : (List<Object>) raw) {
+            if (!(o instanceof Map)) continue;
+            Map<String, Object> m = (Map<String, Object>) o;
+            String name = String.valueOf(m.getOrDefault("name", ""));
+            String b64 = String.valueOf(m.getOrDefault("b64", ""));
+            String ext = String.valueOf(m.getOrDefault("ext", "jpg"));
+            if (!b64.isBlank()) out.add(new com.gofu.local.service.listing.StyleImportService.UpImg(name, b64, ext));
+        }
+        return out;
     }
 
     /**

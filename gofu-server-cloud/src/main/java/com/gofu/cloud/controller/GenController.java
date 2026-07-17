@@ -250,6 +250,33 @@ public class GenController {
         }
     }
 
+    /**
+     * #1 统一预览图代理：前端一切预览图(主图/详情/SKU/白底)都走这里，不再直连 COS。
+     * - ref 是本地绝对路径 → 读云端产物目录返回(复用 localImage 的安全校验)。
+     * - ref 是 COS key / COS URL → 用凭证服务端 getObject 取字节(绕过防盗链/ACL——桶开了防盗链时浏览器直连会 403 图变黑，这是 #1 根因)。
+     */
+    @GetMapping("/img")
+    public ResponseEntity<byte[]> img(@RequestParam String ref) {
+        if (ref == null || ref.isBlank()) return ResponseEntity.notFound().build();
+        if (isLocalPath(ref)) return localImage(ref);   // 本地路径走读盘(含越界校验)
+        if (!cosService.isEnabled()) {
+            // COS 未启用却是 http URL：无凭证代理，让浏览器自行直连(退化)
+            return ResponseEntity.status(302).header("Location", ref).build();
+        }
+        try {
+            byte[] bytes = cosService.fetch(ref);
+            String lower = ref.toLowerCase();
+            String ct = lower.contains(".png") ? "image/png" : "image/jpeg";
+            return ResponseEntity.ok()
+                    .header("Content-Type", ct)
+                    .header("Cache-Control", "max-age=3600")
+                    .body(bytes);
+        } catch (Exception e) {
+            log.warn("img 代理取 COS 失败({}): {}", ref, e.getMessage());
+            return ResponseEntity.status(502).build();
+        }
+    }
+
     /** 用 SKU 生图模板拼 prompt。填充 productType/skuName/compDesc。 */
     private String buildSkuPrompt(ImageGenRequest req) {
         String tpl = promptTemplateLoader.load("prompt/image-sku-generation.txt",

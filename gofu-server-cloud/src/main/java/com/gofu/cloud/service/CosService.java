@@ -130,4 +130,33 @@ public class CosService {
         }
         return client;
     }
+
+    /**
+     * #1 预览图代理：用凭证在**服务端** getObject 取图字节。
+     * 服务端拉取不带浏览器 Referer、也用 SDK 凭证访问，天然绕过「防盗链」和「对象非公有读(ACL)」——
+     * 这正是浏览器直连 COS 公网/预签名 URL 会 403、图变黑的根因(桶开了防盗链)。
+     * 入参可为 COS key(generated/…/x.jpg) 或完整 COS URL，统一解析成 key 再取。
+     */
+    public byte[] fetch(String keyOrUrl) throws java.io.IOException {
+        String key = toKey(keyOrUrl);
+        com.qcloud.cos.model.COSObject obj = getClient().getObject(appProperties.getCos().getBucket(), key);
+        try (java.io.InputStream in = obj.getObjectContent()) {
+            return in.readAllBytes();
+        }
+    }
+
+    /** 把完整 COS URL 抽成对象 key(去 scheme/host/query 并 URL 解码)；本就是 key 则原样返回。 */
+    private String toKey(String s) {
+        if (s == null) return "";
+        if (s.startsWith("http://") || s.startsWith("https://")) {
+            int host = s.indexOf("://") + 3;
+            int slash = s.indexOf('/', host);
+            String path = slash >= 0 ? s.substring(slash + 1) : s;
+            int q = path.indexOf('?');
+            if (q >= 0) path = path.substring(0, q);
+            try { return java.net.URLDecoder.decode(path, java.nio.charset.StandardCharsets.UTF_8); }
+            catch (Exception e) { return path; }
+        }
+        return s;
+    }
 }
