@@ -10,6 +10,18 @@ DIST="$PKG/dist"
 INPUT="$PKG/_input"
 RUNTIME="$PKG/_runtime"
 
+echo "===================== [0/5] 重编 launcher.jar ====================="
+# ⚠️ launcher 不在 maven reactor，mvn package 不会编它。过去只校验 jar 存在→改了
+# GofuLauncher.java 却不重编，旧 jar 被打进包(#9B 等修复丢失)。此处强制重编，确保源码进 jar。
+LSRC="$PKG/launcher/src/GofuLauncher.java"
+LBUILD="$PKG/launcher/build"
+[ -f "$LSRC" ] || { echo "缺少 $LSRC"; exit 1; }
+mkdir -p "$LBUILD/classes"
+"$JHOME/bin/javac.exe" -encoding UTF-8 -d "$LBUILD/classes" "$LSRC"
+printf 'Main-Class: GofuLauncher\n' > "$LBUILD/MANIFEST.MF"
+"$JHOME/bin/jar.exe" cfm "$LBUILD/launcher.jar" "$LBUILD/MANIFEST.MF" -C "$LBUILD/classes" .
+echo "launcher.jar 已用最新源码重编: $(stat -c '%y' "$LBUILD/launcher.jar" | cut -d. -f1)"
+
 echo "===================== [1/5] 校验前置 ====================="
 CLOUD="$ROOT/gofu-server-cloud/target/app.jar"
 LOCAL="$ROOT/gofu-client-local/target/app.jar"
