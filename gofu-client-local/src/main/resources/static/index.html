@@ -1227,7 +1227,8 @@ createApp({
     async fillCostAndPrice() {
       const plans = this.plans;
       if (!plans.length) return;
-      const cp = this.cat.path.join('>');
+      // 品类判 productType：左栏选品类优先，导入流没走左栏则兜底用 ctx.category(文件夹名解析的)
+      const cp = this.cat.path.length ? this.cat.path.join('>') : (this.ctx?.category || '');
       const productType = cp.includes('花洒') ? '花洒' : (cp.includes('代发') ? '代发' : '架类');
       try {
         for (const plan of plans) {
@@ -1510,25 +1511,45 @@ createApp({
      *    勾了「人工过图」或「上新前二次确认」=停在这，等人工在预览确认后手动点上新。
      */
     async autoAfterImport() {
-      try {
-        // 1) 随机挑一个具体风格(排除 random/original 占位)，静默迁移
-        const pickable = this.styleOptions.filter(o => o.id !== 'random' && o.id !== 'original');
-        if (pickable.length) {
-          this.styleTransfer.styleId = pickable[Math.floor(Math.random() * pickable.length)].id;
-          this.imp.msg = '导入完成，自动风格迁移中（不满意可在右侧🎨重新换风格）…';
+      // 步骤1/3 自动风格迁移(随机风格)。GAP-1修：迁移失败必须中断自动链，绝不带着未迁移的原图继续自动上新。
+      const pickable = this.styleOptions.filter(o => o.id !== 'random' && o.id !== 'original');
+      if (pickable.length) {
+        this.styleTransfer.styleId = pickable[Math.floor(Math.random() * pickable.length)].id;
+        this.imp.msg = '步骤1/3 自动风格迁移中（不满意可在右侧🎨重新换风格）…'; this.imp.msgType = '';
+        try {
           await this.runStyleTransfer({ auto: true });
+        } catch (e) { /* runStyleTransfer 内部已 catch，这里兜底 */ }
+        // runStyleTransfer 失败不 throw，只置 styleTransfer.msgType='err'。据此判断成败。
+        if (this.styleTransfer.msgType === 'err') {
+          this.imp.msg = '⚠ 自动风格迁移失败，已中断自动上新（避免上未迁移的原图）。原因：'
+            + (this.styleTransfer.msg || '未知') + '。可在右侧🎨手动重试后再上新。';
+          this.imp.msgType = 'err';
+          return;
         }
-      } catch (e) { console.warn('[导入自动迁移] 失败(不阻断):', e); }
-      // 2) 复选框全没勾 → 一路自动上新到底；否则停下等人工
+      }
+      // 步骤2/3 定价(C2修)：导入的方案SKU价格为0，上新前必须按利润率回填，否则被0价校验拦死/上0价。
+      this.imp.msg = '步骤2/3 自动定价中（按默认利润率）…';
+      try {
+        await this.fillCostAndPrice();
+      } catch (e) {
+        this.imp.msg = '⚠ 自动定价失败，已中断自动上新。原因：' + e.message + '。可在预览区手动定价后上新。';
+        this.imp.msgType = 'err'; return;
+      }
+      // 定价后若仍有 0 价 SKU(如快麦无进价)，停下提示，别硬上0价
+      const zero = this.plans.reduce((n, p) => n + (p.items || []).filter(it => !(it.groupPrice > 0)).length, 0);
+      if (zero > 0) {
+        this.imp.msg = '⚠ 有 ' + zero + ' 个 SKU 定不出价(快麦缺进价)，已中断自动上新。请在预览区手动定价后点「确认上新」。';
+        this.imp.msgType = 'err'; return;
+      }
+      // 步骤3/3 按设置复选框决定：任一勾选=停下等人工确认；都没勾=一路自动上新到底。
       const needHuman = this.settings.reviewImages || this.settings.confirmBeforeListing;
       if (needHuman) {
-        this.imp.msg = '✓ 导入+自动风格迁移完成。设置要求人工确认，请在预览区检查后点「确认上新」。';
-        this.imp.msgType = 'ok';
-        return;
+        this.imp.msg = '✓ 导入+迁移+定价完成。设置要求人工确认，请在预览区检查后点「确认上新」。';
+        this.imp.msgType = 'ok'; return;
       }
-      // 全自动上新：关诊断模式(真上)，静默提交
+      // 全自动上新：关诊断模式(真上)，静默提交。GAP-2修：上新终态回写到导入区(下方 submitListing auto 分支)。
       this.listingDryRun = false;
-      this.imp.msg = '✓ 已导入+迁移，按设置全自动上新中…';
+      this.imp.msg = '步骤3/3 全自动上新中…';
       await this.submitListing({ auto: true });
     },
 
@@ -1574,6 +1595,7 @@ createApp({
     // ── 上新 ──
     async submitListing(opts) {
       const auto = opts && opts.auto;   // 自动链(导入→迁移→上新)：跳过二次确认弹窗；但 reviewImages 勾选仍拦(那是人工要求过图)
+      this._autoChain = auto;           // GAP-2：标记自动链，pollTask 终态据此把成败回写导入区 imp.msg
       if (!this.ctx) return;
       if (this.settings.reviewImages && !this.listingDryRun && !(this.ctx.visual.mainImages || []).length) {
         this.setMsg('设置要求生图后人工过图：当前无主图，不允许上新', 'err'); return;
@@ -1607,6 +1629,12 @@ createApp({
           this.listingMsg = ok
             ? (this.listingDryRun ? '诊断完成（未真实提交，见日志/截图）' : '✓ 上新成功')
             : '✗ 上新未成功：' + (t.status) + '，见下方日志';
+          // GAP-2：自动链(导入→迁移→定价→上新)的终态回写到导入区，用户不用去别的区块找结果
+          if (this._autoChain) {
+            this.imp.msg = ok ? '✓ 全自动完成：导入→风格迁移→定价→上新成功。' : '✗ 自动上新未成功，见「4 上新」区日志。';
+            this.imp.msgType = ok ? 'ok' : 'err';
+            this._autoChain = false;
+          }
         }
       } catch (e) { this.listingMsg = '轮询失败：' + e.message; this.listingMsgType = 'err'; this.listingRunning = false; }
     },

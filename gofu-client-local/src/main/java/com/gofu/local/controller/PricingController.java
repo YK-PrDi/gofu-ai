@@ -27,6 +27,13 @@ import java.util.*;
 @RequestMapping("/api/pricing")
 public class PricingController {
 
+    // 定价公式抽到 PricingService（单一真相源，批量流/导入流也复用）。本 controller 只做 HTTP+xlsx。
+    private final com.gofu.local.service.listing.PricingService pricingService;
+
+    public PricingController(com.gofu.local.service.listing.PricingService pricingService) {
+        this.pricingService = pricingService;
+    }
+
     /**
      * POST /api/pricing/calculate
      * 入参: { costRatio: 0.35, skus: [{itemCode, name, cost}] }
@@ -60,70 +67,10 @@ public class PricingController {
         }
     }
 
-    // ── 核心计算 ──
+    // ── 核心计算（委托 PricingService，公式单一真相源）──
 
-    @SuppressWarnings("unchecked")
     private Map<String, Object> doCalculate(Map<String, Object> body) {
-        // 口径统一（M10）：前端滑块传的是【利润率 profitRate】(= 二级利润/价格)，而非成本占比。
-        // 由定价公式反解百分比：利润率 m = 1 - 百分比 - 0.07(活动扣点) → 百分比 = 0.93 - m。
-        // 这样输出的 marginRate 恒等于用户拖的 profitRate（自洽）。仍兼容老的 costRatio 直传。
-        double costRatio;
-        if (body.get("profitRate") instanceof Number pr) {
-            double m = pr.doubleValue();
-            costRatio = 0.93 - m;
-            if (costRatio < 0.28) costRatio = 0.28;   // 对齐公式表百分比区间 0.28~0.78
-            if (costRatio > 0.78) costRatio = 0.78;
-        } else {
-            costRatio = ((Number) body.getOrDefault("costRatio", 0.35)).doubleValue();
-        }
-        if (costRatio < 0.01) costRatio = 0.01;
-        List<Map<String, Object>> skus = (List<Map<String, Object>>) body.getOrDefault("skus", List.of());
-
-        List<Map<String, Object>> out = new ArrayList<>();
-        double maxPinPrice = 0;
-
-        for (Map<String, Object> s : skus) {
-            double cost = ((Number) s.getOrDefault("cost", 0)).doubleValue();
-            String itemCode = String.valueOf(s.getOrDefault("itemCode", ""));
-            String name     = String.valueOf(s.getOrDefault("name", ""));
-
-            // per-SKU 计算
-            double price       = round2(cost / costRatio);
-            double profit      = round2(price - cost);
-            double deduction   = round2(price * 0.07);
-            double profit2     = round2(profit - deduction);
-            double marginRate  = price > 0 ? round2(profit2 / price) : 0;
-            double breakeven   = marginRate > 0 ? round2(1.0 / marginRate) : 0;
-            double pinPrice    = round2(price + 20);
-
-            if (pinPrice > maxPinPrice) maxPinPrice = pinPrice;
-
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("itemCode",   itemCode);
-            row.put("name",       name);
-            row.put("cost",       cost);
-            row.put("price",      price);
-            row.put("profit",     profit);
-            row.put("deduction",  deduction);
-            row.put("profit2",    profit2);
-            row.put("marginRate", marginRate);
-            row.put("breakeven",  breakeven);
-            row.put("pinPrice",   pinPrice);
-            out.add(row);
-        }
-
-        double singlePrice = round2(maxPinPrice + 1);
-        double refPrice    = round2(maxPinPrice + 2);
-
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("skus",        out);
-        result.put("singlePrice", singlePrice);
-        result.put("refPrice",    refPrice);
-        return result;
-    }
-
-    private double round2(double v) {
-        return BigDecimal.valueOf(v).setScale(2, RoundingMode.HALF_UP).doubleValue();
+        return pricingService.calculate(body);
     }
 
     // ── 生成 xlsx ──

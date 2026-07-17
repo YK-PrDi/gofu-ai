@@ -30,12 +30,14 @@ public class SemiAutoOrchestrator {
     private final SemiAutoService semiAutoService;
     private final StoreService storeService;
     private final ListingService listingService;
+    private final PricingService pricingService;
 
     public SemiAutoOrchestrator(SemiAutoService semiAutoService, StoreService storeService,
-                                ListingService listingService) {
+                                ListingService listingService, PricingService pricingService) {
         this.semiAutoService = semiAutoService;
         this.storeService = storeService;
         this.listingService = listingService;
+        this.pricingService = pricingService;
     }
 
     /** 单商品的编排结果（供前端展示：上新了/被拦了/为什么）。 */
@@ -83,21 +85,30 @@ public class SemiAutoOrchestrator {
                 // 3) 完整性强校验（北极星）
                 List<SemiAutoScan.SkuCheck> skus = skusByProduct == null ? List.of()
                         : skusByProduct.getOrDefault(prod.name(), List.of());
-                // (#5.1/#7) 前端没传 SKU 但商品有 SKU 图目录 → 自动按文件名反推快麦编码，
-                // 命名对不上时明确报"请按 ERP 编码规范命名"(像风格迁移的命名提醒)，不再笼统报"没有任何 SKU"。
+                // (#5.1/#7 + C1定价断链) 前端没传 SKU 但商品有 SKU 图目录 → 自动按文件名反推快麦编码：
+                //  · 命中的 → 用进价 cost 按默认利润率自动算拼单价 → 组成带定价的 SkuCheck 直接参与上新(全自动核心)。
+                //  · 对不上的 → 明确报"请按 ERP 编码规范命名"。这样"人工只选大文件夹"才真能自动上新。
                 List<String> nameHints = new ArrayList<>();
                 if (skus.isEmpty() && prod.skuImgDir() != null && !prod.skuImgDir().isBlank()) {
                     List<String> skuImgs = semiAutoService.listImages(prod.skuImgDir());
                     if (!skuImgs.isEmpty()) {
                         List<Map<String, Object>> rows = semiAutoService.reverseSkuFromImages(skuImgs, "架类");
-                        long unmatched = rows.stream().filter(r -> !Boolean.TRUE.equals(r.get("matched"))).count();
+                        List<SemiAutoScan.SkuCheck> reversed = new ArrayList<>();
                         for (Map<String, Object> r : rows) {
-                            if (!Boolean.TRUE.equals(r.get("matched"))) nameHints.add(String.valueOf(r.get("error")));
+                            if (Boolean.TRUE.equals(r.get("matched"))) {
+                                double cost = r.get("cost") instanceof Number n ? n.doubleValue() : 0;
+                                double price = pricingService.autoGroupPrice(cost);   // 进价→默认利润率算售价
+                                if (price <= 0) {
+                                    nameHints.add("SKU「" + r.get("name") + "」快麦无进价，无法自动定价，请在快麦补进价或预览页手动定价");
+                                    continue;
+                                }
+                                reversed.add(new SemiAutoScan.SkuCheck(
+                                        String.valueOf(r.get("name")), String.valueOf(r.get("file")), price));
+                            } else {
+                                nameHints.add(String.valueOf(r.get("error")));
+                            }
                         }
-                        if (unmatched == 0) {
-                            // 全部命名规范但无售价：批量流不内联定价，提示去预览页定价后重跑
-                            nameHints.add("已识别 " + rows.size() + " 个 SKU 图且命名规范，但批量流不含定价——请在预览页完成定价后上新");
-                        }
+                        if (!reversed.isEmpty()) skus = reversed;   // 反推成功的作为该商品 SKU
                     }
                 }
                 SemiAutoScan.Completeness c = semiAutoService.checkCompleteness(
