@@ -417,6 +417,7 @@ public class ImageGenService {
             // 配套参考图作构图底（refs 第一张权重最高）+ 商品白底图锁主体
             File shelfBase = templateService.shelfRefFile(leaf, pick.group(), pick.ref());
             List<File> shelfRefs = new java.util.ArrayList<>();
+            boolean floorlidComposed = false;   // route2 已自行按"白底图优先+构图底"组好 refs 的标记
 
             // ── 路线2（真·落地锅盖架专属）：Java 先合成「米奇款架体+锅盖/砧板收纳物」构图底，作最高权重参考图，
             //    prompt 强约束"保架体/收纳物 1:1、只理顺卡位遮挡与背景"。绕开 AI 重画架体必崩。
@@ -438,10 +439,14 @@ public class ImageGenService {
                     if (lid != null) collectibles.add(lid);   // 三槽：锅盖/砧板/锅盖
                     if (rackImg != null && rackImg.isFile()) {
                         String baseImg = compositor.compositeShelfFloorLid(rackImg, collectibles, null, batch, seq, skuName + "-构图底");
-                        shelfRefs.add(new File(baseImg));       // 构图底权重最高
+                        // 改:白底图优先(主体锚,第一张最高权重),构图底只当版式参考(第二张)。
+                        //    有真实白底图时白底图先进;构图底后进,prompt 已明确"架体以白底图为准,构图底只借摆法"。
+                        if (hasWhiteBg) shelfRefs.add(whiteBgRef);
+                        shelfRefs.add(new File(baseImg));       // 构图底作版式参考(白底图在前时它是第二张)
+                        floorlidComposed = true;
                         shelfPrompt = PromptLoader.load("prompt/image-shelf-floorlid.txt")
                                 .replace("{{shelfPrompt}}", shelfSeg).replace("{{colorName}}", colorOnly);
-                        log.info("落地锅盖架 路线2：构图底={}", baseImg);
+                        log.info("落地锅盖架 路线2：白底图优先={}, 构图底={}", hasWhiteBg, baseImg);
                     }
                 } catch (Exception ce) {
                     log.warn("落地锅盖架构图底合成失败，回退整图AI: {}", ce.getMessage());
@@ -449,16 +454,16 @@ public class ImageGenService {
             }
 
             // 参考图组装：
-            //  · 真锅盖架(route2已进shelfRefs) / 有配套预制图的品种 → 预制图作构图底(最高权重)+白底图锁主体。
-            //  · 但预制图是【具体品种实拍】(如锅盖架的"庆典小熊双层锅盖架.jpg")，对不匹配的品种(树菜板架)会把
-            //    实物画成锅盖架(错图根因)。故仅当【有真实白底图】时，不匹配品种应让白底图当唯一结构锚，不喂预制图。
-            //  · 判据：白底图存在且非真锅盖架路线 → 丢弃预制 shelfBase，只用白底图(与花洒同理:实物为准)。
+            //  · route2(真锅盖架)已按"白底图优先+构图底版式参考"进 shelfRefs,此处不再重复加。
+            //  · 其余品种:有预制图作构图底(版式参考)+白底图锁主体;白底图存在且非route2→丢弃预制(避免实物被画成别款)。
             boolean dropPresetRef = hasWhiteBg && !(leaf.contains("锅盖架") && "落地".equals(pick.group()) && isRealLidRack);
-            if (shelfRefs.isEmpty() && shelfBase != null && shelfBase.isFile() && !dropPresetRef) shelfRefs.add(shelfBase);
-            if (hasWhiteBg) shelfRefs.add(whiteBgRef);
-            else if (hasRef) shelfRefs.add(ref);
-            log.info("架类生图: 叶子={}, 组={}, 预制参考图={}({}), 丢弃预制={}, 白底={}",
-                    leaf, pick.group(), shelfBase != null, pick.ref(), dropPresetRef, hasWhiteBg);
+            if (!floorlidComposed) {   // 非route2 才走通用组装(route2 已自行组好白底优先)
+                if (hasWhiteBg) shelfRefs.add(whiteBgRef);   // 白底图优先(主体锚)
+                if (shelfBase != null && shelfBase.isFile() && !dropPresetRef) shelfRefs.add(shelfBase);   // 预制图作版式参考,放白底之后
+                if (!hasWhiteBg && hasRef) shelfRefs.add(ref);
+            }
+            log.info("架类生图: 叶子={}, 组={}, 预制参考图={}({}), 丢弃预制={}, 白底优先={}, route2构图底={}",
+                    leaf, pick.group(), shelfBase != null, pick.ref(), dropPresetRef, hasWhiteBg, floorlidComposed);
             Exception lastShelf = null;
             int maxBackoff = 4;
             for (int attempt = 0; attempt < keys.size() * (1 + maxBackoff); attempt++) {
