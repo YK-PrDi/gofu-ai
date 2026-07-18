@@ -486,7 +486,8 @@
         <div class="gmsg" :class="styleTransfer.msgType" style="margin-top:6px">{{ styleTransfer.msg }}</div>
       </div>
 
-      <div v-if="ctx" class="section">
+      <!-- 单品工作台结果预览:批量流预览激活时隐藏(批量用上方 batch.preview strip,避免第二店铺商品跑到这) -->
+      <div v-if="ctx && !batch.preview" class="section">
       <h2><span class="num">3</span> 结果预览</h2>
       <div class="field">
         <label>标题</label>

@@ -259,6 +259,8 @@ public class GenController {
     public ResponseEntity<byte[]> img(@RequestParam String ref) {
         if (ref == null || ref.isBlank()) return ResponseEntity.notFound().build();
         if (isLocalPath(ref)) return localImage(ref);   // 本地路径走读盘(含越界校验)
+        // 外部 http URL(非本项目COS,如快麦阿里云OSS白底图)→ 302 让浏览器直连,别拿去腾讯COS getObject(必 NoSuchKey 404)。
+        if (isForeignHttpUrl(ref)) return ResponseEntity.status(302).header("Location", ref).build();
         if (!cosService.isEnabled()) {
             // COS 未启用却是 http URL：无凭证代理，让浏览器自行直连(退化)
             return ResponseEntity.status(302).header("Location", ref).build();
@@ -275,6 +277,14 @@ public class GenController {
             log.warn("img 代理取 COS 失败({}): {}", ref, e.getMessage());
             return ResponseEntity.status(502).build();
         }
+    }
+
+    /** 外部 http(s) URL：非本项目腾讯COS域(.myqcloud.com)的公网图(如快麦阿里云OSS白底图)。这类直连,不走getObject。 */
+    private boolean isForeignHttpUrl(String ref) {
+        if (ref == null) return false;
+        String low = ref.toLowerCase();
+        if (!low.startsWith("http://") && !low.startsWith("https://")) return false;
+        return !low.contains(".myqcloud.com");   // 本项目COS URL含myqcloud;其余http视为外部直连
     }
 
     /** 用 SKU 生图模板拼 prompt。填充 productType/skuName/compDesc。 */
