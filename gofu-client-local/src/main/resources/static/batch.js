@@ -12,6 +12,7 @@ window.BatchMixin = {
         rootPath: '',       // 上传重建后的临时目录根路径(不再让用户粘贴)
         folderName: '',     // 用户选的大文件夹名(显示用)
         fileCount: 0,
+        preview: null,      // 轻量预览:{name,shop,category,main[],detail[],white[],sku[]} (本地图URL)
         outcomes: [],
         busy: false,
         msg: '',
@@ -102,25 +103,22 @@ window.BatchMixin = {
         }
       }
     },
-    // 👁 预览：把该商品载入右侧 ctx 预览面板(主图/详情/SKU方案+布局全套)。无context先建。
+    // 👁 轻量预览：只读该商品文件夹已有的主图/详情/白底/sku图直接显示，不建context、不碰云端(零额度)。
+    //    (建context走云端出方案是给"AI生成缺图"的重路径,只看已有图不该用它。)
     async batchPreview(idx) {
       const o = this.batch.outcomes[idx];
       if (!o || !o.folderPath) { this.batchMsg('该商品无文件夹路径，无法预览', 'err'); return; }
-      if (this._batchGenBusy) { this.batchMsg('已有生成/预览在跑，请稍候(共用生图队列)', 'err'); return; }
-      this._batchGenBusy = true;
-      const prev = o.taskStatus; o.taskStatus = 'preview';
       try {
-        const contextId = await this._batchEnsureContext(o);
-        this.contextId = contextId;
-        await this.loadContext();   // 载入右侧预览面板(主图/详情已在此显示)
-        o.taskStatus = prev === 'gen' ? prev : '';
-        const warn = (o.warnings && o.warnings.length) ? ' ⚠' + o.warnings.join('；') : '';
-        o.taskMsg = '✓ 已在右侧预览' + warn;
-        this.batchMsg('已载入「' + (o.mainItem || o.productName) + '」到右侧预览面板' + warn, warn ? 'err' : 'ok');
+        const d = await this.batchApi('/api/semi-auto/product-images', { folderPath: o.folderPath });
+        const toUrl = p => '/api/erp/local-image?path=' + encodeURIComponent(p);
+        this.batch.preview = {
+          name: (o.mainItem || o.productName), shop: o.shopName, category: o.category,
+          main: (d.main || []).map(toUrl), detail: (d.detail || []).map(toUrl),
+          white: (d.white || []).map(toUrl), sku: (d.sku || []).map(toUrl),
+        };
+        this.batchMsg('预览「' + this.batch.preview.name + '」：主图' + (d.main||[]).length + '·详情' + (d.detail||[]).length + '·白底' + (d.white||[]).length + '·sku' + (d.sku||[]).length, 'ok');
       } catch (e) {
-        o.taskStatus = 'error'; o.taskMsg = '✗ 预览失败：' + e.message;
-      } finally {
-        this._batchGenBusy = false;
+        this.batchMsg('预览失败：' + e.message, 'err');
       }
     },
     async batchPreflight() {
@@ -130,21 +128,11 @@ window.BatchMixin = {
         this.batch.outcomes = d.outcomes || [];
         this.batch.canRun = this.batchReadyCount > 0;
         this.batchMsg('预检完成：' + this.batchReadyCount + ' 个商品齐全可上新，其余见下方说明', this.batch.canRun ? 'ok' : 'err');
-        // 上传后自动预览(默认开)。每个商品建context载入右侧,串行逐个(建context跑云端出方案,慢+费额度)。
-        // 关设置则不自动,仍可手点每行「👁预览」。非阻塞:后台跑,不挡预检结果显示。
-        if (this.batch.outcomes.length && this.settings.batchAutoPreview !== false) this._batchAutoPreviewAll();
+        // 轻量预览(零云端)：自动预览首个商品;点任意行👁瞬间切换。默认开,设置可关。
+        if (this.batch.outcomes.length && this.settings.batchAutoPreview !== false) this.batchPreview(0);
       } catch (e) {
         this.batchMsg('预检失败：' + e.message, 'err');
       }
-    },
-    // 串行自动预览所有商品:逐个建context+载入右侧。最后停在最后一个;中途任一失败不影响其余。
-    async _batchAutoPreviewAll() {
-      for (let i = 0; i < this.batch.outcomes.length; i++) {
-        const o = this.batch.outcomes[i];
-        if (!o || o.contextId) continue;   // 已建过的跳过
-        try { await this.batchPreview(i); } catch (e) { /* 单个失败已写回该行,继续下一个 */ }
-      }
-      this.batchMsg('已自动预览全部 ' + this.batch.outcomes.length + ' 个商品(右侧停在最后一个,点任意行👁可回看)', 'ok');
     },
     async batchRun() {
       if (!confirm('确认对预检齐全的商品批量上新？将逐店逐商品串行操作真实商家后台。')) return;

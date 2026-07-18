@@ -284,6 +284,20 @@
         <div v-if="batch.outcomes.length" class="hint" style="margin-top:6px">
           齐全 {{ batchReadyCount }} / 共 {{ batch.outcomes.length }} 商品。
         </div>
+
+        <!-- 轻量预览区:点👁读该商品本地图直接显示(不建context/不碰云端)。主图/详情/白底/sku 全套。 -->
+        <div v-if="batch.preview" class="section" style="margin-top:12px;background:#f8fafc">
+          <h2 style="font-size:15px">👁 预览：{{ batch.preview.name }}
+            <span style="font-size:12px;color:var(--text-faint);font-weight:400">（{{ batch.preview.shop }} · {{ batch.preview.category }}）</span>
+          </h2>
+          <template v-for="grp in [['主图',batch.preview.main],['详情图',batch.preview.detail],['白底图',batch.preview.white],['SKU图',batch.preview.sku]]" :key="grp[0]">
+            <div class="subhead">{{ grp[0] }}（{{ grp[1].length }}）</div>
+            <div v-if="grp[1].length" class="grid">
+              <div v-for="(u,i) in grp[1]" :key="grp[0]+i" class="cell" :style="grp[0]==='白底图'?'background:#fff':''"><img :src="u" /></div>
+            </div>
+            <div v-else class="empty" style="padding:6px">无{{ grp[0] }}{{ grp[0]==='SKU图'?'（可点该商品「AI生成SKU图」补齐）':'' }}</div>
+          </template>
+        </div>
       </div>
     </div>
 

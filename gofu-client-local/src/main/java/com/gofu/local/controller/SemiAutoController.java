@@ -69,6 +69,25 @@ public class SemiAutoController {
         return ResponseEntity.ok(Map.of("importId", importId));
     }
 
+    /**
+     * 轻量预览：列出某商品文件夹里已有的主图/详情/sku图绝对路径(不建context、不碰云端)。
+     * 前端拿路径经 /api/erp/local-image?path= 直接显示。入参 { folderPath }。
+     */
+    @PostMapping("/product-images")
+    public ResponseEntity<?> productImages(@RequestBody Map<String, Object> body) {
+        String folderPath = String.valueOf(body.getOrDefault("folderPath", ""));
+        File dir = new File(folderPath);
+        if (folderPath.isBlank() || !dir.isDirectory())
+            return ResponseEntity.badRequest().body(Map.of("error", "folderPath 无效"));
+        SemiAutoScan.Product prod = semiAutoService.scanProduct(dir);
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("main", semiAutoService.listImages(prod.mainImgDir()));
+        out.put("detail", semiAutoService.listImages(prod.detailImgDir()));
+        out.put("white", semiAutoService.listImages(prod.whiteImgDir()));
+        out.put("sku", semiAutoService.listImages(prod.skuImgDir()));
+        return ResponseEntity.ok(out);
+    }
+
     /** 轮询导入进度。出参 { phase, pct, done, error?, result?(done时的contextId等) }。 */
     @GetMapping("/import-progress/{importId}")
     public ResponseEntity<?> importProgress(@PathVariable String importId) {
