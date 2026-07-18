@@ -9,7 +9,9 @@ window.BatchMixin = {
     return {
       batch: {
         open: false,        // 区块折叠/展开
-        rootPath: '',
+        rootPath: '',       // 上传重建后的临时目录根路径(不再让用户粘贴)
+        folderName: '',     // 用户选的大文件夹名(显示用)
+        fileCount: 0,
         outcomes: [],
         busy: false,
         msg: '',
@@ -35,6 +37,37 @@ window.BatchMixin = {
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
       return d;
+    },
+    // 图形选大文件夹(webkitdirectory)：整棵树 base64 上传后端重建临时目录，拿回可扫描根路径塞 batch.rootPath。
+    // 应用是浏览器打开、非Electron，选择器拿不到绝对路径，故走上传重建(与风格迁移/导入同思路)。
+    batchPickFolder() {
+      const inp = document.createElement('input');
+      inp.type = 'file'; inp.multiple = true; inp.webkitdirectory = true;
+      inp.onchange = () => this._batchUploadTree([...inp.files]);
+      inp.click();
+    },
+    async _batchUploadTree(files) {
+      const imgs = files.filter(f => f.type && f.type.startsWith('image/'));
+      if (!imgs.length) { this.batchMsg('该文件夹没有图片', 'err'); return; }
+      this.batch.folderName = (imgs[0].webkitRelativePath || '').split('/')[0] || '';
+      this.batch.busy = true; this.batch.canRun = false; this.batch.outcomes = [];
+      this.batchMsg('上传大文件夹（' + imgs.length + ' 张图）到后端…', '');
+      try {
+        const payload = [];
+        for (const f of imgs) {
+          const b64 = await this._fileToB64(f);   // 复用导入流的 base64 读取
+          const ext = f.name.toLowerCase().endsWith('.png') ? 'png' : 'jpg';
+          payload.push({ path: f.webkitRelativePath || f.name, b64, ext });
+        }
+        const d = await this.batchApi('/api/semi-auto/upload-tree', { files: payload });
+        this.batch.rootPath = d.rootPath || '';
+        this.batch.fileCount = d.fileCount || 0;
+        this.batchMsg('✓ 已上传「' + this.batch.folderName + '」（' + this.batch.fileCount + ' 张图），点「预检」', 'ok');
+      } catch (e) {
+        this.batchMsg('上传失败：' + e.message, 'err');
+      } finally {
+        this.batch.busy = false;
+      }
     },
     async batchPreflight() {
       this.batch.busy = true;

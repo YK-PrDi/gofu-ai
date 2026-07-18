@@ -81,6 +81,46 @@ public class SemiAutoController {
         return ResponseEntity.ok(out);
     }
 
+    /**
+     * 图形选文件夹上传：批量流大文件夹整棵树(店铺/商品/角色目录/图) base64 上传，后端按原相对路径重建到临时目录，
+     * 返回可扫描的根路径，供 /preflight、/run 用(应用是浏览器打开、非Electron，选择器拿不到绝对路径，故走上传重建)。
+     * 入参 { files:[{ path:"店铺A/商品1/主图/01.jpg", b64, ext }] }。
+     */
+    @PostMapping("/upload-tree")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<?> uploadTree(@RequestBody Map<String, Object> body) {
+        Object raw = body.get("files");
+        if (!(raw instanceof List) || ((List<?>) raw).isEmpty())
+            return ResponseEntity.badRequest().body(Map.of("error", "files 为空"));
+        try {
+            java.nio.file.Path base = java.nio.file.Paths.get("batch-tmp", java.util.UUID.randomUUID().toString());
+            java.io.File baseDir = base.toFile();
+            baseDir.mkdirs();
+            String firstSeg = null;
+            int written = 0;
+            for (Object o : (List<Object>) raw) {
+                if (!(o instanceof Map)) continue;
+                Map<String, Object> m = (Map<String, Object>) o;
+                String rel = String.valueOf(m.getOrDefault("path", "")).replace('\\', '/');
+                String b64 = String.valueOf(m.getOrDefault("b64", ""));
+                if (rel.isBlank() || b64.isBlank()) continue;
+                // 防路径穿越：拒绝 .. 段
+                if (rel.contains("..")) return ResponseEntity.badRequest().body(Map.of("error", "非法路径：" + rel));
+                if (firstSeg == null) { int s = rel.indexOf('/'); firstSeg = s > 0 ? rel.substring(0, s) : rel; }
+                java.io.File dst = new java.io.File(baseDir, rel);
+                dst.getParentFile().mkdirs();
+                java.nio.file.Files.write(dst.toPath(), java.util.Base64.getDecoder().decode(b64));
+                written++;
+            }
+            if (written == 0) return ResponseEntity.badRequest().body(Map.of("error", "没有可写入的图片"));
+            // 可扫描根 = 临时目录/顶层文件夹名(webkitRelativePath 首段=用户选的大文件夹名)
+            String rootPath = new java.io.File(baseDir, firstSeg == null ? "" : firstSeg).getAbsolutePath();
+            return ResponseEntity.ok(Map.of("rootPath", rootPath, "fileCount", written));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", "上传重建失败：" + e.getMessage()));
+        }
+    }
+
     /** 把前端传的图数组解析成 UpImg 列表。 */
     @SuppressWarnings("unchecked")
     private List<com.gofu.local.service.listing.StyleImportService.UpImg> toUpImgs(Object raw) {

@@ -244,11 +244,12 @@
       <div v-show="batch.open" style="margin-top:10px">
         <div class="hint" style="margin-bottom:8px">
           目录约定：大文件夹 → 店铺名子目录（匹配「🏪店铺」里的店铺名）→ 商品文件夹 → 主图/详情/(sku可选)。
-          缺一不上（完整性强校验）。先在「🏪店铺」登录好对应店铺。
+          缺一不上（完整性强校验）。先在「🏪店铺」登录好对应店铺。点「选择大文件夹」图形选取（整棵树上传后端）。
         </div>
         <div class="field" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <input type="text" v-model="batch.rootPath" placeholder="粘贴大文件夹绝对路径（内含 店铺名/商品/主图·详情）"
-                 style="flex:1;min-width:340px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)" />
+          <button class="btn btn-ghost" @click="batchPickFolder" :disabled="batch.busy">📁 选择大文件夹</button>
+          <span v-if="batch.folderName" style="font-size:13px">已选：<b>{{ batch.folderName }}</b>
+            <span style="color:var(--text-faint)">（{{ batch.fileCount }} 张图已上传）</span></span>
           <button class="btn btn-ghost" @click="batchPreflight" :disabled="!batch.rootPath||batch.busy">预检</button>
           <button class="btn btn-primary" @click="batchRun" :disabled="!batch.canRun||batch.busy">开始批量上新</button>
         </div>

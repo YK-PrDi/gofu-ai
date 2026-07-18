@@ -81,3 +81,6 @@ docs/
 # 运行时产物(导入临时上传/生成资产)，不入库
 listing-tmp/
 sku-base/
+
+# 批量流图形选文件夹上传重建的临时目录
+batch-tmp/
