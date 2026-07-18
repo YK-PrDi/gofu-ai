@@ -12,7 +12,6 @@ window.BatchMixin = {
         rootPath: '',       // 上传重建后的临时目录根路径(不再让用户粘贴)
         folderName: '',     // 用户选的大文件夹名(显示用)
         fileCount: 0,
-        thumbs: {},         // 商品预览缩略图 data URL，key=店铺||商品
         outcomes: [],
         busy: false,
         msg: '',
@@ -52,24 +51,13 @@ window.BatchMixin = {
       if (!imgs.length) { this.batchMsg('该文件夹没有图片', 'err'); return; }
       this.batch.folderName = (imgs[0].webkitRelativePath || '').split('/')[0] || '';
       this.batch.busy = true; this.batch.canRun = false; this.batch.outcomes = [];
-      this.batch.thumbs = {};   // 每商品首张主图缩略图(data URL)，key=店铺||商品，前端预览用(不用后端存图)
       this.batchMsg('上传大文件夹（' + imgs.length + ' 张图）到后端…', '');
       try {
         const payload = [];
         for (const f of imgs) {
-          const rel = f.webkitRelativePath || f.name;
           const b64 = await this._fileToB64(f);   // 复用导入流的 base64 读取
           const ext = f.name.toLowerCase().endsWith('.png') ? 'png' : 'jpg';
-          payload.push({ path: rel, b64, ext });
-          // 顺带存缩略图：rel = 大文件夹/店铺/商品/角色目录/文件；主图目录首张作预览
-          const segs = rel.split('/');
-          if (segs.length >= 5) {
-            const roleDir = (segs[segs.length - 2] || '').toLowerCase();
-            if (roleDir.includes('主图') || roleDir.includes('main')) {
-              const key = segs[1] + '||' + segs[2];
-              if (!this.batch.thumbs[key]) this.batch.thumbs[key] = 'data:image/' + ext + ';base64,' + b64;
-            }
-          }
+          payload.push({ path: f.webkitRelativePath || f.name, b64, ext });
         }
         const d = await this.batchApi('/api/semi-auto/upload-tree', { files: payload });
         this.batch.rootPath = d.rootPath || '';
@@ -82,8 +70,46 @@ window.BatchMixin = {
         this.batch.busy = false;
       }
     },
-    // 取某 outcome 的预览缩略图(店铺||商品 匹配上传时存的首张主图)
-    batchThumb(o) { return (this.batch.thumbs || {})[o.shopName + '||' + o.productName] || ''; },
+    // 为某商品确保有 context：已建过直接返回;否则走 gen-sku(读本地图→建context+方案+快麦白底)。返回 contextId。
+    // 复用导入链,批量流每个商品(含齐全待上的本地直传品)都能进右侧 ctx 预览面板。
+    async _batchEnsureContext(o) {
+      if (o.contextId) return o.contextId;
+      const d = await this.batchApi('/api/semi-auto/gen-sku', { folderPath: o.folderPath });
+      if (!d.importId) throw new Error('未返回 importId');
+      while (true) {
+        await new Promise(res => setTimeout(res, 1500));
+        let t;
+        try { const r = await fetch('/api/semi-auto/import-progress/' + d.importId); t = await r.json(); }
+        catch (e) { continue; }
+        o.taskMsg = '建档 ' + (t.pct || 0) + '% · ' + (t.phase || '处理中…');
+        if (t.done) {
+          if (t.error) throw new Error(t.error);
+          o.contextId = (t.result && t.result.contextId) || '';
+          if (!o.contextId) throw new Error('未建出 contextId');
+          return o.contextId;
+        }
+      }
+    },
+    // 👁 预览：把该商品载入右侧 ctx 预览面板(主图/详情/SKU方案+布局全套)。无context先建。
+    async batchPreview(idx) {
+      const o = this.batch.outcomes[idx];
+      if (!o || !o.folderPath) { this.batchMsg('该商品无文件夹路径，无法预览', 'err'); return; }
+      if (this._batchGenBusy) { this.batchMsg('已有生成/预览在跑，请稍候(共用生图队列)', 'err'); return; }
+      this._batchGenBusy = true;
+      const prev = o.taskStatus; o.taskStatus = 'preview';
+      try {
+        const contextId = await this._batchEnsureContext(o);
+        this.contextId = contextId;
+        await this.loadContext();   // 载入右侧预览面板
+        o.taskStatus = prev || '';
+        o.taskMsg = '✓ 已在右侧预览（contextId=' + contextId.slice(0, 8) + '）';
+        this.batchMsg('已载入「' + (o.mainItem || o.productName) + '」到右侧预览面板', 'ok');
+      } catch (e) {
+        o.taskStatus = 'error'; o.taskMsg = '✗ 预览失败：' + e.message;
+      } finally {
+        this._batchGenBusy = false;
+      }
+    },
     async batchPreflight() {
       this.batch.canRun = false;
       try {
@@ -154,27 +180,12 @@ window.BatchMixin = {
     async batchGenSku(idx) {
       const o = this.batch.outcomes[idx];
       if (!o || !o.folderPath) { this.batchMsg('该商品无文件夹路径，无法生成', 'err'); return; }
-      if (this._batchGenBusy) { this.batchMsg('已有一个AI生成在跑，请等它完成(共用生图队列)', 'err'); return; }
+      if (this._batchGenBusy) { this.batchMsg('已有一个AI生成/预览在跑，请等它完成(共用生图队列)', 'err'); return; }
       this._batchGenBusy = true;
       o.taskStatus = 'gen'; o.taskMsg = 'AI生成中…（建档→拉白底→出方案）';
       try {
-        // 1) gen-sku 建 context+方案+标题(复用导入链)，轮询 import-progress 到 done 拿 contextId
-        const d = await this.batchApi('/api/semi-auto/gen-sku', { folderPath: o.folderPath });
-        if (!d.importId) throw new Error('未返回 importId');
-        let contextId = '';
-        while (true) {
-          await new Promise(res => setTimeout(res, 1500));
-          let t;
-          try { const r = await fetch('/api/semi-auto/import-progress/' + d.importId); t = await r.json(); }
-          catch (e) { continue; }
-          o.taskMsg = 'AI建档 ' + (t.pct || 0) + '% · ' + (t.phase || '处理中…');
-          if (t.done) {
-            if (t.error) throw new Error(t.error);
-            contextId = (t.result && t.result.contextId) || '';
-            break;
-          }
-        }
-        if (!contextId) throw new Error('未建出 contextId');
+        // 1) 确保有 context(复用 _batchEnsureContext:建context+方案+标题+快麦白底)
+        const contextId = await this._batchEnsureContext(o);
         // 2) 把该 context 载入工作台(复用 fillCostAndPrice/plans 需要工作台状态)，补生SKU图+定价
         this.contextId = contextId;
         await this.loadContext();
