@@ -131,7 +131,10 @@ window.BatchMixin = {
         .filter(x => x.o.status === 'sku_gen_available' && !x.o.taskStatus);
       if (!targets.length) return;
       this.batchMsg('自动为 ' + targets.length + ' 个缺图商品生成SKU图…（串行，见各行进度）', '');
-      for (const { i } of targets) {
+      // 先把待补生的都标"排队中"(去掉手动按钮的空闲态,让用户知道会自动跑、只是在等前一个)
+      targets.forEach(({ o }, k) => { if (k > 0) { o.taskStatus = 'queued'; o.taskMsg = '排队等待自动补生…'; } });
+      for (const { i, o } of targets) {
+        o.taskStatus = '';   // 轮到自己:清排队态,batchGenSku 内会置 'gen'
         try { await this.batchGenSku(i); } catch (e) { /* 单个失败已写回该行 */ }
       }
       this.batchMsg('批量自动流程完成（预览+缺图补生）。' + (this.settings.batchAutoList ? '已按设置自动上新。' : '未开自动上新，请核对后上。'), 'ok');

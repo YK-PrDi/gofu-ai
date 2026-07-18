@@ -267,7 +267,7 @@
                 <td>
                   {{ o.mainItem || o.productName }}
                   <div style="font-size:11px;color:var(--text-faint);margin-top:2px">主图{{ o.mainCount||0 }}·详情{{ o.detailCount||0 }}·sku{{ o.skuCount||0 }}</div>
-                  <button class="btn btn-ghost" style="margin-top:4px;padding:2px 8px;font-size:12px" @click="batchPreview(o._i)" :disabled="batch.busy||o.taskStatus==='gen'">👁 预览{{ o.taskStatus==='preview'?'中…':'（右侧看全套图）' }}</button>
+                  <button class="btn btn-ghost" style="margin-top:4px;padding:2px 8px;font-size:12px" @click="batchPreview(o._i)">👁 预览{{ o.taskStatus==='preview'?'中…':'（右侧看全套图）' }}</button>
                 </td>
                 <td>
                   <span class="store-tag" :class="o.taskStatus==='done'?'tag-ok':(o.taskStatus==='error'?'tag-err':batchStatusClass(o.status))">{{ batchStatusText(o.status) }}</span>
