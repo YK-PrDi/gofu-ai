@@ -129,12 +129,22 @@ window.BatchMixin = {
         const d = await this.batchApi('/api/semi-auto/preflight', { rootPath: this.batch.rootPath.trim() });
         this.batch.outcomes = d.outcomes || [];
         this.batch.canRun = this.batchReadyCount > 0;
-        this.batchMsg('预检完成：' + this.batchReadyCount + ' 个商品齐全可上新，其余见下方说明' + (this.batch.outcomes.length ? '。自动预览首个商品到右侧…' : ''), this.batch.canRun ? 'ok' : 'err');
-        // 上传后自动预览首个商品(载入右侧看已有主图/详情+方案)。非阻塞,失败不影响预检结果。
-        if (this.batch.outcomes.length) this.batchPreview(0).catch(() => {});
+        this.batchMsg('预检完成：' + this.batchReadyCount + ' 个商品齐全可上新，其余见下方说明', this.batch.canRun ? 'ok' : 'err');
+        // 上传后自动预览(默认开)。每个商品建context载入右侧,串行逐个(建context跑云端出方案,慢+费额度)。
+        // 关设置则不自动,仍可手点每行「👁预览」。非阻塞:后台跑,不挡预检结果显示。
+        if (this.batch.outcomes.length && this.settings.batchAutoPreview !== false) this._batchAutoPreviewAll();
       } catch (e) {
         this.batchMsg('预检失败：' + e.message, 'err');
       }
+    },
+    // 串行自动预览所有商品:逐个建context+载入右侧。最后停在最后一个;中途任一失败不影响其余。
+    async _batchAutoPreviewAll() {
+      for (let i = 0; i < this.batch.outcomes.length; i++) {
+        const o = this.batch.outcomes[i];
+        if (!o || o.contextId) continue;   // 已建过的跳过
+        try { await this.batchPreview(i); } catch (e) { /* 单个失败已写回该行,继续下一个 */ }
+      }
+      this.batchMsg('已自动预览全部 ' + this.batch.outcomes.length + ' 个商品(右侧停在最后一个,点任意行👁可回看)', 'ok');
     },
     async batchRun() {
       if (!confirm('确认对预检齐全的商品批量上新？将逐店逐商品串行操作真实商家后台。')) return;

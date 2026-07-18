@@ -396,6 +396,7 @@
           <label><input type="checkbox" v-model="settings.confirmBeforeListing" @change="saveSettings" /> 上新前二次确认</label>
           <label><input type="checkbox" v-model="settings.genAllPlansSku" @change="saveSettings" /> 补生全部方案的SKU图（默认只生当前方案，省额度）</label>
           <label><input type="checkbox" v-model="settings.batchAutoList" @change="saveSettings" /> 批量流「AI生成SKU图」后自动上新（默认关：只生图+定价，人工确认后上）</label>
+          <label><input type="checkbox" v-model="settings.batchAutoPreview" @change="saveSettings" /> 批量流预检后自动预览全部商品（默认开：逐个载入右侧；商品多时慢+费额度，可关）</label>
           <label><input type="checkbox" v-model="listingDryRun" /> 诊断模式(不提交)</label>
           <div class="hint" style="color:var(--text-faint)">
             ⓘ 以上开关仅对<b>手动上新</b>(本页「确认上新」)生效。
@@ -748,7 +749,7 @@ createApp({
       profitRate: 0.58,  // 利润率(=二级利润/价格)，后端反解百分比=0.93-利润率；默认58%(对应百分比0.35)
       erpRefreshing: false,
       listingDryRun: true, listingRunning: false, listingMsg: '', listingMsgType: '', listingLog: '',
-      settings: { reviewImages: true, confirmBeforeListing: true, genAllPlansSku: false, batchAutoList: false },
+      settings: { reviewImages: true, confirmBeforeListing: true, genAllPlansSku: false, batchAutoList: false, batchAutoPreview: true },
       styleTransfer: { styleId: '', running: false, msg: '', msgType: '' },   // 🎨 风格迁移
       imp: { open: false, folderName: '', groups: null, counts: { main: 0, detail: 0, white: 0, sku: 0 }, running: false, progress: 0, msg: '', msgType: '' },   // 📥 导入成品图建商品(webkitdirectory 选文件夹)
     };
