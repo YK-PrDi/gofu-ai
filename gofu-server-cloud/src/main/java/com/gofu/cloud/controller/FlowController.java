@@ -179,6 +179,10 @@ public class FlowController {
         String seriesPlan = "";   // 07.10#1 保留【总分析/系列文案规划】作全局共享上下文(原来被丢弃)
         try {
             String req = (customRequest != null && !customRequest.isBlank()) ? customRequest : autoCustomRequest(ctx);
+            // A3 跨次防同质化：每次生图注入一个随机【构图母题种子】——打乱6种机位母题分配到各张图的起始顺序。
+            // 人工流程"再生一套覆盖原来"时，首图(最关键)及各张的机位/构图母题与上一套不同，而非只换背景色。
+            // (组内差异化由 custom-analysis-user.txt 规则3b保证；这里解决的是跨次重生的雷同。)
+            req = req + "\n\n" + buildCompositionSeed(mainTotal);
             // 07.09#3 主图带画面卖点文案(withText=true)：羽刃主图有卖点标题/标签，本项目默认开启，自动化减人工。
             String raw = imageGen.analyzeCustomImagePrompts(req, List.of(new File(white)), mainTotal, true);
             // 返回：1段【总分析】+ N段图 prompt，--- 分隔。
@@ -293,6 +297,27 @@ public class FlowController {
         return "为【" + leaf + "】" + (main.isBlank() ? "" : "（" + main + "）")
                 + "生成一组电商营销主图，突出产品真实外观与质感。" + pts
                 + "多角度差异化拍摄，风格统一、高级、干净，适合拼多多主图。";
+    }
+
+    /** 6 种构图母题(与 custom-analysis-user.txt 规则3b 同源)，供跨次防同质化随机指派。 */
+    private static final String[] COMPOSITION_MOTIFS = {
+            "正面平视全身主图(产品占2/3居中)", "俯视45度桌面场景图(带道具环境)",
+            "侧面3/4角度特写(突出厚度/层次/材质)", "局部细节微距(关键结构/工艺/接口放大)",
+            "使用场景图(实际摆放环境/使用中状态)", "仰视或低角度气势图(突出体量/高度)"
+    };
+
+    /**
+     * A3 跨次防同质化种子：每次生图随机打乱 6 种构图母题的指派顺序，明确要求【第1张主图】用随机选中的母题，
+     * 使"再生一套覆盖原来"时首图机位/构图与上一套不同（而非只换背景色）。返回一段追加进分析 request 的指令。
+     */
+    private String buildCompositionSeed(int mainTotal) {
+        List<String> motifs = new ArrayList<>(Arrays.asList(COMPOSITION_MOTIFS));
+        Collections.shuffle(motifs, styleRandom);
+        int n = Math.min(mainTotal, motifs.size());
+        StringBuilder sb = new StringBuilder("【本次构图母题指派·必须遵守(每次重生都不同,防跨次同质化)】\n");
+        sb.append("请把下列机位母题按顺序分配给第 1..N 张主图，第1张主图务必用第一个母题，不得雷同上一次：\n");
+        for (int i = 0; i < n; i++) sb.append("第").append(i + 1).append("张 → ").append(motifs.get(i)).append("\n");
+        return sb.toString();
     }
 
     /**
