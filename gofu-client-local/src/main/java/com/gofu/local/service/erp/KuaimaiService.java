@@ -366,10 +366,22 @@ public class KuaimaiService {
      * 按 outerId/skuOuterId 从缓存取白底图 URL（M9-3 迁自 LY）。
      * SKU 级 skuPicPath 优先，缺则回退商品级 picPath；no_pic 视为无图。无图返回 null。
      */
-    @SuppressWarnings("unchecked")
     public String findWhiteImageUrl(String code) throws Exception {
         if (code == null || code.isBlank()) return null;
-        for (Map<String, Object> item : getAllSkuItemsCached()) {
+        String url = scanWhiteInCache(code, getAllSkuItemsCached());
+        // 首次没找到→可能是刚在快麦上传白底图但本地缓存旧(与 reverseSkuFromImages 同款问题)：
+        // 强制 reload 一次 ERP 缓存再查，避免"已上传却报无白底图"。
+        if (url == null) {
+            log.info("[白底图] 编码 {} 缓存未命中白底图，刷新一次 ERP 缓存后重试", code);
+            url = scanWhiteInCache(code, reloadSkuItems());
+        }
+        return url;
+    }
+
+    /** 在给定单品列表里按 code 找白底图 URL：SKU 级 skuPicPath 优先，回退商品级 picPath；no_pic 视为无图。 */
+    @SuppressWarnings("unchecked")
+    private String scanWhiteInCache(String code, List<Map<String, Object>> items) {
+        for (Map<String, Object> item : items) {
             List<Map<String, Object>> skus = (List<Map<String, Object>>) item.get("skus");
             if (skus != null) {
                 for (Map<String, Object> sk : skus) {

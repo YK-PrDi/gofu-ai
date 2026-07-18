@@ -477,6 +477,14 @@
         <span v-if="!ctx.visual.sellingPoints.length" class="hint">（无卖点）</span>
       </div>
 
+      <!-- 已加载商品的白底图(来自 ctx.visual.whiteImages,含快麦拉取/导入的)——原白底图区只认左栏录入态,加载态不显示 -->
+      <div v-if="(ctx.visual.whiteImages||[]).length" class="subhead">白底图（{{ ctx.visual.whiteImages.length }} 张·快麦/导入）</div>
+      <div v-if="(ctx.visual.whiteImages||[]).length" class="grid">
+        <div v-for="(k,i) in ctx.visual.whiteImages" :key="'cw'+k" class="cell" style="background:#fff">
+          <img v-if="signed[k]" :src="signed[k]" /><span v-else class="ph">加载中…</span>
+        </div>
+      </div>
+
       <div class="subhead" style="display:flex;align-items:center;justify-content:space-between">
         <span>主图</span>
         <button v-if="ctx.visual.mainImages.length" class="btn btn-ghost" style="padding:2px 10px;font-size:12px"
@@ -868,7 +876,7 @@ createApp({
       } catch (e) { this.setMsg('保存失败：' + e.message, 'err'); }
     },
     async resolveImages() {
-      const keys = [...(this.ctx.visual.mainImages || []), ...(this.ctx.visual.detailImages || []), ...this.skuImages];
+      const keys = [...(this.ctx.visual.mainImages || []), ...(this.ctx.visual.detailImages || []), ...(this.ctx.visual.whiteImages || []), ...this.skuImages];
       for (const key of keys) {
         if (!key || this.signed[key]) continue;
         // #1 一律走云端统一图片代理 /api/gen/img(经 cloudgw 转发到5020)：
