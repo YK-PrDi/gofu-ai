@@ -24,12 +24,15 @@ public class SemiAutoController {
     private final com.gofu.local.service.listing.ListingService listingService;
     private final com.gofu.local.service.listing.SemiAutoOrchestrator orchestrator;
     private final com.gofu.local.service.listing.StyleImportService styleImportService;
+    private final com.gofu.local.service.erp.KuaimaiService kuaimaiService;
 
     public SemiAutoController(SemiAutoService semiAutoService,
                               com.gofu.local.service.listing.StoreService storeService,
                               com.gofu.local.service.listing.ListingService listingService,
                               com.gofu.local.service.listing.SemiAutoOrchestrator orchestrator,
-                              com.gofu.local.service.listing.StyleImportService styleImportService) {
+                              com.gofu.local.service.listing.StyleImportService styleImportService,
+                              com.gofu.local.service.erp.KuaimaiService kuaimaiService) {
+        this.kuaimaiService = kuaimaiService;
         this.semiAutoService = semiAutoService;
         this.storeService = storeService;
         this.listingService = listingService;
@@ -83,8 +86,26 @@ public class SemiAutoController {
         Map<String, Object> out = new java.util.LinkedHashMap<>();
         out.put("main", semiAutoService.listImages(prod.mainImgDir()));
         out.put("detail", semiAutoService.listImages(prod.detailImgDir()));
-        out.put("white", semiAutoService.listImages(prod.whiteImgDir()));
+        List<String> localWhite = semiAutoService.listImages(prod.whiteImgDir());
+        out.put("white", localWhite);   // 本地白底图(绝对路径,前端经 local-image 显示)
         out.put("sku", semiAutoService.listImages(prod.skuImgDir()));
+        // 白底图兜底：本地无白底图时,按文件夹名编码段从快麦拉白底 URL(预览就出,不等AI生成)。
+        // 快麦白底是 pdd 图床 http URL,浏览器可直连,前端 whiteErp 原样显示。
+        if (localWhite.isEmpty()) {
+            List<String> whiteErp = new java.util.ArrayList<>();
+            String pn = dir.getName();
+            int dash = pn.replace('－', '-').indexOf('-');
+            String mainSeg = dash >= 0 ? pn.substring(dash + 1) : pn;
+            for (String seg : mainSeg.replace('＋', '+').split("\\+")) {
+                String code = seg.trim();
+                if (code.isEmpty()) continue;
+                try {
+                    String url = kuaimaiService.findWhiteImageUrl(code);
+                    if (url != null && !url.isBlank()) whiteErp.add(url);
+                } catch (Exception ignore) {}
+            }
+            if (!whiteErp.isEmpty()) out.put("whiteErp", whiteErp);
+        }
         return ResponseEntity.ok(out);
     }
 

@@ -111,15 +111,30 @@ window.BatchMixin = {
       try {
         const d = await this.batchApi('/api/semi-auto/product-images', { folderPath: o.folderPath });
         const toUrl = p => '/api/erp/local-image?path=' + encodeURIComponent(p);
+        // 白底图=本地(local-image代理) + 快麦兜底(whiteErp,http原样,浏览器直连pdd图床)
+        const white = (d.white || []).map(toUrl).concat(d.whiteErp || []);
         this.batch.preview = {
           name: (o.mainItem || o.productName), shop: o.shopName, category: o.category,
           main: (d.main || []).map(toUrl), detail: (d.detail || []).map(toUrl),
-          white: (d.white || []).map(toUrl), sku: (d.sku || []).map(toUrl),
+          white, sku: (d.sku || []).map(toUrl),
         };
-        this.batchMsg('预览「' + this.batch.preview.name + '」：主图' + (d.main||[]).length + '·详情' + (d.detail||[]).length + '·白底' + (d.white||[]).length + '·sku' + (d.sku||[]).length, 'ok');
+        this.batchMsg('预览「' + this.batch.preview.name + '」：主图' + (d.main||[]).length + '·详情' + (d.detail||[]).length + '·白底' + white.length + '·sku' + (d.sku||[]).length, 'ok');
       } catch (e) {
         this.batchMsg('预览失败：' + e.message, 'err');
       }
+    },
+    // 全自动补生:对所有"缺图·可AI生成"的商品串行跑 batchGenSku(建context→补生SKU图→定价→按设置上新)。
+    // 不用人工逐个点。串行(共用生图队列);单个失败不影响其余。
+    async _batchAutoGenAll() {
+      const targets = this.batch.outcomes
+        .map((o, i) => ({ o, i }))
+        .filter(x => x.o.status === 'sku_gen_available' && !x.o.taskStatus);
+      if (!targets.length) return;
+      this.batchMsg('自动为 ' + targets.length + ' 个缺图商品生成SKU图…（串行，见各行进度）', '');
+      for (const { i } of targets) {
+        try { await this.batchGenSku(i); } catch (e) { /* 单个失败已写回该行 */ }
+      }
+      this.batchMsg('批量自动流程完成（预览+缺图补生）。' + (this.settings.batchAutoList ? '已按设置自动上新。' : '未开自动上新，请核对后上。'), 'ok');
     },
     async batchPreflight() {
       this.batch.canRun = false;
@@ -128,8 +143,11 @@ window.BatchMixin = {
         this.batch.outcomes = d.outcomes || [];
         this.batch.canRun = this.batchReadyCount > 0;
         this.batchMsg('预检完成：' + this.batchReadyCount + ' 个商品齐全可上新，其余见下方说明', this.batch.canRun ? 'ok' : 'err');
-        // 轻量预览(零云端)：自动预览首个商品;点任意行👁瞬间切换。默认开,设置可关。
-        if (this.batch.outcomes.length && this.settings.batchAutoPreview !== false) this.batchPreview(0);
+        // 全自动链(默认开)：轻量预览首品(零云端) → 缺图商品自动AI补生(不用手点)。设置可关。
+        if (this.batch.outcomes.length) {
+          if (this.settings.batchAutoPreview !== false) await this.batchPreview(0);
+          if (this.settings.batchAutoGen !== false) this._batchAutoGenAll();
+        }
       } catch (e) {
         this.batchMsg('预检失败：' + e.message, 'err');
       }
@@ -226,6 +244,11 @@ window.BatchMixin = {
         await this.fillCostAndPrice();
         const zero = (this.plans[0]?.items || []).filter(it => !(it.groupPrice > 0)).length;
         if (zero > 0) { o.taskStatus = 'error'; o.taskMsg = '✗ 有 ' + zero + ' 个SKU定不出价(快麦缺进价)，请补进价后重试'; return; }
+        // 补生+定价成功→清掉预检旧的"缺图"文案(#4:那是补生前的,已过时),并把新SKU图刷进预览
+        o.missing = (o.missing || []).filter(m => !m.includes('缺图'));
+        if (this.batch.preview && this.batch.preview.name === (o.mainItem || o.productName)) {
+          this.batch.preview.sku = (this.skuImages || []).map(k => this.signed[k]).filter(Boolean);
+        }
         // 3) 按设置决定是否自动上新
         if (!this.settings.batchAutoList) {
           o.taskStatus = 'done';

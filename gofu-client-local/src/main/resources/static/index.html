@@ -285,19 +285,6 @@
           齐全 {{ batchReadyCount }} / 共 {{ batch.outcomes.length }} 商品。
         </div>
 
-        <!-- 轻量预览区:点👁读该商品本地图直接显示(不建context/不碰云端)。主图/详情/白底/sku 全套。 -->
-        <div v-if="batch.preview" class="section" style="margin-top:12px;background:#f8fafc">
-          <h2 style="font-size:15px">👁 预览：{{ batch.preview.name }}
-            <span style="font-size:12px;color:var(--text-faint);font-weight:400">（{{ batch.preview.shop }} · {{ batch.preview.category }}）</span>
-          </h2>
-          <template v-for="grp in [['主图',batch.preview.main],['详情图',batch.preview.detail],['白底图',batch.preview.white],['SKU图',batch.preview.sku]]" :key="grp[0]">
-            <div class="subhead">{{ grp[0] }}（{{ grp[1].length }}）</div>
-            <div v-if="grp[1].length" class="grid">
-              <div v-for="(u,i) in grp[1]" :key="grp[0]+i" class="cell" :style="grp[0]==='白底图'?'background:#fff':''"><img :src="u" /></div>
-            </div>
-            <div v-else class="empty" style="padding:6px">无{{ grp[0] }}{{ grp[0]==='SKU图'?'（可点该商品「AI生成SKU图」补齐）':'' }}</div>
-          </template>
-        </div>
       </div>
     </div>
 
@@ -410,7 +397,8 @@
           <label><input type="checkbox" v-model="settings.confirmBeforeListing" @change="saveSettings" /> 上新前二次确认</label>
           <label><input type="checkbox" v-model="settings.genAllPlansSku" @change="saveSettings" /> 补生全部方案的SKU图（默认只生当前方案，省额度）</label>
           <label><input type="checkbox" v-model="settings.batchAutoList" @change="saveSettings" /> 批量流「AI生成SKU图」后自动上新（默认关：只生图+定价，人工确认后上）</label>
-          <label><input type="checkbox" v-model="settings.batchAutoPreview" @change="saveSettings" /> 批量流预检后自动预览全部商品（默认开：逐个载入右侧；商品多时慢+费额度，可关）</label>
+          <label><input type="checkbox" v-model="settings.batchAutoPreview" @change="saveSettings" /> 批量流预检后自动预览首个商品（默认开：轻量读本地图，零额度）</label>
+          <label><input type="checkbox" v-model="settings.batchAutoGen" @change="saveSettings" /> 批量流预检后自动为缺图商品AI补生SKU图（默认开：串行走云端，费额度，可关）</label>
           <label><input type="checkbox" v-model="listingDryRun" /> 诊断模式(不提交)</label>
           <div class="hint" style="color:var(--text-faint)">
             ⓘ 以上开关仅对<b>手动上新</b>(本页「确认上新」)生效。
@@ -428,6 +416,19 @@
 
      <!-- 右栏：预览 -->
      <div class="col-right">
+      <!-- 批量流轻量预览(读本地图/快麦白底直显,零云端)。点某商品👁载入这里,主图/详情/白底/SKU全套。 -->
+      <div v-if="batch.preview" class="section" style="background:#f8fafc">
+        <h2 style="font-size:15px">👁 批量预览：{{ batch.preview.name }}
+          <span style="font-size:12px;color:var(--text-faint);font-weight:400">（{{ batch.preview.shop }} · {{ batch.preview.category }}）</span>
+        </h2>
+        <template v-for="grp in [['主图',batch.preview.main],['详情图',batch.preview.detail],['白底图',batch.preview.white],['SKU图',batch.preview.sku]]" :key="grp[0]">
+          <div class="subhead">{{ grp[0] }}（{{ grp[1].length }}）</div>
+          <div v-if="grp[1].length" class="grid">
+            <div v-for="(u,i) in grp[1]" :key="grp[0]+i" class="cell" :style="grp[0]==='白底图'?'background:#fff':''"><img :src="u" /></div>
+          </div>
+          <div v-else class="empty" style="padding:6px">无{{ grp[0] }}{{ grp[0]==='SKU图'?'（自动补生中或缺白底图）':'' }}</div>
+        </template>
+      </div>
       <!-- 白底图预览（选主件即自动拉取，缺图提示导入）——独立于生成结果，先于 ctx 显示 -->
       <div v-if="mainCodes.length || entry.whites.length" class="section">
         <h2>产品白底图</h2>
@@ -763,7 +764,7 @@ createApp({
       profitRate: 0.58,  // 利润率(=二级利润/价格)，后端反解百分比=0.93-利润率；默认58%(对应百分比0.35)
       erpRefreshing: false,
       listingDryRun: true, listingRunning: false, listingMsg: '', listingMsgType: '', listingLog: '',
-      settings: { reviewImages: true, confirmBeforeListing: true, genAllPlansSku: false, batchAutoList: false, batchAutoPreview: true },
+      settings: { reviewImages: true, confirmBeforeListing: true, genAllPlansSku: false, batchAutoList: false, batchAutoPreview: true, batchAutoGen: true },
       styleTransfer: { styleId: '', running: false, msg: '', msgType: '' },   // 🎨 风格迁移
       imp: { open: false, folderName: '', groups: null, counts: { main: 0, detail: 0, white: 0, sku: 0 }, running: false, progress: 0, msg: '', msgType: '' },   // 📥 导入成品图建商品(webkitdirectory 选文件夹)
     };
