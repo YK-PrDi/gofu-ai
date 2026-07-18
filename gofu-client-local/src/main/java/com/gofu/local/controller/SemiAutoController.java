@@ -55,6 +55,20 @@ public class SemiAutoController {
         return ResponseEntity.ok(Map.of("importId", importId));
     }
 
+    /**
+     * 批量流"缺图·可AI生成"：给一个商品文件夹(本地绝对路径)走导入链补生SKU图(复用 importAsync)。
+     * 入参 { folderPath }，返回 importId，前端复用 /import-progress 轮询。
+     */
+    @PostMapping("/gen-sku")
+    public ResponseEntity<?> genSku(@RequestBody Map<String, Object> body) {
+        String folderPath = String.valueOf(body.getOrDefault("folderPath", ""));
+        if (folderPath.isBlank() || !new File(folderPath).isDirectory())
+            return ResponseEntity.badRequest().body(Map.of("error", "folderPath 无效：" + folderPath));
+        String importId = java.util.UUID.randomUUID().toString();
+        styleImportService.importAsyncFromFolder(importId, folderPath);
+        return ResponseEntity.ok(Map.of("importId", importId));
+    }
+
     /** 轮询导入进度。出参 { phase, pct, done, error?, result?(done时的contextId等) }。 */
     @GetMapping("/import-progress/{importId}")
     public ResponseEntity<?> importProgress(@PathVariable String importId) {

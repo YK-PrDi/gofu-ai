@@ -42,8 +42,22 @@ public class SemiAutoOrchestrator {
 
     /** 单商品的编排结果（供前端展示：上新了/被拦了/为什么）。 */
     public record ProductOutcome(
-            String shopName, String productName, String status,   // listing_started / blocked / shop_unmatched / not_logged_in
-            String taskId, List<String> missing) {}
+            String shopName, String productName, String status,   // listing_started / blocked / shop_unmatched / not_logged_in / sku_gen_available
+            String taskId, List<String> missing,
+            String category, String mainItem,                     // 文件夹名解析出的品类/主件名(前端分列显示)
+            int mainCount, int detailCount, int skuCount,          // 各角色目录图片数
+            String folderPath) {}                                 // 商品文件夹绝对路径(供 sku_gen_available 触发AI补生)
+
+    /** 组 ProductOutcome：从 prod 解析品类/主件名、数各目录图片数，避免多处构造重复。 */
+    private ProductOutcome oc(SemiAutoScan.ShopGroup shop, SemiAutoScan.Product prod,
+                              String status, String taskId, List<String> missing) {
+        FolderMeta m = parseFolderName(prod.name());
+        int mc = semiAutoService.listImages(prod.mainImgDir()).size();
+        int dc = semiAutoService.listImages(prod.detailImgDir()).size();
+        int sc = semiAutoService.listImages(prod.skuImgDir()).size();
+        return new ProductOutcome(shop.shopName(), prod.name(), status, taskId, missing,
+                m.category(), m.productName(), mc, dc, sc, prod.path());
+    }
 
     /**
      * 预检（dry）：只扫描+校验，不真上新。返回每商品的 outcome，让用户先看齐不齐、店铺匹没匹配。
@@ -71,14 +85,14 @@ public class SemiAutoOrchestrator {
             for (SemiAutoScan.Product prod : shop.products()) {
                 // 1) 店铺未匹配 stores.json → 无法上新
                 if (!shop.matched()) {
-                    outcomes.add(new ProductOutcome(shop.shopName(), prod.name(), "shop_unmatched", null,
+                    outcomes.add(oc(shop, prod, "shop_unmatched", null,
                             List.of("店铺「" + shop.shopName() + "」未在 stores.json 匹配，请先在半自动页新增/登录该店铺")));
                     continue;
                 }
                 // 2) 该店未登录（无 cookie）→ 无法上新
                 String cookiesPath = storeService.cookiesPathOf(shop.profile());
                 if (!new java.io.File(cookiesPath).isFile()) {
-                    outcomes.add(new ProductOutcome(shop.shopName(), prod.name(), "not_logged_in", null,
+                    outcomes.add(oc(shop, prod, "not_logged_in", null,
                             List.of("店铺「" + shop.shopName() + "」未登录，请先在半自动页登录")));
                     continue;
                 }
@@ -86,7 +100,7 @@ public class SemiAutoOrchestrator {
                 //    会拖到 Playwright 提交才炸。前置拦下,别静默放行上残品。
                 FolderMeta meta0 = parseFolderName(prod.name());
                 if (meta0.category() == null || meta0.category().isBlank()) {
-                    outcomes.add(new ProductOutcome(shop.shopName(), prod.name(), "blocked", null,
+                    outcomes.add(oc(shop, prod, "blocked", null,
                             List.of("商品文件夹名「" + prod.name() + "」缺『品类-』前缀，无法确定拼多多类目/属性。请按「品类-主件名」命名(如 锅盖架-圣诞树收纳架)")));
                     continue;
                 }
@@ -98,34 +112,48 @@ public class SemiAutoOrchestrator {
                 //  · 对不上的 → 明确报"请按 ERP 编码规范命名"。这样"人工只选大文件夹"才真能自动上新。
                 List<String> nameHints = new ArrayList<>();
                 if (skus.isEmpty()) {
-                    // 反推名字来源:SKU 图名(最准) → 缺则文件夹名「品类-」后按 + 拆的段(用户约定:编码/人话混用)。
-                    List<String> revNames = null;
-                    if (prod.skuImgDir() != null && !prod.skuImgDir().isBlank()) {
-                        List<String> skuImgs = semiAutoService.listImages(prod.skuImgDir());
-                        if (!skuImgs.isEmpty()) revNames = skuImgs;
-                    }
-                    if (revNames == null) {   // 无 SKU 图目录 → 拿文件夹名的 + 段兜底(命中才用,人话名会未命中→退回报命名提示)
-                        List<String> segs = splitCodeSegments(parseFolderName(prod.name()).productName());
-                        if (!segs.isEmpty()) revNames = segs;
-                    }
-                    if (revNames != null) {
-                        List<Map<String, Object>> rows = semiAutoService.reverseSkuFromImages(revNames, "架类");
+                    // 反推改跨源补齐(与导入流同款)：合并【sku图名 ∪ 文件夹名「品类-」后+段】一次反推、按编码去重。
+                    // 修:原来"有sku图目录就只用sku图名、不 fallback 文件夹名段"——sku图名是UUID(导出重命名)反推不出时，
+                    //    文件夹名里的合法编码(如 GF-灰色-099)被跳过→整个商品被拦。合并后 UUID 图名不命中也能靠文件夹名段补。
+                    List<String> skuImgFiles = new ArrayList<>();
+                    if (prod.skuImgDir() != null && !prod.skuImgDir().isBlank())
+                        skuImgFiles = semiAutoService.listImages(prod.skuImgDir());
+                    java.util.LinkedHashSet<String> revNames = new java.util.LinkedHashSet<>(skuImgFiles);
+                    revNames.addAll(splitCodeSegments(parseFolderName(prod.name()).productName()));
+                    if (!revNames.isEmpty()) {
+                        List<Map<String, Object>> rows = semiAutoService.reverseSkuFromImages(new ArrayList<>(revNames), "架类");
+                        // sku 图按文件名自然排序，供命中后按序 1:1 挂图(图数=SKU数才挂)
+                        List<String> sortedSkuImgs = new ArrayList<>(skuImgFiles);
+                        sortedSkuImgs.sort(SemiAutoService::naturalCompare);
                         List<SemiAutoScan.SkuCheck> reversed = new ArrayList<>();
+                        java.util.Set<String> seenCodes = new java.util.LinkedHashSet<>();
                         for (Map<String, Object> r : rows) {
                             if (Boolean.TRUE.equals(r.get("matched"))) {
+                                String code = String.valueOf(r.get("code"));
+                                if (!seenCodes.add(code)) continue;   // 跨源去重:同编码只建一个
                                 double cost = r.get("cost") instanceof Number n ? n.doubleValue() : 0;
                                 double price = pricingService.autoGroupPrice(cost);   // 进价→默认利润率算售价
                                 if (price <= 0) {
                                     nameHints.add("SKU「" + r.get("name") + "」快麦无进价，无法自动定价，请在快麦补进价或预览页手动定价");
                                     continue;
                                 }
-                                reversed.add(new SemiAutoScan.SkuCheck(
-                                        String.valueOf(r.get("name")), String.valueOf(r.get("file")), price));
-                            } else {
-                                nameHints.add(String.valueOf(r.get("error")));
+                                reversed.add(new SemiAutoScan.SkuCheck(String.valueOf(r.get("name")), "", price));
                             }
                         }
+                        // sku 图按序 1:1 挂给反推出的 SKU(图数=SKU数才挂;数量不齐则不挂,交AI补生/后续)
+                        if (!reversed.isEmpty() && sortedSkuImgs.size() == reversed.size()) {
+                            List<SemiAutoScan.SkuCheck> withImg = new ArrayList<>();
+                            for (int k = 0; k < reversed.size(); k++)
+                                withImg.add(new SemiAutoScan.SkuCheck(reversed.get(k).name(), sortedSkuImgs.get(k), reversed.get(k).price()));
+                            reversed = withImg;
+                        } else if (!sortedSkuImgs.isEmpty() && reversed.size() != sortedSkuImgs.size()) {
+                            nameHints.add("有 " + sortedSkuImgs.size() + " 张 sku 图但命名不规范(非快麦编码)，无法对应到 "
+                                    + reversed.size() + " 个 SKU，未挂图。请把 sku 图按 ERP 编码命名，或删掉让系统 AI 补生。");
+                        }
                         if (!reversed.isEmpty()) skus = reversed;   // 反推成功的作为该商品 SKU
+                        else for (Map<String, Object> r : rows)   // 全没命中→报规范命名提示
+                            if (!Boolean.TRUE.equals(r.get("matched")) && r.get("error") != null)
+                                nameHints.add(String.valueOf(r.get("error")));
                     }
                 }
                 SemiAutoScan.Completeness c = semiAutoService.checkCompleteness(
@@ -137,12 +165,16 @@ public class SemiAutoOrchestrator {
                         missing.removeIf(m -> m.contains("没有任何 SKU"));
                         missing.addAll(nameHints);
                     }
-                    outcomes.add(new ProductOutcome(shop.shopName(), prod.name(), "blocked", null, missing));
+                    // #3：只缺 SKU 图(主图/详情齐、SKU 名价齐、仅缺图)→ 标"缺图·可AI生成"而非笼统"已拦"，
+                    //     前端据此显示「AI生成」按钮触发补生(走导入流补生链)。其余情况仍 blocked。
+                    boolean onlyMissingSkuImg = c.hasMain() && c.hasDetail()
+                            && c.skuTotal() > 0 && c.skuMissingInfo() == 0 && c.skuMissingImg() > 0;
+                    outcomes.add(oc(shop, prod, onlyMissingSkuImg ? "sku_gen_available" : "blocked", null, missing));
                     continue;
                 }
                 // 4) 齐全 → 组本地 config 上新（预检模式只标 ready 不真上）
                 if (!doListing) {
-                    outcomes.add(new ProductOutcome(shop.shopName(), prod.name(), "ready", null, List.of()));
+                    outcomes.add(oc(shop, prod, "ready", null, List.of()));
                     continue;
                 }
                 try {
@@ -150,11 +182,10 @@ public class SemiAutoOrchestrator {
                     firstListing = false;
                     ListingConfig cfg = buildConfig(prod, skus, shop);
                     String taskId = listingService.runListing(cfg, false);
-                    outcomes.add(new ProductOutcome(shop.shopName(), prod.name(), "listing_started", taskId, List.of()));
+                    outcomes.add(oc(shop, prod, "listing_started", taskId, List.of()));
                 } catch (Exception e) {
                     log.warn("[半自动] 商品「{}」上新启动失败: {}", prod.name(), e.getMessage());
-                    outcomes.add(new ProductOutcome(shop.shopName(), prod.name(), "blocked", null,
-                            List.of("上新启动失败：" + e.getMessage())));
+                    outcomes.add(oc(shop, prod, "blocked", null, List.of("上新启动失败：" + e.getMessage())));
                 }
             }
         }

@@ -255,17 +255,22 @@
         <div class="gmsg" :class="batch.msgType" style="margin-top:6px">{{ batch.msg }}</div>
 
         <table v-if="batch.outcomes.length">
-          <thead><tr><th>店铺</th><th>商品</th><th>状态</th><th>说明</th></tr></thead>
+          <thead><tr><th>店铺</th><th>商品品类</th><th>商品名</th><th>状态 · 说明</th></tr></thead>
           <tbody>
             <tr v-for="(o,i) in batch.outcomes" :key="i">
               <td>{{ o.shopName }}</td>
-              <td>{{ o.productName }}</td>
+              <td>{{ o.category || '—' }}</td>
+              <td>
+                {{ o.mainItem || o.productName }}
+                <div style="font-size:11px;color:var(--text-faint);margin-top:2px">主图{{ o.mainCount||0 }}·详情{{ o.detailCount||0 }}·sku{{ o.skuCount||0 }}</div>
+              </td>
               <td>
                 <span class="store-tag" :class="o.taskStatus==='done'?'tag-ok':(o.taskStatus==='error'?'tag-err':batchStatusClass(o.status))">{{ batchStatusText(o.status) }}</span>
+                <button v-if="o.status==='sku_gen_available' && o.taskStatus!=='gen'" class="btn btn-ghost" style="margin-left:6px;padding:2px 8px;font-size:12px" @click="batchGenSku(i)">🎨 AI生成SKU图</button>
                 <div v-if="o.taskMsg" style="font-size:12px;margin-top:2px" :class="o.taskStatus==='error'?'batch-miss':''">{{ o.taskMsg }}</div>
+                <div v-for="(m,j) in (o.missing||[])" :key="j" class="batch-miss" style="font-size:12px;margin-top:2px">· {{ m }}</div>
                 <div v-if="o.taskId" style="font-size:11px;color:var(--text-faint)">{{ o.taskId }}</div>
               </td>
-              <td><div v-for="(m,j) in (o.missing||[])" :key="j" class="batch-miss">· {{ m }}</div></td>
             </tr>
           </tbody>
         </table>

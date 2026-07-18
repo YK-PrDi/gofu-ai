@@ -81,6 +81,44 @@ public class StyleImportService {
 
     public Progress getProgress(String importId) { return importProgress.get(importId); }
 
+    /**
+     * 批量流复用入口：给一个商品文件夹(本地路径)走导入链(建context→快麦拉白底→云端出方案+补SKU图)。
+     * 目的:批量流"缺图·可AI生成"按钮复用已验证的导入补生逻辑，不重写生图。读本地图→base64→转 importAsync。
+     * @param folderPath 商品文件夹绝对路径(内含 主图/详情/白底图/sku 子目录)；folderName 取其目录名(供品类/主件解析)
+     */
+    public void importAsyncFromFolder(String importId, String folderPath) {
+        File dir = new File(folderPath);
+        String folderName = dir.getName();
+        List<UpImg> main = readDirImgs(dir, "主图", "main");
+        List<UpImg> detail = readDirImgs(dir, "详情", "detail");
+        List<UpImg> white = readDirImgs(dir, "白底", "white");
+        List<UpImg> sku = readDirImgs(dir, "sku", "款式", "颜色");
+        importAsync(importId, folderName, main, detail, white, sku);
+    }
+
+    /** 读商品文件夹下匹配任一关键词的子目录里的图，转 UpImg(base64)。找不到子目录返回空。 */
+    private List<UpImg> readDirImgs(File productDir, String... keywords) {
+        List<UpImg> out = new ArrayList<>();
+        File[] subs = productDir.listFiles(File::isDirectory);
+        if (subs == null) return out;
+        for (File sub : subs) {
+            String n = sub.getName().toLowerCase();
+            boolean hit = false;
+            for (String kw : keywords) if (n.contains(kw.toLowerCase())) { hit = true; break; }
+            if (!hit) continue;
+            File[] imgs = sub.listFiles(f -> f.isFile() && f.getName().toLowerCase().matches(".*\\.(jpe?g|png|webp)$"));
+            if (imgs == null) continue;
+            for (File f : imgs) {
+                try {
+                    String ext = f.getName().toLowerCase().endsWith(".png") ? "png" : "jpg";
+                    String b64 = Base64.getEncoder().encodeToString(Files.readAllBytes(f.toPath()));
+                    out.add(new UpImg(f.getName(), b64, ext));
+                } catch (Exception e) { log.warn("[批量补生] 读图失败 {}: {}", f.getName(), e.getMessage()); }
+            }
+        }
+        return out;
+    }
+
     /** 前端上传的一张图：name=原文件名(带尺寸/编码,用于反推与匹配)、b64=base64、ext=png/jpg。 */
     public record UpImg(String name, String b64, String ext) {}
 

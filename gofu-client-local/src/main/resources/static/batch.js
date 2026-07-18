@@ -96,12 +96,37 @@ window.BatchMixin = {
       return {
         ready: '齐全待上', listing_started: '已启动上新', blocked: '缺素材·已拦',
         shop_unmatched: '店铺未匹配', not_logged_in: '店铺未登录',
+        sku_gen_available: '缺图·可AI生成',
       }[s] || s;
     },
     batchStatusClass(s) {
       if (s === 'ready' || s === 'listing_started') return 'tag-ok';
       if (s === 'blocked') return 'tag-err';
       return 'tag-warn';
+    },
+    // #3 缺SKU图→AI生成:复用导入链(建context→快麦拉白底→云端出方案+补SKU图)。非阻塞,轮询 /import-progress。
+    async batchGenSku(idx) {
+      const o = this.batch.outcomes[idx];
+      if (!o || !o.folderPath) { this.batchMsg('该商品无文件夹路径，无法生成', 'err'); return; }
+      o.taskStatus = 'gen'; o.taskMsg = 'AI生成SKU图中…（建档→拉白底→出方案→补图）';
+      try {
+        const d = await this.batchApi('/api/semi-auto/gen-sku', { folderPath: o.folderPath });
+        if (!d.importId) throw new Error('未返回 importId');
+        // 轮询导入进度(复用 /import-progress)
+        while (true) {
+          await new Promise(res => setTimeout(res, 1500));
+          let t;
+          try { const r = await fetch('/api/semi-auto/import-progress/' + d.importId); t = await r.json(); }
+          catch (e) { continue; }
+          o.taskMsg = 'AI生成 ' + (t.pct || 0) + '% · ' + (t.phase || '处理中…');
+          if (t.done) {
+            if (t.error) { o.taskStatus = 'error'; o.taskMsg = '✗ 生成失败：' + t.error; return; }
+            o.taskStatus = 'done';
+            o.taskMsg = '✓ 已生成SKU图并建商品，可在「云端商品」加载后上新（SKU方案' + ((t.result && t.result.skuPlanCount) || 0) + '个）';
+            return;
+          }
+        }
+      } catch (e) { o.taskStatus = 'error'; o.taskMsg = '✗ 生成失败：' + e.message; }
     },
   },
 };
