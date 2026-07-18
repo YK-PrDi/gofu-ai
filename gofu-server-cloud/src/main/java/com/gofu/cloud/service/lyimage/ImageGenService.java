@@ -418,9 +418,15 @@ public class ImageGenService {
             File shelfBase = templateService.shelfRefFile(leaf, pick.group(), pick.ref());
             List<File> shelfRefs = new java.util.ArrayList<>();
 
-            // ── 路线2（锅盖架·落地组）：Java 先合成「架体+粗摆收纳物」构图底，作为最高权重参考图，
+            // ── 路线2（真·落地锅盖架专属）：Java 先合成「米奇款架体+锅盖/砧板收纳物」构图底，作最高权重参考图，
             //    prompt 强约束"保架体/收纳物 1:1、只理顺卡位遮挡与背景"。绕开 AI 重画架体必崩。
-            if (leaf.contains("锅盖架") && "落地".equals(pick.group())) {
+            //    ⚠️ 这条路 3 处写死锅盖架专属(米奇架体/锅盖砧板收纳物/米奇蝴蝶结prompt)，只适用真锅盖架。
+            //    其它落地架品种(树菜板架/沥水架等)品类名也叫「锅盖架」但实物不同，必须绕开这条、走下方通用整图AI
+            //    (白底图锁主体+品种prompt，与花洒同理)，否则会被贴成锅盖架(错图根因)。
+            //    判据：主件名/skuName 真提到"锅盖"才算真锅盖架。
+            String floorHint = (shelfSkuHint + " " + (skuName == null ? "" : skuName));
+            boolean isRealLidRack = floorHint.contains("锅盖");
+            if (leaf.contains("锅盖架") && "落地".equals(pick.group()) && isRealLidRack) {
                 try {
                     File rackImg = (shelfBase != null && shelfBase.isFile()) ? shelfBase
                             : templateService.assetByPath("base/shelf-落地锅盖架-米奇款.png");
@@ -442,10 +448,17 @@ public class ImageGenService {
                 }
             }
 
-            if (shelfRefs.isEmpty() && shelfBase != null && shelfBase.isFile()) shelfRefs.add(shelfBase);
+            // 参考图组装：
+            //  · 真锅盖架(route2已进shelfRefs) / 有配套预制图的品种 → 预制图作构图底(最高权重)+白底图锁主体。
+            //  · 但预制图是【具体品种实拍】(如锅盖架的"庆典小熊双层锅盖架.jpg")，对不匹配的品种(树菜板架)会把
+            //    实物画成锅盖架(错图根因)。故仅当【有真实白底图】时，不匹配品种应让白底图当唯一结构锚，不喂预制图。
+            //  · 判据：白底图存在且非真锅盖架路线 → 丢弃预制 shelfBase，只用白底图(与花洒同理:实物为准)。
+            boolean dropPresetRef = hasWhiteBg && !(leaf.contains("锅盖架") && "落地".equals(pick.group()) && isRealLidRack);
+            if (shelfRefs.isEmpty() && shelfBase != null && shelfBase.isFile() && !dropPresetRef) shelfRefs.add(shelfBase);
             if (hasWhiteBg) shelfRefs.add(whiteBgRef);
             else if (hasRef) shelfRefs.add(ref);
-            log.info("架类生图: 叶子={}, 组={}, 参考图={}({}), 白底={}", leaf, pick.group(), shelfBase != null, pick.ref(), hasWhiteBg);
+            log.info("架类生图: 叶子={}, 组={}, 预制参考图={}({}), 丢弃预制={}, 白底={}",
+                    leaf, pick.group(), shelfBase != null, pick.ref(), dropPresetRef, hasWhiteBg);
             Exception lastShelf = null;
             int maxBackoff = 4;
             for (int attempt = 0; attempt < keys.size() * (1 + maxBackoff); attempt++) {
