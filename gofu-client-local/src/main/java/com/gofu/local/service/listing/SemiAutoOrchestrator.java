@@ -46,7 +46,7 @@ public class SemiAutoOrchestrator {
             String taskId, List<String> missing,
             String category, String mainItem,                     // 文件夹名解析出的品类/主件名(前端分列显示)
             int mainCount, int detailCount, int skuCount,          // 各角色目录图片数
-            String folderPath) {}                                 // 商品文件夹绝对路径(供 sku_gen_available 触发AI补生)
+            String folderPath, String shopProfile) {}             // 商品文件夹绝对路径 + 店铺profile(供AI补生后从context上新到该店)
 
     /** 组 ProductOutcome：从 prod 解析品类/主件名、数各目录图片数，避免多处构造重复。 */
     private ProductOutcome oc(SemiAutoScan.ShopGroup shop, SemiAutoScan.Product prod,
@@ -56,7 +56,7 @@ public class SemiAutoOrchestrator {
         int dc = semiAutoService.listImages(prod.detailImgDir()).size();
         int sc = semiAutoService.listImages(prod.skuImgDir()).size();
         return new ProductOutcome(shop.shopName(), prod.name(), status, taskId, missing,
-                m.category(), m.productName(), mc, dc, sc, prod.path());
+                m.category(), m.productName(), mc, dc, sc, prod.path(), shop.profile());
     }
 
     /**

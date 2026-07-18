@@ -137,29 +137,72 @@ window.BatchMixin = {
       if (s === 'blocked') return 'tag-err';
       return 'tag-warn';
     },
-    // #3 缺SKU图→AI生成:复用导入链(建context→快麦拉白底→云端出方案+补SKU图)。非阻塞,轮询 /import-progress。
+    // #3 缺SKU图→AI生成:复用导入链。完整链=建context→快麦拉白底→出方案→【补生SKU图(step2)】→【定价】，
+    //    设置「batchAutoList」开=继续【从context上新到该店铺】;默认关=停在"已生图+定价"等人工。非阻塞,进度写回该行。
     async batchGenSku(idx) {
       const o = this.batch.outcomes[idx];
       if (!o || !o.folderPath) { this.batchMsg('该商品无文件夹路径，无法生成', 'err'); return; }
-      o.taskStatus = 'gen'; o.taskMsg = 'AI生成SKU图中…（建档→拉白底→出方案→补图）';
+      if (this._batchGenBusy) { this.batchMsg('已有一个AI生成在跑，请等它完成(共用生图队列)', 'err'); return; }
+      this._batchGenBusy = true;
+      o.taskStatus = 'gen'; o.taskMsg = 'AI生成中…（建档→拉白底→出方案）';
       try {
+        // 1) gen-sku 建 context+方案+标题(复用导入链)，轮询 import-progress 到 done 拿 contextId
         const d = await this.batchApi('/api/semi-auto/gen-sku', { folderPath: o.folderPath });
         if (!d.importId) throw new Error('未返回 importId');
-        // 轮询导入进度(复用 /import-progress)
+        let contextId = '';
         while (true) {
           await new Promise(res => setTimeout(res, 1500));
           let t;
           try { const r = await fetch('/api/semi-auto/import-progress/' + d.importId); t = await r.json(); }
           catch (e) { continue; }
-          o.taskMsg = 'AI生成 ' + (t.pct || 0) + '% · ' + (t.phase || '处理中…');
+          o.taskMsg = 'AI建档 ' + (t.pct || 0) + '% · ' + (t.phase || '处理中…');
           if (t.done) {
-            if (t.error) { o.taskStatus = 'error'; o.taskMsg = '✗ 生成失败：' + t.error; return; }
-            o.taskStatus = 'done';
-            o.taskMsg = '✓ 已生成SKU图并建商品，可在「云端商品」加载后上新（SKU方案' + ((t.result && t.result.skuPlanCount) || 0) + '个）';
-            return;
+            if (t.error) throw new Error(t.error);
+            contextId = (t.result && t.result.contextId) || '';
+            break;
           }
         }
-      } catch (e) { o.taskStatus = 'error'; o.taskMsg = '✗ 生成失败：' + e.message; }
+        if (!contextId) throw new Error('未建出 contextId');
+        // 2) 把该 context 载入工作台(复用 fillCostAndPrice/plans 需要工作台状态)，补生SKU图+定价
+        this.contextId = contextId;
+        await this.loadContext();
+        // 2a) 补生当前方案缺失的SKU图(step2 skuOnlyMissing)——白底图已由 gen-sku 从快麦拉好
+        const plan0 = (this.plans && this.plans[0]) || null;
+        const missImg = plan0 ? (plan0.items || []).filter(it => !it.imgDir).length : 0;
+        const hasWhite = (this.ctx?.visual?.whiteImages || []).length > 0;
+        if (missImg > 0 && hasWhite) {
+          o.taskMsg = '补生 ' + missImg + ' 张SKU图中…';
+          const r = await fetch('/api/flow/step2', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contextId, planIndex: 0, genDetail: false, genSku: true, skuOnlyMissing: true }) });
+          const sd = await r.json();
+          if (!sd.error && sd.taskId) { await this.pollFlowTask(sd.taskId, sd.total || 0, 2, 25); await this.loadContext(); }
+        } else if (missImg > 0 && !hasWhite) {
+          throw new Error('缺SKU图但无白底图可参考(快麦也没拉到)，无法补生');
+        }
+        // 2b) 定价(复用导入流 fillCostAndPrice)
+        o.taskMsg = '自动定价中…';
+        await this.fillCostAndPrice();
+        const zero = (this.plans[0]?.items || []).filter(it => !(it.groupPrice > 0)).length;
+        if (zero > 0) { o.taskStatus = 'error'; o.taskMsg = '✗ 有 ' + zero + ' 个SKU定不出价(快麦缺进价)，请补进价后重试'; return; }
+        // 3) 按设置决定是否自动上新
+        if (!this.settings.batchAutoList) {
+          o.taskStatus = 'done';
+          o.taskMsg = '✓ 已生图+定价(contextId=' + contextId.slice(0, 8) + ')。设置未开自动上新，请到「云端商品」核对后上新。';
+          return;
+        }
+        o.taskMsg = '从context上新到「' + o.shopName + '」…';
+        const lr = await fetch('/api/listing/from-context', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contextId, planIndex: 0, dryRun: false, storeProfile: o.shopProfile || '' }) });
+        const ld = await lr.json();
+        if (ld.error || !ld.taskId) throw new Error(ld.error || '上新未返回taskId');
+        o.taskId = ld.taskId;
+        this.batchPollTask(idx);   // 复用批量上新任务轮询，成败写回该行
+        o.taskMsg = '✓ 已启动上新，进度见下…';
+      } catch (e) {
+        o.taskStatus = 'error'; o.taskMsg = '✗ 生成失败：' + e.message;
+      } finally {
+        this._batchGenBusy = false;
+      }
     },
   },
 };

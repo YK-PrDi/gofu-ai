@@ -267,7 +267,8 @@
               </td>
               <td>
                 <span class="store-tag" :class="o.taskStatus==='done'?'tag-ok':(o.taskStatus==='error'?'tag-err':batchStatusClass(o.status))">{{ batchStatusText(o.status) }}</span>
-                <button v-if="o.status==='sku_gen_available' && o.taskStatus!=='gen'" class="btn btn-ghost" style="margin-left:6px;padding:2px 8px;font-size:12px" @click="batchGenSku(i)">🎨 AI生成SKU图</button>
+                <button v-if="o.status==='sku_gen_available' && !o.taskStatus" class="btn btn-ghost" style="margin-left:6px;padding:2px 8px;font-size:12px" @click="batchGenSku(i)">🎨 AI生成SKU图</button>
+                <button v-else-if="o.status==='sku_gen_available' && o.taskStatus==='error'" class="btn btn-ghost" style="margin-left:6px;padding:2px 8px;font-size:12px" @click="batchGenSku(i)">🔁 重试生成</button>
                 <div v-if="o.taskMsg" style="font-size:12px;margin-top:2px" :class="o.taskStatus==='error'?'batch-miss':''">{{ o.taskMsg }}</div>
                 <div v-for="(m,j) in (o.missing||[])" :key="j" class="batch-miss" style="font-size:12px;margin-top:2px">· {{ m }}</div>
                 <div v-if="o.taskId" style="font-size:11px;color:var(--text-faint)">{{ o.taskId }}</div>
@@ -389,6 +390,7 @@
           <label><input type="checkbox" v-model="settings.reviewImages" @change="saveSettings" /> 生图后必须人工过图</label>
           <label><input type="checkbox" v-model="settings.confirmBeforeListing" @change="saveSettings" /> 上新前二次确认</label>
           <label><input type="checkbox" v-model="settings.genAllPlansSku" @change="saveSettings" /> 补生全部方案的SKU图（默认只生当前方案，省额度）</label>
+          <label><input type="checkbox" v-model="settings.batchAutoList" @change="saveSettings" /> 批量流「AI生成SKU图」后自动上新（默认关：只生图+定价，人工确认后上）</label>
           <label><input type="checkbox" v-model="listingDryRun" /> 诊断模式(不提交)</label>
           <div class="hint" style="color:var(--text-faint)">
             ⓘ 以上开关仅对<b>手动上新</b>(本页「确认上新」)生效。
@@ -733,7 +735,7 @@ createApp({
       profitRate: 0.58,  // 利润率(=二级利润/价格)，后端反解百分比=0.93-利润率；默认58%(对应百分比0.35)
       erpRefreshing: false,
       listingDryRun: true, listingRunning: false, listingMsg: '', listingMsgType: '', listingLog: '',
-      settings: { reviewImages: true, confirmBeforeListing: true, genAllPlansSku: false },
+      settings: { reviewImages: true, confirmBeforeListing: true, genAllPlansSku: false, batchAutoList: false },
       styleTransfer: { styleId: '', running: false, msg: '', msgType: '' },   // 🎨 风格迁移
       imp: { open: false, folderName: '', groups: null, counts: { main: 0, detail: 0, white: 0, sku: 0 }, running: false, progress: 0, msg: '', msgType: '' },   // 📥 导入成品图建商品(webkitdirectory 选文件夹)
     };
