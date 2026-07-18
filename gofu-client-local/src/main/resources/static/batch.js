@@ -26,6 +26,17 @@ window.BatchMixin = {
         o => o.status === 'ready' || o.status === 'listing_started'
       ).length;
     },
+    // 按店铺分组呈现(保留原索引 _i 供预览/生成按钮定位到 batch.outcomes)
+    batchByShop() {
+      const groups = [];
+      const idx = {};
+      this.batch.outcomes.forEach((o, i) => {
+        const shop = o.shopName || '(未知店铺)';
+        if (!(shop in idx)) { idx[shop] = groups.length; groups.push({ shop, rows: [] }); }
+        groups[idx[shop]].rows.push({ ...o, _i: i });
+      });
+      return groups;
+    },
   },
   methods: {
     async batchApi(url, body) {
@@ -85,6 +96,7 @@ window.BatchMixin = {
         if (t.done) {
           if (t.error) throw new Error(t.error);
           o.contextId = (t.result && t.result.contextId) || '';
+          o.warnings = (t.result && t.result.warnings) || [];   // 缺白底图等提示,供前端显示
           if (!o.contextId) throw new Error('未建出 contextId');
           return o.contextId;
         }
@@ -100,10 +112,11 @@ window.BatchMixin = {
       try {
         const contextId = await this._batchEnsureContext(o);
         this.contextId = contextId;
-        await this.loadContext();   // 载入右侧预览面板
-        o.taskStatus = prev || '';
-        o.taskMsg = '✓ 已在右侧预览（contextId=' + contextId.slice(0, 8) + '）';
-        this.batchMsg('已载入「' + (o.mainItem || o.productName) + '」到右侧预览面板', 'ok');
+        await this.loadContext();   // 载入右侧预览面板(主图/详情已在此显示)
+        o.taskStatus = prev === 'gen' ? prev : '';
+        const warn = (o.warnings && o.warnings.length) ? ' ⚠' + o.warnings.join('；') : '';
+        o.taskMsg = '✓ 已在右侧预览' + warn;
+        this.batchMsg('已载入「' + (o.mainItem || o.productName) + '」到右侧预览面板' + warn, warn ? 'err' : 'ok');
       } catch (e) {
         o.taskStatus = 'error'; o.taskMsg = '✗ 预览失败：' + e.message;
       } finally {
@@ -116,7 +129,9 @@ window.BatchMixin = {
         const d = await this.batchApi('/api/semi-auto/preflight', { rootPath: this.batch.rootPath.trim() });
         this.batch.outcomes = d.outcomes || [];
         this.batch.canRun = this.batchReadyCount > 0;
-        this.batchMsg('预检完成：' + this.batchReadyCount + ' 个商品齐全可上新，其余见下方说明', this.batch.canRun ? 'ok' : 'err');
+        this.batchMsg('预检完成：' + this.batchReadyCount + ' 个商品齐全可上新，其余见下方说明' + (this.batch.outcomes.length ? '。自动预览首个商品到右侧…' : ''), this.batch.canRun ? 'ok' : 'err');
+        // 上传后自动预览首个商品(载入右侧看已有主图/详情+方案)。非阻塞,失败不影响预检结果。
+        if (this.batch.outcomes.length) this.batchPreview(0).catch(() => {});
       } catch (e) {
         this.batchMsg('预检失败：' + e.message, 'err');
       }
@@ -194,13 +209,19 @@ window.BatchMixin = {
         const missImg = plan0 ? (plan0.items || []).filter(it => !it.imgDir).length : 0;
         const hasWhite = (this.ctx?.visual?.whiteImages || []).length > 0;
         if (missImg > 0 && hasWhite) {
-          o.taskMsg = '补生 ' + missImg + ' 张SKU图中…';
+          o.taskMsg = '补生 ' + missImg + ' 张SKU图中…（进度见右侧）';
           const r = await fetch('/api/flow/step2', { method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ contextId, planIndex: 0, genDetail: false, genSku: true, skuOnlyMissing: true }) });
           const sd = await r.json();
-          if (!sd.error && sd.taskId) { await this.pollFlowTask(sd.taskId, sd.total || 0, 2, 25); await this.loadContext(); }
+          if (!sd.error && sd.taskId) {
+            // 借右侧生图进度条(genRunning+genProgress,pollFlowTask 会驱动)显示SKU补生进度
+            this.genRunning = true; this.genDone = false; this.genProgress = 2; this.genMsg = 'SKU补生中…';
+            try { await this.pollFlowTask(sd.taskId, sd.total || 0, 2, 98); this.genProgress = 100; this.genDone = true; }
+            finally { this.genRunning = false; }
+            await this.loadContext();
+          }
         } else if (missImg > 0 && !hasWhite) {
-          throw new Error('缺SKU图但无白底图可参考(快麦也没拉到)，无法补生');
+          throw new Error('缺SKU图但无白底图可参考(快麦也没拉到)，请在快麦补白底图后重试，或手动导入SKU图');
         }
         // 2b) 定价(复用导入流 fillCostAndPrice)
         o.taskMsg = '自动定价中…';

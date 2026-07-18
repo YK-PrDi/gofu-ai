@@ -208,16 +208,25 @@ public class StyleImportService {
         if (whiteKeys.isEmpty() && !mainSkus.isEmpty()) {
             pg.set("从快麦拉取白底图…", 36);
             int got = 0;
+            List<String> noWhiteCodes = new ArrayList<>();
             for (Map<String, Object> m : mainSkus) {
                 String code = String.valueOf(m.get("itemCode"));
                 try {
                     // 快麦白底图是 pdd 图床 http URL；云端 localizeWhite 支持 http URL(生图前自动下载)，
                     // 直接把 URL 存进 whiteImages 即可，无需本地转存 COS。
                     String url = kuaimaiService.findWhiteImageUrl(code);
-                    if (url == null || url.isBlank()) { log.info("[导入·白底图] 编码 {} 快麦无白底图", code); continue; }
+                    if (url == null || url.isBlank()) {
+                        log.info("[导入·白底图] 编码 {} 快麦无白底图", code);
+                        noWhiteCodes.add(code);
+                        continue;
+                    }
                     whiteKeys.add(url); got++;
                 } catch (Exception e) { log.warn("[导入·白底图] 编码 {} 拉取失败: {}", code, e.getMessage()); }
             }
+            // 缺白底图必须让前端看见:无白底→补生不出SKU图(整条自动链会停)。不再只写日志。
+            if (!noWhiteCodes.isEmpty())
+                unmatchedHints.add("快麦缺白底图的编码：" + String.join("、", noWhiteCodes)
+                        + "。无白底图无法自动补生SKU图，请在快麦补白底图后重试，或手动导入SKU图。");
             log.info("[导入·白底图] 快麦兜底拉取白底图 {}/{} 张(命中编码{}个)", got, mainSkus.size(), mainSkus.size());
         }
 

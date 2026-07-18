@@ -255,28 +255,32 @@
         </div>
         <div class="gmsg" :class="batch.msgType" style="margin-top:6px">{{ batch.msg }}</div>
 
-        <table v-if="batch.outcomes.length">
-          <thead><tr><th>店铺</th><th>商品品类</th><th>商品名</th><th>状态 · 说明</th></tr></thead>
-          <tbody>
-            <tr v-for="(o,i) in batch.outcomes" :key="i">
-              <td>{{ o.shopName }}</td>
-              <td>{{ o.category || '—' }}</td>
-              <td>
-                {{ o.mainItem || o.productName }}
-                <div style="font-size:11px;color:var(--text-faint);margin-top:2px">主图{{ o.mainCount||0 }}·详情{{ o.detailCount||0 }}·sku{{ o.skuCount||0 }}</div>
-                <button class="btn btn-ghost" style="margin-top:4px;padding:2px 8px;font-size:12px" @click="batchPreview(i)" :disabled="batch.busy||o.taskStatus==='gen'">👁 预览{{ o.taskStatus==='preview'?'中…':'（右侧看全套图）' }}</button>
-              </td>
-              <td>
-                <span class="store-tag" :class="o.taskStatus==='done'?'tag-ok':(o.taskStatus==='error'?'tag-err':batchStatusClass(o.status))">{{ batchStatusText(o.status) }}</span>
-                <button v-if="o.status==='sku_gen_available' && !o.taskStatus" class="btn btn-ghost" style="margin-left:6px;padding:2px 8px;font-size:12px" @click="batchGenSku(i)">🎨 AI生成SKU图</button>
-                <button v-else-if="o.status==='sku_gen_available' && o.taskStatus==='error'" class="btn btn-ghost" style="margin-left:6px;padding:2px 8px;font-size:12px" @click="batchGenSku(i)">🔁 重试生成</button>
-                <div v-if="o.taskMsg" style="font-size:12px;margin-top:2px" :class="o.taskStatus==='error'?'batch-miss':''">{{ o.taskMsg }}</div>
-                <div v-for="(m,j) in (o.missing||[])" :key="j" class="batch-miss" style="font-size:12px;margin-top:2px">· {{ m }}</div>
-                <div v-if="o.taskId" style="font-size:11px;color:var(--text-faint)">{{ o.taskId }}</div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+        <div v-if="batch.outcomes.length" v-for="g in batchByShop" :key="g.shop" style="margin-top:12px">
+          <div class="subhead" style="display:flex;align-items:center;gap:8px;margin-bottom:0">
+            🏪 {{ g.shop }} <span style="font-size:12px;color:var(--text-faint);font-weight:400">（{{ g.rows.length }} 个商品）</span>
+          </div>
+          <table>
+            <thead><tr><th>商品品类</th><th>商品名</th><th>状态 · 说明</th></tr></thead>
+            <tbody>
+              <tr v-for="o in g.rows" :key="o._i">
+                <td>{{ o.category || '—' }}</td>
+                <td>
+                  {{ o.mainItem || o.productName }}
+                  <div style="font-size:11px;color:var(--text-faint);margin-top:2px">主图{{ o.mainCount||0 }}·详情{{ o.detailCount||0 }}·sku{{ o.skuCount||0 }}</div>
+                  <button class="btn btn-ghost" style="margin-top:4px;padding:2px 8px;font-size:12px" @click="batchPreview(o._i)" :disabled="batch.busy||o.taskStatus==='gen'">👁 预览{{ o.taskStatus==='preview'?'中…':'（右侧看全套图）' }}</button>
+                </td>
+                <td>
+                  <span class="store-tag" :class="o.taskStatus==='done'?'tag-ok':(o.taskStatus==='error'?'tag-err':batchStatusClass(o.status))">{{ batchStatusText(o.status) }}</span>
+                  <button v-if="o.status==='sku_gen_available' && !o.taskStatus" class="btn btn-ghost" style="margin-left:6px;padding:2px 8px;font-size:12px" @click="batchGenSku(o._i)">🎨 AI生成SKU图</button>
+                  <button v-else-if="o.status==='sku_gen_available' && o.taskStatus==='error'" class="btn btn-ghost" style="margin-left:6px;padding:2px 8px;font-size:12px" @click="batchGenSku(o._i)">🔁 重试生成</button>
+                  <div v-if="o.taskMsg" style="font-size:12px;margin-top:2px" :class="o.taskStatus==='error'?'batch-miss':''">{{ o.taskMsg }}</div>
+                  <div v-for="(m,j) in (o.missing||[])" :key="j" class="batch-miss" style="font-size:12px;margin-top:2px">· {{ m }}</div>
+                  <div v-if="o.taskId" style="font-size:11px;color:var(--text-faint)">{{ o.taskId }}</div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
         <div v-if="batch.outcomes.length" class="hint" style="margin-top:6px">
           齐全 {{ batchReadyCount }} / 共 {{ batch.outcomes.length }} 商品。
         </div>
