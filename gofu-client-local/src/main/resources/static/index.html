@@ -250,15 +250,19 @@
           <button class="btn btn-ghost" @click="batchPickFolder" :disabled="batch.busy">📁 选择大文件夹</button>
           <span v-if="batch.folderName" style="font-size:13px">已选：<b>{{ batch.folderName }}</b>
             <span style="color:var(--text-faint)">（{{ batch.fileCount }} 张图已上传）</span></span>
-          <button class="btn btn-ghost" @click="batchPreflight" :disabled="!batch.rootPath||batch.busy">预检</button>
+          <button class="btn btn-ghost" @click="batchPreflight" :disabled="!batch.rootPath||batch.busy">重新预检</button>
           <button class="btn btn-primary" @click="batchRun" :disabled="!batch.canRun||batch.busy">开始批量上新</button>
         </div>
         <div class="gmsg" :class="batch.msgType" style="margin-top:6px">{{ batch.msg }}</div>
 
         <table v-if="batch.outcomes.length">
-          <thead><tr><th>店铺</th><th>商品品类</th><th>商品名</th><th>状态 · 说明</th></tr></thead>
+          <thead><tr><th>预览</th><th>店铺</th><th>商品品类</th><th>商品名</th><th>状态 · 说明</th></tr></thead>
           <tbody>
             <tr v-for="(o,i) in batch.outcomes" :key="i">
+              <td><div class="cell" style="width:52px;height:52px;aspect-ratio:auto">
+                <img v-if="batchThumb(o)" :src="batchThumb(o)" style="width:100%;height:100%;object-fit:cover;border-radius:4px" />
+                <span v-else class="ph" style="font-size:10px">无图</span>
+              </div></td>
               <td>{{ o.shopName }}</td>
               <td>{{ o.category || '—' }}</td>
               <td>

@@ -12,6 +12,7 @@ window.BatchMixin = {
         rootPath: '',       // 上传重建后的临时目录根路径(不再让用户粘贴)
         folderName: '',     // 用户选的大文件夹名(显示用)
         fileCount: 0,
+        thumbs: {},         // 商品预览缩略图 data URL，key=店铺||商品
         outcomes: [],
         busy: false,
         msg: '',
@@ -51,26 +52,39 @@ window.BatchMixin = {
       if (!imgs.length) { this.batchMsg('该文件夹没有图片', 'err'); return; }
       this.batch.folderName = (imgs[0].webkitRelativePath || '').split('/')[0] || '';
       this.batch.busy = true; this.batch.canRun = false; this.batch.outcomes = [];
+      this.batch.thumbs = {};   // 每商品首张主图缩略图(data URL)，key=店铺||商品，前端预览用(不用后端存图)
       this.batchMsg('上传大文件夹（' + imgs.length + ' 张图）到后端…', '');
       try {
         const payload = [];
         for (const f of imgs) {
+          const rel = f.webkitRelativePath || f.name;
           const b64 = await this._fileToB64(f);   // 复用导入流的 base64 读取
           const ext = f.name.toLowerCase().endsWith('.png') ? 'png' : 'jpg';
-          payload.push({ path: f.webkitRelativePath || f.name, b64, ext });
+          payload.push({ path: rel, b64, ext });
+          // 顺带存缩略图：rel = 大文件夹/店铺/商品/角色目录/文件；主图目录首张作预览
+          const segs = rel.split('/');
+          if (segs.length >= 5) {
+            const roleDir = (segs[segs.length - 2] || '').toLowerCase();
+            if (roleDir.includes('主图') || roleDir.includes('main')) {
+              const key = segs[1] + '||' + segs[2];
+              if (!this.batch.thumbs[key]) this.batch.thumbs[key] = 'data:image/' + ext + ';base64,' + b64;
+            }
+          }
         }
         const d = await this.batchApi('/api/semi-auto/upload-tree', { files: payload });
         this.batch.rootPath = d.rootPath || '';
         this.batch.fileCount = d.fileCount || 0;
-        this.batchMsg('✓ 已上传「' + this.batch.folderName + '」（' + this.batch.fileCount + ' 张图），点「预检」', 'ok');
+        this.batchMsg('✓ 已上传「' + this.batch.folderName + '」（' + this.batch.fileCount + ' 张图），预检中…', '');
+        await this.batchPreflight();   // 上传后自动预检，不用人工再点
       } catch (e) {
         this.batchMsg('上传失败：' + e.message, 'err');
       } finally {
         this.batch.busy = false;
       }
     },
+    // 取某 outcome 的预览缩略图(店铺||商品 匹配上传时存的首张主图)
+    batchThumb(o) { return (this.batch.thumbs || {})[o.shopName + '||' + o.productName] || ''; },
     async batchPreflight() {
-      this.batch.busy = true;
       this.batch.canRun = false;
       try {
         const d = await this.batchApi('/api/semi-auto/preflight', { rootPath: this.batch.rootPath.trim() });
@@ -79,8 +93,6 @@ window.BatchMixin = {
         this.batchMsg('预检完成：' + this.batchReadyCount + ' 个商品齐全可上新，其余见下方说明', this.batch.canRun ? 'ok' : 'err');
       } catch (e) {
         this.batchMsg('预检失败：' + e.message, 'err');
-      } finally {
-        this.batch.busy = false;
       }
     },
     async batchRun() {
