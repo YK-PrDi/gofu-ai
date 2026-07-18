@@ -550,15 +550,22 @@ public class ImageGenService {
                     prompt = edit.replace("{{colorName}}", colorNm)
                                  .replace("{{bgStyle}}", bgStyle)
                                  .replace("{{accInfo}}", accInfo);
+                    // 背景基调跟主图:基准图自带固定色背景(如科技蓝)会被img2img原样保留,与本商品主图基调不符。
+                    // 有主图分析出的 bgStyle 时,强指令用该基调、明确不要沿用基准图背景色,让SKU与主图同调。
+                    if (bgStyle != null && !bgStyle.isBlank()) {
+                        prompt += "\n\n【背景基调·必须与商品主图一致】背景色调、光影、氛围严格采用：" + bgStyle
+                                + "。**不要沿用基准图自带的背景颜色**(如科技蓝/固定影棚色),只借基准图的构图版式,背景基调换成这里指定的。";
+                    }
                     refs.add(baseImg);
                     if (hasWhiteBg) refs.add(whiteBgRef);
+                    if (hasRef) refs.add(ref);   // 主图进refs作背景基调参考(原来只在useMainBg时进,致SKU基调脱离主图)
                     // 精简参考图：只喂滤芯白底图（装柄用），底座/软管不喂 AI（它们只用于 Java 贴配件卡），避免多图拖慢/超时
                     for (int k = 0; k < accFiles.size(); k++) if ("滤芯".equals(accLabels.get(k))) { refs.add(accFiles.get(k)); break; }
                     if (Boolean.TRUE.equals(tpl.get("useExplodeRef"))) {
                         File er = templateService.explodeRefFile();
                         if (er != null && er.isFile()) refs.add(er);  // 拆解结构参考，锁内部结构
                     }
-                    if (Boolean.TRUE.equals(tpl.get("useMainBg")) && hasRef) refs.add(ref);
+                    // (主图 ref 已在上方无条件加入作背景基调参考,不再按 useMainBg 重复加)
                     if (Boolean.TRUE.equals(tpl.get("usePortraitImg"))) {
                         File portrait = portraitRefFile();
                         if (portrait != null && portrait.isFile()) refs.add(portrait);
