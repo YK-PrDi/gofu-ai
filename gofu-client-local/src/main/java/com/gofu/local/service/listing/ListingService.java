@@ -123,6 +123,12 @@ public class ListingService {
                         } else if (line.startsWith("ERROR:")) {
                             lastError[0] = line.substring(6);
                             task.addResult(Map.of("type", "error", "message", line.substring(6)));
+                        } else if (line.startsWith("CAPTCHA:")) {
+                            // 滑块/验证码人工介入：脚本已暂停等人工划过，这里推前端醒目提示+响铃提醒运营来处理。
+                            String msg = line.substring(8);
+                            task.addResult(Map.of("type", "captcha", "message", msg));
+                            log.warn("[需人工] 触发滑块验证，等待人工在浏览器窗口完成: {}", msg);
+                            try { java.awt.Toolkit.getDefaultToolkit().beep(); } catch (Exception ignore) {}
                         } else if (!line.isBlank()) {
                             task.addResult(Map.of("type", "log", "message", line));
                         }

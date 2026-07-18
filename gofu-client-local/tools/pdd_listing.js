@@ -67,6 +67,42 @@ function log(msg) {
     console.log(`LOG:${msg}`);
 }
 
+// ── 滑块/验证码人工介入（反风控铁律：新增只读检测+等待，绝不改 humanClick/humanType/cookie/UA 等既有逻辑）──
+// 只读扫描页面是否出现拼多多风控滑块/验证浮层。命中特征即返回 true，绝不点击/操作它（滑块要人工划）。
+async function detectCaptcha(page) {
+    try {
+        return await page.evaluate(() => {
+            // 1) 验证类 iframe（拼多多/通用风控常用）
+            const ifr = document.querySelector('iframe[src*="verify"],iframe[src*="captcha"],iframe[src*="risk"],iframe[src*="/vc/"]');
+            if (ifr && ifr.offsetParent !== null) return true;
+            // 2) 滑块容器/文案（可见才算）
+            const nc = document.querySelector('.nc_iconfont,.nc-container,[class*="slider"],[class*="Slider"],[id*="captcha"],[class*="captcha"],[class*="Captcha"]');
+            if (nc && nc.offsetParent !== null) return true;
+            // 3) 提示文案（拖动/滑块/完成验证/拖拽），限可见元素
+            const kw = /拖动|滑块|完成验证|拖拽滑块|向右滑|安全验证|请完成/;
+            for (const el of document.querySelectorAll('div,span,p')) {
+                if (el.offsetParent !== null && el.children.length === 0 && kw.test(el.textContent || '')) return true;
+            }
+            return false;
+        });
+    } catch (e) { return false; }   // 检测本身出错不阻断主流程
+}
+
+// 检到滑块 → 输出 CAPTCHA: 让 Java 弹桌面提醒 + 响铃 → 轮询等人工划过(浮层消失)后自动续跑。
+// 无反向 stdin 通道，故靠自轮询恢复（与现有 waitForFunction 范式一致）。默认最多等 10 分钟。
+async function waitCaptchaCleared(page, whereTag) {
+    if (!(await detectCaptcha(page))) return;
+    console.log(`CAPTCHA:检测到滑块/验证(${whereTag || ''})，请在浏览器窗口手动完成验证，脚本会自动继续`);
+    let beeped = 0;
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (Date.now() < deadline) {
+        if (beeped < 6) { try { process.stdout.write('\x07'); } catch (e) {} beeped++; }   // 终端响铃兜底提醒
+        await sleep(2500);
+        if (!(await detectCaptcha(page))) { log('滑块验证已通过，继续上新'); return; }
+    }
+    error('滑块验证等待超时（10分钟未完成），请重试');   // 超时按失败退出，不硬闯
+}
+
 /**
  * 带重试的页面跳转：应对偶发网络/代理抖动（ERR_PROXY_CONNECTION_FAILED、超时、连接重置）。
  * 首次失败不立即放弃——退避后重试（默认 3 次）。这是"多试几次"的健壮性，非反风控逻辑改动。
@@ -504,6 +540,7 @@ async function main() {
             const cookies = await context.cookies();
             fs.writeFileSync(cookiesPath, JSON.stringify(cookies, null, 2));
             log('登录成功，cookies 已保存到: ' + cookiesPath);
+            await waitCaptchaCleared(page, '登录后');   // 登录是滑块高发点
             if (loginOnly) {
                 // 登录成功后「尽力」抓店铺名回填（只读，不碰登录/反风控逻辑）。
                 // 不同店铺后台布局不一，抓不到不影响登录成功——Java 侧回退占位名。
@@ -581,6 +618,7 @@ async function main() {
         log('发布页: ' + page.url());
         // 关闭可能出现的弹窗
         await closePddPopups();
+        await waitCaptchaCleared(page, '进入发品页');   // 频繁跳转后可能触发风控
 
         // ── STEP 1.4：检测上架页版本（不同店铺/账号页面布局不同）。先判版本再决定后续填充流程。──
         //   v1 = 单页表单（主图→标题→「选择分类」弹框→「下一步,完善商品信息」）
@@ -1911,6 +1949,7 @@ async function main() {
         }
         await submitBtn.evaluate(el => el.click());
         await sleep(2000);
+        await waitCaptchaCleared(page, '提交上架');   // 提交是风控高发点，触发滑块则暂停等人工划过再续
 
         // #假成功修：点"提交并上架"后 PDD 常弹二次确认框("确认发布该商品?")，不点则商品只存草稿箱→
         //   脚本误判成功。这里主动找并点确认按钮(确认发布/确定/继续/立即发布)，最多两轮。

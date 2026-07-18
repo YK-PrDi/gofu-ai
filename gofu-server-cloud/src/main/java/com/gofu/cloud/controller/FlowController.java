@@ -353,6 +353,9 @@ public class FlowController {
 
         boolean genDetail = !Boolean.FALSE.equals(body.get("genDetail"));
         boolean genSku = !Boolean.FALSE.equals(body.get("genSku"));
+        // 第5项·缺SKU图自动补生：skuOnlyMissing=true 时只对方案里 imgDir 为空(没成品图)的 SKU 生图，
+        // 已有图的跳过。用于导入流"逐个缺的补"——有现成成品图的不重生，只补缺的。
+        boolean skuOnlyMissing = Boolean.TRUE.equals(body.get("skuOnlyMissing"));
         String templateId = body.get("templateId") instanceof String s && !s.isBlank() ? s : "sticker-leftcard";
         List<String> accWhiteRefs = body.get("accWhiteImages") instanceof List<?> l
                 ? (List<String>) l : List.of();
@@ -367,7 +370,11 @@ public class FlowController {
         int mainImgCount = ctx.getVisual().getMainImages().size();
         int skuTotal = 0;
         if (genSku && !ctx.getStructure().getPlans().isEmpty()) {
-            skuTotal = ctx.getStructure().getPlans().get(planIndex).getItems().size();
+            var planItems = ctx.getStructure().getPlans().get(planIndex).getItems();
+            // skuOnlyMissing 时进度总数只算缺图的 SKU
+            skuTotal = skuOnlyMissing
+                    ? (int) planItems.stream().filter(it -> it.getImgDir() == null || it.getImgDir().isBlank()).count()
+                    : planItems.size();
         }
         int total = (genDetail ? mainImgCount : 0) + skuTotal;
 
@@ -376,13 +383,13 @@ public class FlowController {
         task.setStatus("running");
         flowTasks.put(taskId, task);
 
-        final boolean fGenDetail = genDetail, fGenSku = genSku;
+        final boolean fGenDetail = genDetail, fGenSku = genSku, fSkuOnlyMissing = skuOnlyMissing;
         final String fTemplateId = templateId;
         final List<String> fAccRefs = accWhiteRefs;
         final int fPlanIndex = planIndex;
         imageGen.getExecutor().submit(() -> {
             try {
-                runStep2(ctx, task, fGenDetail, fGenSku, fTemplateId, fAccRefs, fPlanIndex);
+                runStep2(ctx, task, fGenDetail, fGenSku, fTemplateId, fAccRefs, fPlanIndex, fSkuOnlyMissing);
                 ctx.setStage(FlowStage.SKU_DONE);
                 contextService.save(ctx);
                 task.setStatus("done");
@@ -515,7 +522,7 @@ public class FlowController {
 
     private void runStep2(ProductContext ctx, GenerationTask task,
                           boolean genDetail, boolean genSku, String templateId, List<String> accWhiteRefs,
-                          int planIndex) {
+                          int planIndex, boolean skuOnlyMissing) {
         List<String> whiteImages = ctx.getVisual().getWhiteImages();
         String white = (whiteImages == null || whiteImages.isEmpty()) ? null : localizeWhite(whiteImages.get(0));
         File tmpOut = new File(appProperties.getPaths().getTempOutputDir(), "flow2-" + System.nanoTime());
@@ -605,6 +612,8 @@ public class FlowController {
             for (int i = 0; i < items.size(); i++) {
                 final int idx = i;
                 final var it = items.get(i);
+                // 第5项·只补缺图：skuOnlyMissing 时已有成品图(imgDir非空)的 SKU 跳过不重生(进度总数已不含它，不 increment)
+                if (skuOnlyMissing && it.getImgDir() != null && !it.getImgDir().isBlank()) continue;
                 String name = it.getSkuDisplayName() != null ? it.getSkuDisplayName() : it.getName();
                 // 优先级：显式 whiteImgDir → 精确码匹配(路径B快麦直连) → 名次尺寸配对(兜底,容忍刻度差) → 池首张
                 String matched = matchWhiteForItem(whiteImages, it.getItemCode(), it.getSpec1());

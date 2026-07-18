@@ -1521,11 +1521,28 @@ createApp({
      *    勾了「人工过图」或「上新前二次确认」=停在这，等人工在预览确认后手动点上新。
      */
     async autoAfterImport() {
-      // 步骤1/3 自动风格迁移(随机风格)。GAP-1修：迁移失败必须中断自动链，绝不带着未迁移的原图继续自动上新。
+      // 步骤1/4 缺SKU图自动补生(第5项)：方案有item但没成品图(sku子目录没传/挂不上)→调云端step2只补缺的，
+      // 需白底图作参考。放最前，让补生的SKU图也参与后续风格迁移统一基调。
+      try {
+        const plans = this.plans;
+        const missing = plans.reduce((n, p) => n + (p.items || []).filter(it => !it.imgDir).length, 0);
+        const hasWhite = (this.ctx?.visual?.whiteImages || []).length > 0;
+        if (missing > 0 && hasWhite) {
+          this.imp.msg = '步骤1/4 补生缺失的 ' + missing + ' 张 SKU 图中…'; this.imp.msgType = '';
+          const r = await fetch('/api/flow/step2', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contextId: this.contextId.trim(), planIndex: this.selectedPlan, genDetail: false, genSku: true, skuOnlyMissing: true }) });
+          const d = await r.json();
+          if (!d.error && d.taskId) { await this.pollFlowTask(d.taskId, d.total || 0, 2, 25); await this.loadContext(); }
+        } else if (missing > 0 && !hasWhite) {
+          this.imp.msg = '⚠ 有 ' + missing + ' 个 SKU 缺成品图但无白底图可参考，无法自动补生，请手动补 SKU 图或白底图。';
+          this.imp.msgType = 'err'; return;
+        }
+      } catch (e) { console.warn('[补生SKU图] 失败(不阻断):', e); }
+      // 步骤2/4 自动风格迁移(随机风格)。GAP-1修：迁移失败必须中断自动链，绝不带着未迁移的原图继续自动上新。
       const pickable = this.styleOptions.filter(o => o.id !== 'random' && o.id !== 'original');
       if (pickable.length) {
         this.styleTransfer.styleId = pickable[Math.floor(Math.random() * pickable.length)].id;
-        this.imp.msg = '步骤1/3 自动风格迁移中（不满意可在右侧🎨重新换风格）…'; this.imp.msgType = '';
+        this.imp.msg = '步骤2/4 自动风格迁移中（不满意可在右侧🎨重新换风格）…'; this.imp.msgType = '';
         try {
           await this.runStyleTransfer({ auto: true });
         } catch (e) { /* runStyleTransfer 内部已 catch，这里兜底 */ }
@@ -1537,8 +1554,8 @@ createApp({
           return;
         }
       }
-      // 步骤2/3 定价(C2修)：导入的方案SKU价格为0，上新前必须按利润率回填，否则被0价校验拦死/上0价。
-      this.imp.msg = '步骤2/3 自动定价中（按默认利润率）…';
+      // 步骤3/4 定价(C2修)：导入的方案SKU价格为0，上新前必须按利润率回填，否则被0价校验拦死/上0价。
+      this.imp.msg = '步骤3/4 自动定价中（按默认利润率）…';
       try {
         await this.fillCostAndPrice();
       } catch (e) {
@@ -1551,15 +1568,15 @@ createApp({
         this.imp.msg = '⚠ 有 ' + zero + ' 个 SKU 定不出价(快麦缺进价)，已中断自动上新。请在预览区手动定价后点「确认上新」。';
         this.imp.msgType = 'err'; return;
       }
-      // 步骤3/3 按设置复选框决定：任一勾选=停下等人工确认；都没勾=一路自动上新到底。
+      // 步骤4/4 按设置复选框决定：任一勾选=停下等人工确认；都没勾=一路自动上新到底。
       const needHuman = this.settings.reviewImages || this.settings.confirmBeforeListing;
       if (needHuman) {
-        this.imp.msg = '✓ 导入+迁移+定价完成。设置要求人工确认，请在预览区检查后点「确认上新」。';
+        this.imp.msg = '✓ 导入+补图+迁移+定价完成。设置要求人工确认，请在预览区检查后点「确认上新」。';
         this.imp.msgType = 'ok'; return;
       }
       // 全自动上新：关诊断模式(真上)，静默提交。GAP-2修：上新终态回写到导入区(下方 submitListing auto 分支)。
       this.listingDryRun = false;
-      this.imp.msg = '步骤3/3 全自动上新中…';
+      this.imp.msg = '步骤4/4 全自动上新中…';
       await this.submitListing({ auto: true });
     },
 
@@ -1630,6 +1647,13 @@ createApp({
         const t = await r.json();
         this.listingLog = (t.results || []).map(x => x.message || JSON.stringify(x)).join('\n');
         this.listingMsg = `${t.status} ${t.progress}/${t.total}`;
+        // 滑块人工介入：末尾若是 captcha 且仍在跑，醒目红字提示运营去浏览器窗口划滑块（脚本已暂停等待）
+        const res = t.results || [];
+        const lastCaptcha = [...res].reverse().find(x => x.type === 'captcha' || x.type === 'progress' || x.type === 'done' || x.type === 'error');
+        if (t.status === 'running' && lastCaptcha && lastCaptcha.type === 'captcha') {
+          this.listingMsg = '🛑 需人工：请到浏览器窗口手动完成滑块验证，脚本会自动继续 — ' + lastCaptcha.message;
+          this.listingMsgType = 'err';
+        }
         if (t.status === 'running') setTimeout(() => this.pollTask(taskId, tries + 1), 1500);
         else {
           this.listingRunning = false;
