@@ -114,7 +114,7 @@ window.BatchMixin = {
         // 白底图=本地(local-image代理) + 快麦兜底(whiteErp,http原样,浏览器直连pdd图床)
         const white = (d.white || []).map(toUrl).concat(d.whiteErp || []);
         this.batch.preview = {
-          name: (o.mainItem || o.productName), shop: o.shopName, category: o.category,
+          name: (o.mainItem || o.productName), shop: o.shopName, category: o.category, title: o.title || '',
           main: (d.main || []).map(toUrl), detail: (d.detail || []).map(toUrl),
           white, sku: (d.sku || []).map(toUrl),
         };
@@ -244,10 +244,12 @@ window.BatchMixin = {
         await this.fillCostAndPrice();
         const zero = (this.plans[0]?.items || []).filter(it => !(it.groupPrice > 0)).length;
         if (zero > 0) { o.taskStatus = 'error'; o.taskMsg = '✗ 有 ' + zero + ' 个SKU定不出价(快麦缺进价)，请补进价后重试'; return; }
-        // 补生+定价成功→清掉预检旧的"缺图"文案(#4:那是补生前的,已过时),并把新SKU图刷进预览
+        // 补生+定价成功→清掉预检旧的"缺图"文案(#4:那是补生前的,已过时),并把新SKU图+AI标题刷进预览
         o.missing = (o.missing || []).filter(m => !m.includes('缺图'));
+        o.title = this.ctx?.visual?.title || '';   // 存该商品AI标题,预览strip显示
         if (this.batch.preview && this.batch.preview.name === (o.mainItem || o.productName)) {
           this.batch.preview.sku = (this.skuImages || []).map(k => this.signed[k]).filter(Boolean);
+          this.batch.preview.title = o.title;
         }
         // 3) 按设置决定是否自动上新
         if (!this.settings.batchAutoList) {

@@ -421,6 +421,11 @@
         <h2 style="font-size:15px">👁 批量预览：{{ batch.preview.name }}
           <span style="font-size:12px;color:var(--text-faint);font-weight:400">（{{ batch.preview.shop }} · {{ batch.preview.category }}）</span>
         </h2>
+        <div v-if="batch.preview.title" class="field" style="margin-bottom:6px">
+          <label style="font-size:12px;color:var(--text-dim)">AI 标题</label>
+          <div style="font-size:13px;padding:4px 0">{{ batch.preview.title }}</div>
+        </div>
+        <div v-else class="hint" style="margin-bottom:6px">标题：AI补生后生成（缺图商品补生SKU图时一并出标题）</div>
         <template v-for="grp in [['主图',batch.preview.main],['详情图',batch.preview.detail],['白底图',batch.preview.white],['SKU图',batch.preview.sku]]" :key="grp[0]">
           <div class="subhead">{{ grp[0] }}（{{ grp[1].length }}）</div>
           <div v-if="grp[1].length" class="grid">
