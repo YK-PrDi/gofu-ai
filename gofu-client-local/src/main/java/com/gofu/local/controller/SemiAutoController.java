@@ -43,18 +43,28 @@ public class SemiAutoController {
      * 文件夹需含 主图/详情 子目录（复用 scanProduct 角色识别）。
      */
     @PostMapping("/import-to-context")
-    @SuppressWarnings("unchecked")
     public ResponseEntity<?> importToContext(@RequestBody Map<String, Object> body) {
         // 重构(webkitdirectory 上传模型)：入参 { folderName, main/detail/white/sku:[{name,b64,ext}] }。
+        // 异步：上传16张+反推+云端出方案≈90秒，同步会让前端像卡死。这里起后台任务立即返回 importId，前端轮询进度。
         String folderName = String.valueOf(body.getOrDefault("folderName", ""));
         if (folderName.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "folderName 不能为空"));
-        try {
-            return ResponseEntity.ok(styleImportService.importToContext(folderName,
-                    toUpImgs(body.get("main")), toUpImgs(body.get("detail")),
-                    toUpImgs(body.get("white")), toUpImgs(body.get("sku"))));
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", "导入失败：" + e.getMessage()));
-        }
+        String importId = java.util.UUID.randomUUID().toString();
+        styleImportService.importAsync(importId, folderName,
+                toUpImgs(body.get("main")), toUpImgs(body.get("detail")),
+                toUpImgs(body.get("white")), toUpImgs(body.get("sku")));
+        return ResponseEntity.ok(Map.of("importId", importId));
+    }
+
+    /** 轮询导入进度。出参 { phase, pct, done, error?, result?(done时的contextId等) }。 */
+    @GetMapping("/import-progress/{importId}")
+    public ResponseEntity<?> importProgress(@PathVariable String importId) {
+        com.gofu.local.service.listing.StyleImportService.Progress pg = styleImportService.getProgress(importId);
+        if (pg == null) return ResponseEntity.ok(Map.of("phase", "未知任务", "pct", 0, "done", true, "error", "任务不存在或已过期"));
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("phase", pg.phase); out.put("pct", pg.pct); out.put("done", pg.done);
+        if (pg.error != null) out.put("error", pg.error);
+        if (pg.result != null) out.put("result", pg.result);
+        return ResponseEntity.ok(out);
     }
 
     /** 把前端传的图数组解析成 UpImg 列表。 */

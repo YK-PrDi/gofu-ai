@@ -77,3 +77,7 @@ Thumbs.db
 
 # docs/ 整个目录为本地工作笔记,不入库
 docs/
+
+# 运行时产物(导入临时上传/生成资产)，不入库
+listing-tmp/
+sku-base/

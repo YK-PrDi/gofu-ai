@@ -97,10 +97,19 @@ public class SemiAutoOrchestrator {
                 //  · 命中的 → 用进价 cost 按默认利润率自动算拼单价 → 组成带定价的 SkuCheck 直接参与上新(全自动核心)。
                 //  · 对不上的 → 明确报"请按 ERP 编码规范命名"。这样"人工只选大文件夹"才真能自动上新。
                 List<String> nameHints = new ArrayList<>();
-                if (skus.isEmpty() && prod.skuImgDir() != null && !prod.skuImgDir().isBlank()) {
-                    List<String> skuImgs = semiAutoService.listImages(prod.skuImgDir());
-                    if (!skuImgs.isEmpty()) {
-                        List<Map<String, Object>> rows = semiAutoService.reverseSkuFromImages(skuImgs, "架类");
+                if (skus.isEmpty()) {
+                    // 反推名字来源:SKU 图名(最准) → 缺则文件夹名「品类-」后按 + 拆的段(用户约定:编码/人话混用)。
+                    List<String> revNames = null;
+                    if (prod.skuImgDir() != null && !prod.skuImgDir().isBlank()) {
+                        List<String> skuImgs = semiAutoService.listImages(prod.skuImgDir());
+                        if (!skuImgs.isEmpty()) revNames = skuImgs;
+                    }
+                    if (revNames == null) {   // 无 SKU 图目录 → 拿文件夹名的 + 段兜底(命中才用,人话名会未命中→退回报命名提示)
+                        List<String> segs = splitCodeSegments(parseFolderName(prod.name()).productName());
+                        if (!segs.isEmpty()) revNames = segs;
+                    }
+                    if (revNames != null) {
+                        List<Map<String, Object>> rows = semiAutoService.reverseSkuFromImages(revNames, "架类");
                         List<SemiAutoScan.SkuCheck> reversed = new ArrayList<>();
                         for (Map<String, Object> r : rows) {
                             if (Boolean.TRUE.equals(r.get("matched"))) {
@@ -215,5 +224,16 @@ public class SemiAutoOrchestrator {
         String cat = s.substring(0, dash).trim();
         String name = s.substring(dash + 1).trim();
         return new FolderMeta(cat, name);
+    }
+
+    /** 主件名按「+」拆成候选编码段(全角＋归一化)：无 SKU 图目录时作反推兜底源。空段丢弃。 */
+    private static List<String> splitCodeSegments(String productName) {
+        List<String> segs = new ArrayList<>();
+        if (productName == null || productName.isBlank()) return segs;
+        for (String p : productName.replace('＋', '+').split("\\+")) {
+            String t = p.trim();
+            if (!t.isEmpty()) segs.add(t);
+        }
+        return segs;
     }
 }
