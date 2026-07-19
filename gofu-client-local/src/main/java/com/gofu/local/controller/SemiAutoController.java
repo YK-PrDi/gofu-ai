@@ -256,7 +256,12 @@ public class SemiAutoController {
 
     // ── 多店管理（P4）──────────────────────────────────────────────
 
-    /** 列出所有店铺 + 每店登录态（cookie 文件是否存在）。 */
+    /**
+     * 列出所有店铺 + 每店登录态。
+     * loggedIn 只表示"有过登录记录"（cookie 文件存在），不代表当前一定有效——
+     * 拼多多 token 会过期。lastActiveMs=cookie 文件最后写入时间（保活/登录/上新成功都会回写），
+     * 是登录新鲜度的代理：太久没刷新说明保活断了、登录很可能已失效。前端据此显示"可能过期"。
+     */
     @GetMapping("/stores")
     public ResponseEntity<?> listStores() {
         var stores = storeService.loadStores();
@@ -264,7 +269,9 @@ public class SemiAutoController {
             Map<String, Object> m = new java.util.LinkedHashMap<>();
             m.put("name", s.getName());
             m.put("profile", s.getProfile());
-            m.put("loggedIn", new File(storeService.cookiesPathOf(s.getProfile())).isFile());
+            File ck = new File(storeService.cookiesPathOf(s.getProfile()));
+            m.put("loggedIn", ck.isFile());
+            m.put("lastActiveMs", ck.isFile() ? ck.lastModified() : 0L);   // cookie 最后回写时间，前端判"可能过期"
             return m;
         }).toList();
         return ResponseEntity.ok(Map.of("stores", rows));

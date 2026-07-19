@@ -194,7 +194,10 @@ public class ContextToListingMapper {
                     else log.warn("白底图本地缓存缺失，跳过(不影响主图/详情，仅回传快麦少这张): {}", key);
                     continue;
                 }
-                String url = sign(key);
+                // key 已是完整 http(s) URL(如快麦白底图/uploadPublic的公网永久URL)：直接下载。
+                //  不能再调 sign→signKey 会把整条URL当成COS object key去私有桶签名→桶里无此对象→404
+                //  (症状:主图/白底"下载HTTP 404"、上新轮播图为空)。只有裸 COS key 才需 sign 换签名URL。
+                String url = isHttpUrl(key) ? key : sign(key);
                 File localSrc = new File(url);
                 if (localSrc.isFile()) {
                     Files.copy(localSrc.toPath(), out.toPath(), StandardCopyOption.REPLACE_EXISTING);
@@ -219,7 +222,8 @@ public class ContextToListingMapper {
                 log.warn("SKU 图本地缓存缺失，跳过: {}", key);
                 return null;
             }
-            String url = sign(key);
+            // 同 downloadImages：完整 http(s) URL 直接下载，不 sign(避免对URL二次COS签名→404)。
+            String url = isHttpUrl(key) ? key : sign(key);
             File localSrc = new File(url);
             if (localSrc.isFile()) {
                 Files.copy(localSrc.toPath(), out.toPath(), StandardCopyOption.REPLACE_EXISTING);
@@ -238,6 +242,11 @@ public class ContextToListingMapper {
         if (key == null) return false;
         if (key.startsWith("http://") || key.startsWith("https://")) return false;
         return key.matches("^[A-Za-z]:[\\\\/].*") || key.startsWith("/") || key.contains("\\");
+    }
+
+    /** key 是否已是完整 http(s) URL（快麦白底图/uploadPublic 公网永久URL）：这类直接下载，不再 sign。 */
+    private boolean isHttpUrl(String key) {
+        return key != null && (key.startsWith("http://") || key.startsWith("https://"));
     }
 
     /** 调云端把永久 key 换成签名 URL（ADR-008）。 */

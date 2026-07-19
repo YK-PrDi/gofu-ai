@@ -237,7 +237,7 @@
 
     <!-- 文件夹批量上新（独立区块，可折叠）：多套图→多店，按文件夹名识别，串行连续。后端 /api/semi-auto/preflight、/run -->
     <div class="section batch-sec" style="padding:14px 20px">
-      <div class="head" @click="batch.open = !batch.open">
+      <div class="head" @click="batchToggle()">
         <span class="subhead" style="margin:0">📁 文件夹批量上新</span>
         <span style="font-size:12px;color:var(--text-faint)">{{ batch.open ? '▲ 收起' : '▼ 展开（多套图→多店，按文件夹名连续上新）' }}</span>
       </div>
@@ -251,7 +251,13 @@
           <span v-if="batch.folderName" style="font-size:13px">已选：<b>{{ batch.folderName }}</b>
             <span style="color:var(--text-faint)">（{{ batch.fileCount }} 张图已上传）</span></span>
           <button class="btn btn-ghost" @click="batchPreflight" :disabled="!batch.rootPath||batch.busy">重新预检</button>
-          <button class="btn btn-primary" @click="batchRun" :disabled="!batch.canRun||batch.busy">开始批量上新</button>
+          <button class="btn btn-primary" @click="batchRun" :disabled="batchReadyCount===0||batch.busy">开始批量上新</button>
+        </div>
+        <!-- 利润率：默认在 33/45/53 里随机选一个(选文件夹时定)，可拖动微调；改完点「按此重算」重算已生成商品的定价 -->
+        <div class="field" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span class="hint">利润率（利润占售价）：<b>{{ (profitRate*100).toFixed(0) }}%</b><span style="color:var(--text-faint)">（默认33/45/53随机）</span></span>
+          <input type="range" min="0.15" max="0.65" step="0.01" v-model.number="profitRate" style="flex:1;max-width:220px" />
+          <button class="btn btn-ghost" @click="batchRecalcPrice" :disabled="batch.busy">按此重算定价</button>
         </div>
         <div class="gmsg" :class="batch.msgType" style="margin-top:6px">{{ batch.msg }}</div>
 
@@ -388,7 +394,7 @@
           <select v-model="targetProfile" @focus="stores.list.length||loadStores()">
             <option value="">默认店铺（单店旧行为）</option>
             <option v-for="s in stores.list" :key="s.profile" :value="s.profile">
-              {{ s.name }}（{{ s.profile }}{{ s.loggedIn?' · 已登录':' · 未登录' }}）
+              {{ s.name }}（{{ s.profile }} · {{ storeLoginText(s) }}）
             </option>
           </select>
         </div>
@@ -691,7 +697,7 @@
                 <span @click="renameStorePrompt(s)" style="cursor:pointer;border-bottom:1px dashed #cbd5e1">{{ s.name || '未命名店铺' }}</span>
               </td>
               <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6;color:var(--text-dim)">{{ s.profile }}</td>
-              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6"><span class="store-tag" :class="s.loggedIn?'tag-ok':''" style="background:#f3f4f6">{{ s.loggedIn?'已登录':'未登录' }}</span></td>
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6"><span class="store-tag" :class="storeLoginStale(s)?'tag-warn':(s.loggedIn?'tag-ok':'')" :title="storeLoginStale(s)?'cookie 超过 24h 未刷新，登录很可能已过期，建议重登':''">{{ storeLoginText(s) }}</span></td>
               <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6"><button class="btn btn-ghost" style="padding:2px 10px;font-size:12px" @click="loginStore(s)">登录/重登</button></td>
             </tr>
           </tbody>
@@ -1628,13 +1634,28 @@ createApp({
         const missing = planIdxs.reduce((n, pi) => n + ((plans[pi]?.items) || []).filter(it => !it.imgDir).length, 0);
         if (missing > 0 && hasWhite) {
           const scope = this.settings.genAllPlansSku ? ('全部' + plans.length + '套方案') : '当前方案';
+          // 修:导入自动链原来 step2 只传 genSku,不带配件白底图/防比价模板 → SKU图无配件、样式统一。
+          //    与手动流对齐:收方案里配件编码拉配件白底图 + 随机防比价 templateId,整条链共用一次。
+          const accCodes = [...new Set(planIdxs
+            .flatMap(pi => (plans[pi]?.items) || [])
+            .flatMap(it => (it.accParts || []).map(a => a.code)).filter(Boolean))];
+          let accWhiteImages = [];
+          if (accCodes.length) {
+            try {
+              const ar = await fetch('/api/erp/fetch-white-images', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ codes: accCodes }) });
+              const ad = await ar.json();
+              accWhiteImages = (ad.matched || []).map(m => m.file).filter(Boolean);
+            } catch (e) { console.warn('[导入补生] 取配件白底图失败(SKU图可能缺配件):', e); }
+          }
+          const tplId = this.resolveTemplateId();
           for (let k = 0; k < planIdxs.length; k++) {
             const pi = planIdxs[k];
             const miss = ((plans[pi]?.items) || []).filter(it => !it.imgDir).length;
             if (miss === 0) continue;
             this.imp.msg = '步骤1/4 补生' + scope + '缺失的 SKU 图中…（方案' + (pi + 1) + '，' + miss + '张）'; this.imp.msgType = '';
             const r = await fetch('/api/flow/step2', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ contextId: this.contextId.trim(), planIndex: pi, genDetail: false, genSku: true, skuOnlyMissing: true }) });
+              body: JSON.stringify({ contextId: this.contextId.trim(), planIndex: pi, genDetail: false, genSku: true, skuOnlyMissing: true,
+                accWhiteImages, templateId: tplId }) });
             const d = await r.json();
             if (!d.error && d.taskId) await this.pollFlowTask(d.taskId, d.total || 0, 2, 25);
           }

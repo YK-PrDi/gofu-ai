@@ -40,6 +40,13 @@ window.BatchMixin = {
     },
   },
   methods: {
+    // 利润率默认在 33/45/53 三档里随机选一个(批量流默认,与手动流的58%分开)。
+    batchRandomProfit() { this.profitRate = [0.33, 0.45, 0.53][Math.floor(Math.random() * 3)]; },
+    // 展开/收起批量区块。展开且不在跑批时把利润率随机到 33/45/53,否则滑块一直显示手动流的58%默认。
+    batchToggle() {
+      this.batch.open = !this.batch.open;
+      if (this.batch.open && !this.batch.busy) this.batchRandomProfit();
+    },
     async batchApi(url, body) {
       const r = await fetch(url, {
         method: 'POST',
@@ -63,7 +70,9 @@ window.BatchMixin = {
       if (!imgs.length) { this.batchMsg('该文件夹没有图片', 'err'); return; }
       this.batch.folderName = (imgs[0].webkitRelativePath || '').split('/')[0] || '';
       this.batch.busy = true; this.batch.canRun = false; this.batch.outcomes = [];
-      this.batchMsg('上传大文件夹（' + imgs.length + ' 张图）到后端…', '');
+      // 利润率每次选新大文件夹时重新随机(33/45/53)。用户可拖滑块微调后「按此重算」。
+      this.batchRandomProfit();
+      this.batchMsg('上传大文件夹（' + imgs.length + ' 张图，本批利润率随机=' + (this.profitRate * 100).toFixed(0) + '%）到后端…', '');
       try {
         const payload = [];
         for (const f of imgs) {
@@ -113,14 +122,20 @@ window.BatchMixin = {
         const toUrl = p => '/api/erp/local-image?path=' + encodeURIComponent(p);
         // 白底图=本地(local-image代理) + 快麦兜底(whiteErp,http原样,浏览器直连pdd图床)
         const white = (d.white || []).map(toUrl).concat(d.whiteErp || []);
+        // SKU图:本地文件夹的sku图(d.sku) ∪ 已补生方案里的AI生成图(o._plans首套的_img)。
+        // 修:补生商品的SKU图是AI生成、存云端context(o._plans[].items[]._img)、不在本地文件夹→
+        //    原来只取 d.sku 导致点预览显示"SKU图(0)/无SKU图"。本地无sku图时回退用方案首套的生成图。
+        const folderSku = (d.sku || []).map(toUrl);
+        const planSku = ((o._plans && o._plans[0] && o._plans[0].items) || []).map(it => it._img).filter(Boolean);
+        const sku = folderSku.length ? folderSku : planSku;
         this.batch.preview = {
           name: (o.mainItem || o.productName), shop: o.shopName, category: o.category, title: o.title || '',
           main: (d.main || []).map(toUrl), detail: (d.detail || []).map(toUrl),
-          white, sku: (d.sku || []).map(toUrl),
+          white, sku,
           plans: o._plans || null, planIdx: 0,   // 已补生过的商品带出其方案(布局);未补生则空
           contextId: o.contextId || '',           // 已建context的带出,标题可编辑存回
         };
-        this.batchMsg('预览「' + this.batch.preview.name + '」：主图' + (d.main||[]).length + '·详情' + (d.detail||[]).length + '·白底' + white.length + '·sku' + (d.sku||[]).length, 'ok');
+        this.batchMsg('预览「' + this.batch.preview.name + '」：主图' + (d.main||[]).length + '·详情' + (d.detail||[]).length + '·白底' + white.length + '·sku' + sku.length, 'ok');
       } catch (e) {
         this.batchMsg('预览失败：' + e.message, 'err');
       }
@@ -175,18 +190,78 @@ window.BatchMixin = {
         this.batchMsg('预检失败：' + e.message, 'err');
       }
     },
+    // 智能分流上新：ready 商品分两类走不同路径——
+    //  · 有 contextId(AI补生过)：走 from-context 上新。成果(SKU图/方案)在云端 context,若走重扫文件夹的
+    //    /run 会因本地无SKU图判"缺图"丢成果,故必须 from-context。
+    //  · 无 contextId(文件夹本就齐全):走 /run(编排器从本地文件夹组config上新)。
+    //  服务端 browserBusy 闸(ListingService)已串行化所有上新进程,并发调用会自动排队,无需前端错开。
     async batchRun() {
-      if (!confirm('确认对预检齐全的商品批量上新？将逐店逐商品串行操作真实商家后台。')) return;
+      const ready = this.batch.outcomes
+        .map((o, i) => ({ o, i }))
+        .filter(x => x.o.status === 'ready' && x.o.taskStatus !== 'listing_started');
+      const ctxItems = ready.filter(x => x.o.contextId);
+      const folderItems = ready.filter(x => !x.o.contextId);
+      if (!ctxItems.length && !folderItems.length) { this.batchMsg('没有齐全待上的商品', 'err'); return; }
+      if (!confirm('确认对 ' + ready.length + ' 个齐全商品批量上新？将逐店逐商品串行操作真实商家后台。')) return;
       this.batch.busy = true;
       try {
-        const d = await this.batchApi('/api/semi-auto/run', { rootPath: this.batch.rootPath.trim() });
-        this.batch.outcomes = d.outcomes || [];
-        const started = this.batch.outcomes.filter(o => o.status === 'listing_started').length;
-        this.batchMsg('已启动 ' + started + ' 个商品的上新，实时进度见下方（每个任务独立轮询）', 'ok');
-        // A：对每个已启动上新的商品轮询其 taskId，把进度/成败回填到结果表(progress/taskStatus/taskMsg)。
-        this.batch.outcomes.forEach((o, i) => { if (o.taskId && o.status === 'listing_started') this.batchPollTask(i); });
+        let started = 0;
+        // 1) 有 context 的逐个走 from-context(带该店 profile,不重扫文件夹)
+        for (const { o, i } of ctxItems) {
+          try {
+            const lr = await fetch('/api/listing/from-context', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ contextId: o.contextId, planIndex: 0, dryRun: false, storeProfile: o.shopProfile || '' }) });
+            const ld = await lr.json();
+            if (ld.error || !ld.taskId) throw new Error(ld.error || '未返回 taskId');
+            o.taskId = ld.taskId; o.status = 'listing_started'; o.taskStatus = ''; o.taskMsg = '✓ 已启动上新…';
+            this.batchPollTask(i); started++;
+          } catch (e) { o.taskStatus = 'error'; o.taskMsg = '✗ 上新启动失败：' + e.message; }
+        }
+        // 2) 文件夹本就齐全(无context)的走 /run。/run 重扫全根,context 商品会因本地缺SKU图被判非ready而跳过,
+        //    故只取其返回里 listing_started 的行,按(店铺,商品名)回填到对应 folderItems,不覆盖 context 行。
+        if (folderItems.length) {
+          const d = await this.batchApi('/api/semi-auto/run', { rootPath: this.batch.rootPath.trim() });
+          const runStarted = (d.outcomes || []).filter(x => x.status === 'listing_started');
+          for (const { o, i } of folderItems) {
+            const hit = runStarted.find(x => x.shopName === o.shopName && (x.productName === o.productName || x.mainItem === o.mainItem));
+            if (hit && hit.taskId) {
+              o.taskId = hit.taskId; o.status = 'listing_started'; o.taskStatus = ''; o.taskMsg = '✓ 已启动上新…';
+              this.batchPollTask(i); started++;
+            }
+          }
+        }
+        this.batchMsg('已启动 ' + started + ' 个商品的上新，实时进度见下方（每个任务独立轮询）', started ? 'ok' : 'err');
       } catch (e) {
         this.batchMsg('批量上新失败：' + e.message, 'err');
+      } finally {
+        this.batch.busy = false;
+      }
+    },
+    // 拖动利润率滑块后重算已生成商品的定价：逐个载入其 context→按当前 profitRate 重算落库。
+    // 只对已建 context(补生/定价过)的商品有效；未生成的等生成时自然用新利润率。
+    async batchRecalcPrice() {
+      const targets = this.batch.outcomes.map((o, i) => ({ o, i })).filter(x => x.o.contextId);
+      if (!targets.length) { this.batchMsg('还没有已生成定价的商品，改利润率会在下次生成时生效', 'err'); return; }
+      this.batch.busy = true;
+      try {
+        let n = 0;
+        for (const { o } of targets) {
+          this.contextId = o.contextId;
+          await this.loadContext();
+          await this.fillCostAndPrice();   // 内部用 this.profitRate,算完落库
+          // 刷新该行方案(布局)里的价，正在预览的同步刷
+          o._plans = (this.ctx?.structure?.plans || []).map(p => ({
+            planName: p.planName, description: p.description,
+            items: (p.items || []).map(it => ({ ...it, _img: it.imgDir ? (this.signed[it.imgDir] || '') : '' })),
+          }));
+          if (this.batch.preview && this.batch.preview.name === (o.mainItem || o.productName)) {
+            this.batch.preview.plans = o._plans;
+          }
+          n++;
+        }
+        this.batchMsg('已按利润率 ' + (this.profitRate * 100).toFixed(0) + '% 重算 ' + n + ' 个商品的定价', 'ok');
+      } catch (e) {
+        this.batchMsg('重算定价失败：' + e.message, 'err');
       } finally {
         this.batch.busy = false;
       }
@@ -202,10 +277,13 @@ window.BatchMixin = {
         if (r.ok) {
           const t = await r.json();
           o.progress = t.total > 0 ? t.progress + '/' + t.total : '' + t.progress;
-          if (t.status === 'done') { o.taskStatus = 'done'; o.taskMsg = '✓ 上新成功'; return; }
+          if (t.status === 'done') { o.taskStatus = 'done'; o.status = 'listing_started'; o.taskMsg = '✓ 上新成功'; return; }
           if (t.status === 'error') {
             o.taskStatus = 'error';
-            o.taskMsg = '✗ ' + ((t.results || []).filter(x => x.type === 'error').map(x => x.message).join('；') || '上新失败');
+            // 修:上新失败要把 status 退回 ready(补生完的成果/context还在),否则它卡在 listing_started →
+            //    batchRun 的 ready 过滤把它排除 → 前端报"没有齐全待上的商品"、无法重试上新。
+            o.status = 'ready';
+            o.taskMsg = '✗ ' + ((t.results || []).filter(x => x.type === 'error').map(x => x.message).join('；') || '上新失败') + '（可点「开始批量上新」重试）';
             return;
           }
           o.taskMsg = '上新中… ' + o.progress;
@@ -248,9 +326,23 @@ window.BatchMixin = {
         const missImg = plan0 ? (plan0.items || []).filter(it => !it.imgDir).length : 0;
         const hasWhite = (this.ctx?.visual?.whiteImages || []).length > 0;
         if (missImg > 0 && hasWhite) {
+          // 修:批量补生原来 step2 只传 genSku,不传 accWhiteImages/templateId → 云端取默认(空配件图+固定
+          //    sticker-leftcard 模板)。后果:SKU图无配件、样式千篇一律、防比价没接。与手动流(index.html:1216)对齐:
+          //    ① 从方案里收配件编码去快麦拉配件白底图 ② step2 带 accWhiteImages + 随机防比价 templateId。
+          const accCodes = [...new Set((plan0.items || [])
+            .flatMap(it => (it.accParts || []).map(a => a.code)).filter(Boolean))];
+          let accWhiteImages = [];
+          if (accCodes.length) {
+            try {
+              const ar = await fetch('/api/erp/fetch-white-images', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ codes: accCodes }) });
+              const ad = await ar.json();
+              accWhiteImages = (ad.matched || []).map(m => m.file).filter(Boolean);
+            } catch (e) { console.warn('[批量补生] 取配件白底图失败(SKU图可能缺配件):', e); }
+          }
           o.taskMsg = '补生 ' + missImg + ' 张SKU图中…（进度见右侧）';
           const r = await fetch('/api/flow/step2', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ contextId, planIndex: 0, genDetail: false, genSku: true, skuOnlyMissing: true }) });
+            body: JSON.stringify({ contextId, planIndex: 0, genDetail: false, genSku: true, skuOnlyMissing: true,
+              accWhiteImages, templateId: this.resolveTemplateId() }) });
           const sd = await r.json();
           if (!sd.error && sd.taskId) {
             // 借右侧生图进度条(genRunning+genProgress,pollFlowTask 会驱动)显示SKU补生进度
@@ -270,24 +362,31 @@ window.BatchMixin = {
         // 补生+定价成功→清掉预检旧的"缺图"文案(#4),并把 context 的 SKU图+方案(布局)+标题刷进预览strip
         o.missing = (o.missing || []).filter(m => !m.includes('缺图'));
         o.title = this.ctx?.visual?.title || '';
+        // 方案(布局):每套 items 附上已签名的SKU图URL(_img),供预览表格显示。
+        // 修:原来只在"当前预览的就是本商品"时才算并存 o._plans → 批量自动流预览只锁首品(batchPreview(0))，
+        //    第二个店铺的商品补生完 name 对不上、o._plans 从没被设 → 点它👁预览时 plans=null、SKU布局不显示。
+        //    改为无条件把本商品自己的方案存到 o._plans(每行独立)，只有"正在预览的就是本商品"才顺带刷进 preview strip。
+        const plans = (this.ctx?.structure?.plans || []).map(p => ({
+          planName: p.planName, description: p.description,
+          items: (p.items || []).map(it => ({ ...it, _img: it.imgDir ? (this.signed[it.imgDir] || '') : '' })),
+        }));
+        o._plans = plans;   // 存到该行,重新预览时能带出方案(布局),不用再建context
         if (this.batch.preview && this.batch.preview.name === (o.mainItem || o.productName)) {
           this.batch.preview.title = o.title;
           this.batch.preview.contextId = contextId;   // 供标题编辑后存回 context
-          // 方案(布局):每套 items 附上已签名的SKU图URL(_img),供预览表格显示
-          const plans = (this.ctx?.structure?.plans || []).map(p => ({
-            planName: p.planName, description: p.description,
-            items: (p.items || []).map(it => ({ ...it, _img: it.imgDir ? (this.signed[it.imgDir] || '') : '' })),
-          }));
           this.batch.preview.plans = plans;
           this.batch.preview.planIdx = 0;
           // SKU图缩略:取首套方案各item的图
           this.batch.preview.sku = (plans[0]?.items || []).map(it => it._img).filter(Boolean);
-          o._plans = plans;   // 存到该行,重新预览时能带出方案(布局),不用再建context
         }
         // 3) 按设置决定是否自动上新
         if (!this.settings.batchAutoList) {
           o.taskStatus = 'done';
-          o.taskMsg = '✓ 已生图+定价(contextId=' + contextId.slice(0, 8) + ')。设置未开自动上新，请到「云端商品」核对后上新。';
+          // 修:补生+定价完=齐全待上(成果在云端context)。原来 status 卡在 sku_gen_available →
+          //    标签绿底却写"缺图"自相矛盾、且 batchReadyCount=0 让「开始批量上新」按钮一直灰。
+          //    置 ready 并保留 o.contextId,batchRun 据 contextId 走 from-context 上新(不重扫文件夹丢云端图)。
+          o.status = 'ready';
+          o.taskMsg = '✓ 已生图+定价(contextId=' + contextId.slice(0, 8) + ')，可点「开始批量上新」上到「' + o.shopName + '」，或到「云端商品」核对。';
           return;
         }
         o.taskMsg = '从context上新到「' + o.shopName + '」…';

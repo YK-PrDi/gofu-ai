@@ -916,45 +916,65 @@ async function main() {
                 await titleInput.fill('');
                 await titleInput.type(config.title, { delay: 30 });
                 await page.waitForTimeout(500);
+                // 实测:标题框失焦后,页面才渲染出"商品分类(平台自动推荐)"区+「手动选择商品分类」按钮。
+                //   Enter 无效,必须让标题框 blur。点标题外的空白区(表单标题旁)触发失焦,再等分类区渲染。
+                try { await titleInput.evaluate(el => el.blur()); } catch (_) {}
+                try { await page.mouse.click(60, 120); } catch (_) {}   // 点左上空白,确保焦点离开输入框
+                await page.waitForTimeout(1200);
                 log('标题已填写');
             } else {
                 log('⚠ 未找到商品标题输入框');
             }
         }
 
-        // ── STEP 4：选择商品分类（版本一：表单内点「选择分类」→ 弹框搜索 → 点选末级 → 确认）──
-        //    版本二已在前置分类页选过(v2CategoryDone)，跳过本步。
+        // ── STEP 4：选择商品分类 ────────────────────────────────────────
+        //   版式差异(实测):有的店分类在第1页(主图/标题同页),有的店第1页只有主图+标题+「下一步,完善商品信息」,
+        //   分类要点了「下一步」进第2页(完善商品信息)才出现。故本步先在当前页找分类框,找不到不报错;
+        //   等 STEP4.5 点完「下一步」再在第2页找一次。两次都没有才判失败。
+        //   版本二已在前置分类页选过(v2CategoryDone)，跳过本步。
         progress(38, '选择商品分类');
         const category = config.category || '';
-        if (category && !v2CategoryDone && !v3Done) {
-            const keyword = category.split('>').pop().trim();
-            // 1) 点开「选择分类」按钮
-            let opened = false;
-            try {
-                const selBtn = page.locator('button:has-text("选择分类"), [class*="select"]:has-text("选择分类"), a:has-text("选择分类"), span:has-text("选择分类")').first();
-                await selBtn.click({ force: true, timeout: 5000 });
-                opened = true;
-                log('STEP4: 已点击「选择分类」');
-            } catch (_) {
-                log('STEP4: 未找到「选择分类」按钮，尝试直接在分类搜索框输入');
-            }
-            await page.waitForTimeout(1200);
+        const catKeyword = category ? category.split('>').pop().trim() : '';
+        let categoryDone = false;   // 分类是否已选中；STEP4.5 之后据此决定要不要在第2页补选
+        // 在「当前所在页」尝试选分类：找到分类搜索框=在分类页,选中返回 true;没找到框返回 false(可能分类在下一页)。
+        //   不 throw,由调用处根据"是否已过下一步"决定报错时机。
+        async function trySelectCategoryHere(keyword) {
+            // 0) 先清广告/图片预览弹窗——必须在点「手动选择商品分类」之前做！
+            //    修(闪退真因):分类弹框本身就是 beast-core-modal,closePddPopups 会 Escape+点关闭按钮把它关掉
+            //    → 打开后再 closePddPopups 等于自己把刚开的分类弹框关了 → 找不到搜索框。故清弹窗提前到打开分类框之前。
             await closePddPopups();
-
-            // 2) 在弹框/分类区找搜索输入框（排除顶部全局搜索框）
-            let catInput = await page.$('input[placeholder*="类目关键词"], input[placeholder*="搜索分类"], input[placeholder*="请输入类目"], input[placeholder*="搜索类目"]');
-            if (!catInput) {
-                catInput = await page.evaluateHandle(() => {
-                    const isGlobal = el => /mms-header/.test(el.className || '') || /搜索功能|订单|课程/.test(el.placeholder || '');
-                    // 优先在弹框(dialog/modal)内找
-                    const scope = document.querySelector('[role="dialog"], [class*="modal"], [class*="Modal"], [class*="dialog"]') || document;
-                    const ins = [...scope.querySelectorAll('input[type="text"], input:not([type])')]
-                        .filter(el => el.offsetParent !== null && !isGlobal(el));
-                    const hit = ins.find(el => /类目|分类|关键词/.test(el.placeholder || '')) || ins[0];
-                    return hit || null;
-                }).then(h => h.asElement());
+            // 1) 点「手动选择商品分类」入口(实测该店真实按钮:data-tracking-viewid=manually_select_product_category,
+            //    文字「手动选择商品分类」——旧代码只找"选择分类"子串匹配不上)。带旧版"选择分类"文案兜底。
+            try {
+                const selBtn = page.locator('[data-tracking-viewid="manually_select_product_category"], '
+                    + 'button:has-text("手动选择商品分类"), button:has-text("选择分类"), '
+                    + '[class*="select"]:has-text("选择分类"), a:has-text("选择分类"), span:has-text("选择分类")').first();
+                await selBtn.click({ force: true, timeout: 2500 });
+                log('STEP4: 已点击「手动选择商品分类」');
+                await page.waitForTimeout(1000);
+            } catch (_) {}
+            // 注意:此处不再调 closePddPopups()——分类弹框已开,再清会把它关掉。
+            // 2) 找分类搜索框:优先真实 data-tracking-viewid=key_words_search / placeholder"请输入关键词搜索分类";
+            //    异步渲染,轮询最多 ~5s。带旧版 placeholder 兜底。
+            let catInput = null;
+            for (let tryN = 0; tryN < 5 && !catInput; tryN++) {
+                catInput = await page.$('input[data-tracking-viewid="key_words_search"], '
+                    + 'input[placeholder*="关键词搜索分类"], input[placeholder*="类目关键词"], '
+                    + 'input[placeholder*="搜索分类"], input[placeholder*="请输入类目"], input[placeholder*="搜索类目"]');
+                if (!catInput) {
+                    catInput = await page.evaluateHandle(() => {
+                        const isGlobal = el => /mms-header/.test(el.className || '') || /搜索功能|订单|课程/.test(el.placeholder || '');
+                        const scope = document.querySelector('[role="dialog"], [class*="modal"], [class*="Modal"], [class*="dialog"]') || document;
+                        const ins = [...scope.querySelectorAll('input[type="text"], input:not([type])')]
+                            .filter(el => el.offsetParent !== null && !isGlobal(el));
+                        const hit = ins.find(el => /类目|分类|关键词/.test(el.placeholder || '')) || ins[0];
+                        return hit || null;
+                    }).then(h => h.asElement());
+                }
+                if (!catInput) await page.waitForTimeout(1000);
             }
-            if (catInput) {
+            if (!catInput) return false;   // 当前页没有分类框 → 可能在下一页
+            {
                 await catInput.click({ force: true });
                 await page.waitForTimeout(300);
                 await catInput.type(keyword, { delay: 80 });
@@ -965,7 +985,7 @@ async function main() {
                 }, keyword, { timeout: 6000 }).catch(() => {});
                 await page.waitForTimeout(500);
 
-                // 3) 在弹框结果里点选末级类目（按文字精确匹配）
+                // 3) 在结果里点选末级类目（按文字精确匹配）
                 let clicked = false;
                 try {
                     const exact = page.locator('[class*="searchItem"], [class*="search-item"], [class*="SPP_searchItem"], [role="dialog"] li, [class*="modal"] li')
@@ -990,39 +1010,29 @@ async function main() {
                     }, keyword);
                     const el = elHandle.asElement();
                     if (el) { await el.click({ force: true }); clicked = true; log('STEP4: 分类 fallback 点击: ' + keyword); }
-                    else log('⚠ STEP4: 弹框内未匹配到分类「' + keyword + '」，请确认末级品类名与拼多多一致');
+                    else log('⚠ STEP4: 未匹配到分类「' + keyword + '」，请确认末级品类名与拼多多一致');
                 }
                 await page.waitForTimeout(1000);
 
-                // 4) 点弹框「确认/确定」
+                // 4) 点「确认」:优先真实 data-tracking-click-viewid=cate_confirm,带弹框内确认/确定兜底。
                 try {
-                    const okBtn = page.locator('[role="dialog"] button:has-text("确认"), [role="dialog"] button:has-text("确定"), [class*="modal"] button:has-text("确认"), [class*="modal"] button:has-text("确定"), button:has-text("确认")').first();
+                    const okBtn = page.locator('[data-tracking-click-viewid="cate_confirm"], '
+                        + '[role="dialog"] button:has-text("确认"), [role="dialog"] button:has-text("确定"), '
+                        + '[class*="modal"] button:has-text("确认"), [class*="modal"] button:has-text("确定"), button:has-text("确认")').first();
                     await okBtn.click({ force: true, timeout: 3000 });
-                    log('STEP4: 分类弹框已确认');
+                    log('STEP4: 分类已确认');
                     await page.waitForTimeout(1500);
-                } catch (_) { log('STEP4: 未找到分类弹框确认按钮（可能点选后自动关闭）'); }
-            } else {
-                log('⚠ STEP4: 未找到分类搜索输入框，页面可能再次改版');
-            }
-            // 校验：若页面提示「请先选择分类」则中断
-            const needCat = await page.evaluate(() => document.body.innerText.includes('请先选择分类') || document.body.innerText.includes('请选择分类'));
-            if (needCat) {
-                throw new Error('分类未选中：拼多多提示「请先选择分类」。请检查软件里所选末级品类名是否与拼多多类目库一致（当前关键词：' + keyword + '）');
+                } catch (_) { log('STEP4: 未找到分类确认按钮（可能点选后自动关闭）'); }
+                return true;   // 找到分类框并走完选择 = 本页选分类成功
             }
         }
-        progress(40, '分类选择完成');
-        if (dryRun) { await page.screenshot({ path: 'step4_category.png' }); log('截图已保存: step4_category.png'); }
 
-        // ── STEP 4.5：点「下一步，完善商品信息」进入第二段表单（新版两段式发布）──
-        //    v3 已在前置步骤点过「下一步」进表单，跳过。
-        progress(42, '进入完善商品信息');
-        if (!v3Done) try {
-            // 按钮文字可能是「下一步，完善商品信息」/「下一步」/「完善商品信息」
+        // 点「下一步，完善商品信息」进第2页。返回是否点成功。
+        async function clickNextToForm() {
             let nextClicked = false;
             const nextBtn = page.locator('button:has-text("完善商品信息"), button:has-text("下一步"), [class*="btn"]:has-text("下一步")').first();
             try { await nextBtn.click({ force: true, timeout: 5000 }); nextClicked = true; }
             catch (_) {
-                // 兜底：全局找文字含「下一步/完善商品信息」的可点击元素
                 nextClicked = await page.evaluate(() => {
                     for (const el of document.querySelectorAll('button,a,[role="button"],div,span')) {
                         const t = (el.textContent || '').replace(/\s+/g, '');
@@ -1031,10 +1041,43 @@ async function main() {
                     return false;
                 });
             }
-            if (nextClicked) { log('STEP4.5: 已点「下一步，完善商品信息」'); await page.waitForTimeout(2500); }
+            if (nextClicked) { await page.waitForTimeout(2500); await closePddPopups(); }
+            return nextClicked;
+        }
+
+        if (category && !v2CategoryDone && !v3Done) {
+            // A) 先在第1页找分类(有的店分类和主图/标题同页)
+            categoryDone = await trySelectCategoryHere(catKeyword);
+            if (!categoryDone) log('STEP4: 第1页无分类框，先进「完善商品信息」再找分类');
+        }
+        progress(40, '分类选择完成');
+        if (dryRun) { await page.screenshot({ path: 'step4_category.png' }); log('截图已保存: step4_category.png'); }
+
+        // ── STEP 4.5：点「下一步，完善商品信息」进第2页；若分类还没选,在第2页补选 ──
+        //    v3 已在前置步骤点过「下一步」进表单，跳过。
+        progress(42, '进入完善商品信息');
+        if (!v3Done) try {
+            const nextClicked = await clickNextToForm();
+            if (nextClicked) log('STEP4.5: 已点「下一步，完善商品信息」');
             else log('⚠ STEP4.5: 未找到「下一步/完善商品信息」按钮（可能是单段式表单，继续）');
-            await closePddPopups();
+            // B) 第1页没选到分类 → 现在在第2页(完善商品信息)再找一次分类
+            if (category && !v2CategoryDone && !v3Done && !categoryDone) {
+                categoryDone = await trySelectCategoryHere(catKeyword);
+                if (categoryDone) log('STEP4.5: 已在第2页选中分类');
+            }
         } catch (e) { log('STEP4.5: 进入完善商品信息跳过: ' + e.message.split('\n')[0]); }
+        // 两页都没选到分类 → 中断,别带着未选分类去提交(会失败/草稿)
+        if (category && !v2CategoryDone && !v3Done && !categoryDone) {
+            if (dryRun) { try { await page.screenshot({ path: 'step4_no_cat.png' }); log('截图: step4_no_cat.png'); } catch (_) {} }
+            throw new Error('分类未选中：第1页与「完善商品信息」页都没找到分类搜索框(拼多多渲染慢或再次改版)。请重试上新；若反复出现请截图页面反馈（关键词：' + catKeyword + '）');
+        }
+        // 校验：若页面提示「请先选择分类」则中断
+        {
+            const needCat = await page.evaluate(() => document.body.innerText.includes('请先选择分类') || document.body.innerText.includes('请选择分类'));
+            if (needCat) {
+                throw new Error('分类未选中：拼多多提示「请先选择分类」。请检查软件里所选末级品类名是否与拼多多类目库一致（当前关键词：' + catKeyword + '）');
+            }
+        }
         if (dryRun) { await page.screenshot({ path: 'step4_5_next.png' }); log('截图已保存: step4_5_next.png'); }
 
         // ── STEP 5：填写商品属性 ────────────────────────────────────────
@@ -1946,12 +1989,25 @@ async function main() {
             return;
         }
 
-        const submitBtn = await page.$('button:has-text("提交并上架"), button:has-text("发布商品")');
-        if (!submitBtn) {
-            error('找不到提交按钮');
-            return;
+        // 提交按钮定位：不同店铺/版式文案不一(提交并上架/发布商品/提交商品/立即发布/确认发布/提交)。
+        //   原来只认"提交并上架/发布商品"两种 → 新店按钮文案不同就"找不到提交按钮"。这里先按 has-text 试主文案，
+        //   缺则回退用 evaluate 找可见按钮(与本文件二次确认框同款做法),扩到更多同义文案,并点它。
+        let submitBtn = await page.$('button:has-text("提交并上架"), button:has-text("发布商品"), button:has-text("提交商品"), button:has-text("立即发布")');
+        if (submitBtn) {
+            await submitBtn.evaluate(el => el.click());
+        } else {
+            const clicked = await page.evaluate(() => {
+                const re = /^(提交并上架|发布商品|提交商品|立即发布|确认发布|提交|发布)$/;
+                const btns = [...document.querySelectorAll('button,[role="button"],[class*="btn"]')]
+                    .filter(b => b.offsetParent !== null && re.test((b.textContent || '').replace(/\s+/g, '')));
+                if (btns.length) { btns[btns.length - 1].click(); return true; }   // 提交钮通常在页面底部，取最后一个
+                return false;
+            });
+            if (!clicked) {
+                error('找不到提交按钮');
+                return;
+            }
         }
-        await submitBtn.evaluate(el => el.click());
         await sleep(2000);
         await waitCaptchaCleared(page, '提交上架');   // 提交是风控高发点，触发滑块则暂停等人工划过再续
 

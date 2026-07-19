@@ -70,6 +70,12 @@ public class ListingService {
             config.setCookiesPath(userDataDir + "/pdd_cookies.json");
         }
         // userDataDir 为空时不填：pdd_listing.js 默认放 cookie 同目录的 pdd_browser_profile（保持单店旧行为）。
+        // 诊断：明确本次上新用的是哪个 profile 的 cookie/目录。排"店铺管理重登了 storeN、
+        // 上新却跑默认店(targetProfile 为空)"这类跑错 profile 问题——两者路径不同就会要求重新登录。
+        log.info("[上新] 使用 cookiesPath={} userDataDir={}",
+                config.getCookiesPath(),
+                (config.getUserDataDir() == null || config.getUserDataDir().isBlank())
+                        ? "(脚本默认: cookie同目录/pdd_browser_profile)" : config.getUserDataDir());
 
         String configJson = objectMapper.writeValueAsString(config);
         File projectRoot = scriptFile.getParentFile();

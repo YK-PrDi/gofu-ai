@@ -33,6 +33,7 @@ public class StyleImportService {
     private final String cloudBase;
     private final SemiAutoService semiAutoService;
     private final KuaimaiService kuaimaiService;
+    private final AccessoryRuleService accessoryRuleService;
     private final ObjectMapper om = new ObjectMapper();
     private final OkHttpClient http = new OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
@@ -40,10 +41,12 @@ public class StyleImportService {
             .build();
 
     public StyleImportService(@Value("${gofu.cloud.base-url:http://127.0.0.1:5020}") String cloudBase,
-                              SemiAutoService semiAutoService, KuaimaiService kuaimaiService) {
+                              SemiAutoService semiAutoService, KuaimaiService kuaimaiService,
+                              AccessoryRuleService accessoryRuleService) {
         this.cloudBase = cloudBase != null ? cloudBase.replace("localhost", "127.0.0.1") : "http://127.0.0.1:5020";
         this.semiAutoService = semiAutoService;
         this.kuaimaiService = kuaimaiService;
+        this.accessoryRuleService = accessoryRuleService;
     }
 
     // ── 异步导入进度：导入是单次阻塞调用(上传16张+反推刷ERP缓存+云端出21个SKU方案+AI标题≈90秒)，
@@ -202,6 +205,40 @@ public class StyleImportService {
                     unmatchedHints.add(String.valueOf(r.get("error")));
         }
 
+        // 2.4) 配件自动搭配：批量/导入链原来只反推主件、从不解析配件 → 云端出的方案无配件阶梯
+        //      (对比手动上新会调 /api/listing/auto-resolve)。此处补上：按规则库+ERP单品池把主件展开成
+        //      配件/批量件候选(role=accessory/batch)，并入 mainSkus 一起喂 sku-plans，方案才有配件阶梯。
+        //      花洒配件规则参考 底层信息/花洒配件信息.xlsx → accessory-rules.json。
+        if (!mainSkus.isEmpty()) {
+            try {
+                String primaryMainCode = String.valueOf(mainSkus.get(0).get("itemCode"));
+                List<Map<String, Object>> erpPool = new ArrayList<>();
+                for (Map<String, Object> it : kuaimaiService.getAllSkuItemsCached()) {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("itemCode", it.getOrDefault("outerId", ""));
+                    m.put("name", it.getOrDefault("title", it.getOrDefault("outerId", "")));
+                    erpPool.add(m);
+                }
+                Map<String, Object> resolved = accessoryRuleService.resolveForMain(cat, primaryMainCode, erpPool);
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> accSkus = (List<Map<String, Object>>) resolved.getOrDefault("accSkus", List.of());
+                int added = 0;
+                for (Map<String, Object> a : accSkus) {
+                    String code = String.valueOf(a.getOrDefault("itemCode", ""));
+                    if (code.isBlank() || !seenCodes.add(code)) continue;   // 跨源去重:配件编码不与主件/已加重复
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("itemCode", code); m.put("name", a.getOrDefault("name", code));
+                    m.put("role", a.getOrDefault("role", "accessory"));
+                    mainSkus.add(m);
+                    added++;
+                }
+                log.info("[导入·配件搭配] 品类={} 主件={} → 解析出配件{}个,并入方案候选{}个",
+                        cat, primaryMainCode, accSkus.size(), added);
+            } catch (Exception e) {
+                log.warn("[导入·配件搭配] 解析失败(不阻断,方案将无配件阶梯): {}", e.getMessage());
+            }
+        }
+
         // 2.5) 白底图兜底：文件夹没放白底图子目录时，用反推命中的编码从快麦拉白底图 URL
         //      (白底图本就在快麦里，编码已知就该自动取，不该要求用户在文件夹里再放一份)。
         //      白底图是下游 SKU 图补生(step2)的结构/颜色参考，缺它整条自动链会停。
@@ -209,7 +246,11 @@ public class StyleImportService {
             pg.set("从快麦拉取白底图…", 36);
             int got = 0;
             List<String> noWhiteCodes = new ArrayList<>();
+            int mainCount = 0;
             for (Map<String, Object> m : mainSkus) {
+                // 只给主件拉白底图：配件(软管/滤芯/底座)本无白底图，纳入会刷假"缺白底"告警。
+                if (!"main".equals(String.valueOf(m.getOrDefault("role", "main")))) continue;
+                mainCount++;
                 String code = String.valueOf(m.get("itemCode"));
                 try {
                     // 快麦白底图是 pdd 图床 http URL；云端 localizeWhite 支持 http URL(生图前自动下载)，
@@ -227,7 +268,7 @@ public class StyleImportService {
             if (!noWhiteCodes.isEmpty())
                 unmatchedHints.add("快麦缺白底图的编码：" + String.join("、", noWhiteCodes)
                         + "。无白底图无法自动补生SKU图，请在快麦补白底图后重试，或手动导入SKU图。");
-            log.info("[导入·白底图] 快麦兜底拉取白底图 {}/{} 张(命中编码{}个)", got, mainSkus.size(), mainSkus.size());
+            log.info("[导入·白底图] 快麦兜底拉取白底图 {}/{} 张(主件编码{}个)", got, mainCount, mainCount);
         }
 
         // 3) 建 context（先存图+品类，标题临时用主件名，后面 AI 覆盖）

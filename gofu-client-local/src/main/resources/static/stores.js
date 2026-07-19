@@ -89,6 +89,17 @@ window.StoreMixin = {
         this.stores.msgType = 'err';
       }
     },
+    // 登录态显示文案：cookie 存在≠当前有效（拼多多 token 会过期）。保活每 8h 回写一次 cookie，
+    // 故 lastActiveMs 超过 24h 未刷新 = 保活已多次失败/登录很可能失效 → 显示"可能过期"，提示重登。
+    storeLoginText(s) {
+      if (!s || !s.loggedIn) return '未登录';
+      const last = s.lastActiveMs || 0;
+      if (last && (Date.now() - last) > 24 * 3600 * 1000) return '可能过期';
+      return '已登录';
+    },
+    storeLoginStale(s) {
+      return this.storeLoginText(s) === '可能过期';
+    },
     // 手动改店铺名（自动识别不到，或想改成自定义名时）
     async renameStorePrompt(s) {
       const nn = window.prompt('修改店铺名', s.name || '');
