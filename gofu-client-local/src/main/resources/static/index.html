@@ -433,6 +433,28 @@
           </div>
           <div v-else class="empty" style="padding:6px">无{{ grp[0] }}{{ grp[0]==='SKU图'?'（自动补生中或缺白底图）':'' }}</div>
         </template>
+        <!-- SKU 方案(布局)：补生后从 context 刷入。含型号/主件/配件/成本/售价+挂的SKU图 -->
+        <template v-if="batch.preview.plans && batch.preview.plans.length">
+          <div class="subhead">SKU 方案（{{ batch.preview.plans.length }} 套）</div>
+          <div class="plan-tabs">
+            <button v-for="(p,i) in batch.preview.plans" :key="i" class="plan-tab" :class="{active:i===(batch.preview.planIdx||0)}" @click="batch.preview.planIdx=i">{{ p.planName || ('方案'+(i+1)) }}</button>
+          </div>
+          <table>
+            <thead><tr><th>SKU图</th><th>型号</th><th>主件</th><th>配件</th><th class="num">成本</th><th class="num">售价</th></tr></thead>
+            <tbody>
+              <tr v-for="(it,idx) in (batch.preview.plans[batch.preview.planIdx||0].items||[])" :key="idx">
+                <td><div class="cell" style="width:40px;height:40px;aspect-ratio:auto">
+                  <img v-if="it._img" :src="it._img" /><span v-else class="ph" style="font-size:10px">—</span>
+                </div></td>
+                <td>{{ it.skuDisplayName || it.name }}</td>
+                <td>{{ it.spec1 }}</td>
+                <td>{{ (it.accParts && it.accParts.length) ? it.spec2 : '无' }}</td>
+                <td class="num">{{ fmt(it.cost) }}</td>
+                <td class="num">{{ fmt(it.groupPrice) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
       </div>
       <!-- 白底图预览（选主件即自动拉取，缺图提示导入）——独立于生成结果，先于 ctx 显示 -->
       <div v-if="mainCodes.length || entry.whites.length" class="section">

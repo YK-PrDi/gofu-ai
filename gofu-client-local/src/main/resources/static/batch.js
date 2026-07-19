@@ -117,6 +117,7 @@ window.BatchMixin = {
           name: (o.mainItem || o.productName), shop: o.shopName, category: o.category, title: o.title || '',
           main: (d.main || []).map(toUrl), detail: (d.detail || []).map(toUrl),
           white, sku: (d.sku || []).map(toUrl),
+          plans: o._plans || null, planIdx: 0,   // 已补生过的商品带出其方案(布局);未补生则空
         };
         this.batchMsg('预览「' + this.batch.preview.name + '」：主图' + (d.main||[]).length + '·详情' + (d.detail||[]).length + '·白底' + white.length + '·sku' + (d.sku||[]).length, 'ok');
       } catch (e) {
@@ -247,12 +248,21 @@ window.BatchMixin = {
         await this.fillCostAndPrice();
         const zero = (this.plans[0]?.items || []).filter(it => !(it.groupPrice > 0)).length;
         if (zero > 0) { o.taskStatus = 'error'; o.taskMsg = '✗ 有 ' + zero + ' 个SKU定不出价(快麦缺进价)，请补进价后重试'; return; }
-        // 补生+定价成功→清掉预检旧的"缺图"文案(#4:那是补生前的,已过时),并把新SKU图+AI标题刷进预览
+        // 补生+定价成功→清掉预检旧的"缺图"文案(#4),并把 context 的 SKU图+方案(布局)+标题刷进预览strip
         o.missing = (o.missing || []).filter(m => !m.includes('缺图'));
-        o.title = this.ctx?.visual?.title || '';   // 存该商品AI标题,预览strip显示
+        o.title = this.ctx?.visual?.title || '';
         if (this.batch.preview && this.batch.preview.name === (o.mainItem || o.productName)) {
-          this.batch.preview.sku = (this.skuImages || []).map(k => this.signed[k]).filter(Boolean);
           this.batch.preview.title = o.title;
+          // 方案(布局):每套 items 附上已签名的SKU图URL(_img),供预览表格显示
+          const plans = (this.ctx?.structure?.plans || []).map(p => ({
+            planName: p.planName, description: p.description,
+            items: (p.items || []).map(it => ({ ...it, _img: it.imgDir ? (this.signed[it.imgDir] || '') : '' })),
+          }));
+          this.batch.preview.plans = plans;
+          this.batch.preview.planIdx = 0;
+          // SKU图缩略:取首套方案各item的图
+          this.batch.preview.sku = (plans[0]?.items || []).map(it => it._img).filter(Boolean);
+          o._plans = plans;   // 存到该行,重新预览时能带出方案(布局),不用再建context
         }
         // 3) 按设置决定是否自动上新
         if (!this.settings.batchAutoList) {
