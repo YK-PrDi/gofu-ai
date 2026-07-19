@@ -118,11 +118,30 @@ window.BatchMixin = {
           main: (d.main || []).map(toUrl), detail: (d.detail || []).map(toUrl),
           white, sku: (d.sku || []).map(toUrl),
           plans: o._plans || null, planIdx: 0,   // 已补生过的商品带出其方案(布局);未补生则空
+          contextId: o.contextId || '',           // 已建context的带出,标题可编辑存回
         };
         this.batchMsg('预览「' + this.batch.preview.name + '」：主图' + (d.main||[]).length + '·详情' + (d.detail||[]).length + '·白底' + white.length + '·sku' + (d.sku||[]).length, 'ok');
       } catch (e) {
         this.batchMsg('预览失败：' + e.message, 'err');
       }
+    },
+    // 标题编辑后存回 context(上新用 context.visual.title)。拉最新context→改title→保存,不覆盖其它字段。
+    async batchSaveTitle() {
+      const p = this.batch.preview;
+      if (!p || !p.contextId) return;
+      try {
+        const r = await fetch('/api/context/' + encodeURIComponent(p.contextId));
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const ctx = await r.json();
+        if ((ctx.visual?.title || '') === p.title) return;   // 没改就不存
+        ctx.visual.title = p.title;
+        const sr = await fetch('/api/context', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ctx) });
+        if (!sr.ok) throw new Error('HTTP ' + sr.status);
+        // 同步到该行 o.title
+        const o = this.batch.outcomes.find(x => (x.mainItem || x.productName) === p.name);
+        if (o) o.title = p.title;
+        this.batchMsg('标题已保存', 'ok');
+      } catch (e) { this.batchMsg('标题保存失败：' + e.message, 'err'); }
     },
     // 全自动补生:对所有"缺图·可AI生成"的商品串行跑 batchGenSku(建context→补生SKU图→定价→按设置上新)。
     // 不用人工逐个点。串行(共用生图队列);单个失败不影响其余。
@@ -253,6 +272,7 @@ window.BatchMixin = {
         o.title = this.ctx?.visual?.title || '';
         if (this.batch.preview && this.batch.preview.name === (o.mainItem || o.productName)) {
           this.batch.preview.title = o.title;
+          this.batch.preview.contextId = contextId;   // 供标题编辑后存回 context
           // 方案(布局):每套 items 附上已签名的SKU图URL(_img),供预览表格显示
           const plans = (this.ctx?.structure?.plans || []).map(p => ({
             planName: p.planName, description: p.description,
