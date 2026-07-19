@@ -438,7 +438,11 @@ async function main() {
     // guard（M15）：持久化 profile 一旦有过登录态（Default/Network/Cookies 存在），就**不再**灌旧 cookie——
     // 否则每次启动都把可能已过期的旧 pdd_cookies.json 叠加覆盖到活登录态上，反而缩短登录寿命。
     const profileCookieDb = path.join(userDataDir, 'Default', 'Network', 'Cookies');
-    const profileHasLogin = fs.existsSync(profileCookieDb);
+    // 修:原来只判文件存在→但浏览器跑一次就生成空/失效的 Cookies 库文件,被误判为"有登录态"→
+    //    跳过重灌+检查却是未登录(日志矛盾:说有登录态、实际 false)。改为要求库文件有实际内容(>4KB),
+    //    空/新建的 SQLite 库通常仅几百B~2KB,存了真实登录cookie后会明显更大。
+    let profileHasLogin = false;
+    try { profileHasLogin = fs.existsSync(profileCookieDb) && fs.statSync(profileCookieDb).size > 4096; } catch (_) {}
     // #1b 修：判断 pdd_cookies.json 是否比持久化 profile 的 Cookies 库「更新」。
     // 场景：店铺管理刚扫码登录 → runLoginOnly 把最新 cookies 写进 pdd_cookies.json，
     // 但持久化 profile 的 Cookies 库可能是更早那次留下的旧登录态。此时若沿用旧 guard
