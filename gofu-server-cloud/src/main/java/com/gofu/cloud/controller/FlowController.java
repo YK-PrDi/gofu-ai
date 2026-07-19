@@ -46,19 +46,22 @@ public class FlowController {
     private final CosService cosService;
     private final AppProperties appProperties;
     private final com.gofu.cloud.service.lyimage.ImageGenService lyImageGen;   // 乐羽成熟 SKU 生图(sticker贴图/基准图)
+    private final com.gofu.cloud.service.lyimage.PromptTemplateService templateService;   // 0a：主图构图库(按品类取构图)
     private final OkHttpClient http = new OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).build();
 
     public FlowController(ImageGenerationService imageGen, LyTextService lyTextService,
                           ContextService contextService, CosService cosService,
                           AppProperties appProperties,
-                          com.gofu.cloud.service.lyimage.ImageGenService lyImageGen) {
+                          com.gofu.cloud.service.lyimage.ImageGenService lyImageGen,
+                          com.gofu.cloud.service.lyimage.PromptTemplateService templateService) {
         this.imageGen = imageGen;
         this.lyTextService = lyTextService;
         this.contextService = contextService;
         this.cosService = cosService;
         this.appProperties = appProperties;
         this.lyImageGen = lyImageGen;
+        this.templateService = templateService;
     }
 
     /**
@@ -177,7 +180,20 @@ public class FlowController {
         // M11：视觉分析白底图 → 产品专属多段 prompt。请求词优先用前端传入(customRequest)，否则自动生成。
         List<String> segPrompts = new ArrayList<>();
         String seriesPlan = "";   // 07.10#1 保留【总分析/系列文案规划】作全局共享上下文(原来被丢弃)
+        // 0a 防同质化：先查【主图构图库】(按品类取N套确定的优质构图,库为主+白底图锁主体)。
+        //   命中→直接用库构图当每张 base prompt(不再让 GPT 看白底图现编,构图从"AI随机"变"人工筛过的库里随机",
+        //   第1张也从库随机取而非AI默认正面)。未命中(该品类无库)→回退下方 GPT 现编分析。
         try {
+            String skuHint = (ctx.getMainItem() == null ? "" : ctx.getMainItem());
+            boolean hasFilter = skuHint.contains("滤芯") || detectFilterInPlans(ctx);
+            List<String> libComps = templateService.pickMainCompositions(ctx.getCategory(), skuHint, mainTotal, hasFilter);
+            if (!libComps.isEmpty()) {
+                segPrompts.addAll(libComps);
+                log.info("0a 主图构图库命中 {} 套构图(品类={}, 带滤芯={}) → 用库构图,跳过AI现编", libComps.size(), ctx.getCategory(), hasFilter);
+            }
+        } catch (Exception e) { log.warn("0a 主图构图库查询失败(回退AI现编): {}", e.getMessage()); }
+        // 库未命中(该品类无构图库)才走 GPT 看白底图现编分析。
+        if (segPrompts.isEmpty()) try {
             String req = (customRequest != null && !customRequest.isBlank()) ? customRequest : autoCustomRequest(ctx);
             // A3 跨次防同质化：每次生图注入一个随机【构图母题种子】——打乱6种机位母题分配到各张图的起始顺序。
             // 人工流程"再生一套覆盖原来"时，首图(最关键)及各张的机位/构图母题与上一套不同，而非只换背景色。
@@ -288,6 +304,25 @@ public class FlowController {
     }
 
     /** 自动生成"生图要求"（M11：零人工——按品类/卖点/主件名拼一句喂给视觉分析）。 */
+    /** 0a：该商品方案里是否带滤芯配件(花洒喷头才据此纳入滤芯构图)。看方案 items 的名称/型号/配件码含"滤芯"。 */
+    private boolean detectFilterInPlans(ProductContext ctx) {
+        try {
+            if (ctx.getStructure() == null || ctx.getStructure().getPlans() == null) return false;
+            for (var p : ctx.getStructure().getPlans()) {
+                if (p.getItems() == null) continue;
+                for (var it : p.getItems()) {
+                    String s = (it.getName() == null ? "" : it.getName()) + " "
+                             + (it.getSpec2() == null ? "" : it.getSpec2());
+                    if (s.contains("滤芯")) return true;
+                    if (it.getAccParts() != null)
+                        for (var ap : it.getAccParts())
+                            if (ap.getCode() != null && ap.getCode().contains("滤芯")) return true;
+                }
+            }
+        } catch (Exception ignore) {}
+        return false;
+    }
+
     private String autoCustomRequest(ProductContext ctx) {
         String cat = ctx.getCategory() == null ? "" : ctx.getCategory();
         String leaf = cat.contains(">") ? cat.substring(cat.lastIndexOf('>') + 1).trim() : cat;

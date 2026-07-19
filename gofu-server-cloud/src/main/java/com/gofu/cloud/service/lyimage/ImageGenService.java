@@ -427,7 +427,12 @@ public class ImageGenService {
             //    判据：主件名/skuName 真提到"锅盖"才算真锅盖架。
             String floorHint = (shelfSkuHint + " " + (skuName == null ? "" : skuName));
             boolean isRealLidRack = floorHint.contains("锅盖");
-            if (leaf.contains("锅盖架") && "落地".equals(pick.group()) && isRealLidRack) {
+            // 原则修(0c)：构图最多细分到品类(锅盖架分落地/吸附两种构图风格)，**不按具体商品**。
+            //   route2 把「某张具体产品照(米奇/台面款)」合成收纳物当 img2img 底，属"细分到商品"——
+            //   会把小熊锅盖架 img2img 成那张预制款(主题没换/颜色不符)。故：**有真实白底图就绕开 route2**，
+            //   白底图作唯一主体锚走通用整图AI(与树菜板架同理)；route2 只在**无白底图**时作兜底
+            //   (AI 从零画架体易崩，才借预制底给结构)。
+            if (leaf.contains("锅盖架") && "落地".equals(pick.group()) && isRealLidRack && !hasWhiteBg) {
                 try {
                     File rackImg = (shelfBase != null && shelfBase.isFile()) ? shelfBase
                             : templateService.assetByPath("base/shelf-落地锅盖架-米奇款.png");
@@ -454,9 +459,9 @@ public class ImageGenService {
             }
 
             // 参考图组装：
-            //  · route2(真锅盖架)已按"白底图优先+构图底版式参考"进 shelfRefs,此处不再重复加。
-            //  · 其余品种:有预制图作构图底(版式参考)+白底图锁主体;白底图存在且非route2→丢弃预制(避免实物被画成别款)。
-            boolean dropPresetRef = hasWhiteBg && !(leaf.contains("锅盖架") && "落地".equals(pick.group()) && isRealLidRack);
+            //  · route2(无白底图兜底)已按"构图底"进 shelfRefs,此处不再重复加。
+            //  · 有白底图=唯一主体锚,一律丢弃预制产品照(避免实物被画成预制那款,不再对锅盖架开例外)。
+            boolean dropPresetRef = hasWhiteBg;
             if (!floorlidComposed) {   // 非route2 才走通用组装(route2 已自行组好白底优先)
                 if (hasWhiteBg) shelfRefs.add(whiteBgRef);   // 白底图优先(主体锚)
                 if (shelfBase != null && shelfBase.isFile() && !dropPresetRef) shelfRefs.add(shelfBase);   // 预制图作版式参考,放白底之后

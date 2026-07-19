@@ -199,6 +199,64 @@ public class PromptTemplateService {
         }
     }
 
+    /**
+     * 主图构图库选择（0a 防同质化）：按品类从 main-compositions.json 取 N 套【不重复】构图 prompt。
+     *  · 库为主 + 白底图锁主体：只提供版式/主体关系/文字区位/色彩/视效，产品本体由白底图 ref 决定。
+     *  · 按叶子类目冒泡匹配 key（末段==leaf，或整名相等，兼容 category 存全路径/裸叶子）。
+     *  · 锅盖架分落地/吸盘两子组：skuHint 含 吸盘/壁挂/墙/免钉 → 吸盘组，否则 落地组。
+     *  · 花洒喷头：默认排除 focus=滤芯 的构图；hasFilter=true（该 SKU 带滤芯配件）才纳入滤芯构图。
+     *  N 大于库容量时循环取（仍打乱顺序，尽量错开）。命中不到返回空列表（调用方回退 AI 现编）。
+     * @return 每套构图的完整 prompt 列表（长度尽量=count；空=未命中，走原 AI 分析）。
+     */
+    @SuppressWarnings("unchecked")
+    public List<String> pickMainCompositions(String category, String skuHint, int count, boolean hasFilter) {
+        if (category == null || category.isBlank() || count <= 0) return List.of();
+        try {
+            Map<String, Object> root = om.readValue(PromptLoader.load("prompt/main-compositions.json"), Map.class);
+            Map<String, Object> byCat = (Map<String, Object>) root.getOrDefault("byCategory", Map.of());
+            String leaf = category.replace('＞', '>').replace('›', '>');
+            leaf = leaf.contains(">") ? leaf.substring(leaf.lastIndexOf('>') + 1).trim() : leaf.trim();
+            Object node = null;
+            for (Map.Entry<String, Object> e : byCat.entrySet()) {
+                String k = e.getKey();
+                if (k.equals(leaf)) { node = e.getValue(); break; }
+            }
+            if (node == null) return List.of();
+            // 锅盖架等分组：node 是 {落地:[...],吸盘:[...]}；取对应组
+            List<Map<String, Object>> entries;
+            if (node instanceof Map) {
+                Map<String, Object> groups = (Map<String, Object>) node;
+                String hint = skuHint == null ? "" : skuHint;
+                String group = (hint.contains("吸盘") || hint.contains("壁挂") || hint.contains("墙") || hint.contains("免钉")) ? "吸盘" : "落地";
+                if (!(groups.get(group) instanceof List)) group = groups.containsKey("落地") ? "落地" : groups.keySet().iterator().next();
+                entries = (List<Map<String, Object>>) groups.getOrDefault(group, List.of());
+            } else if (node instanceof List) {
+                // 花洒喷头等单池：不带滤芯配件时剔除 focus=滤芯 的构图，避免不带滤芯的花洒画滤芯特写
+                entries = new java.util.ArrayList<>();
+                for (Object o : (List<Object>) node) {
+                    if (!(o instanceof Map)) continue;
+                    Map<String, Object> m = (Map<String, Object>) o;
+                    if (!hasFilter && "滤芯".equals(String.valueOf(m.get("focus")))) continue;
+                    entries.add(m);
+                }
+            } else return List.of();
+            if (entries.isEmpty()) return List.of();
+            // 打乱后取 count 套；不足则循环补（跨次随机→防同质化）
+            List<Map<String, Object>> pool = new java.util.ArrayList<>(entries);
+            java.util.Collections.shuffle(pool);
+            List<String> out = new java.util.ArrayList<>();
+            for (int i = 0; i < count; i++) {
+                Map<String, Object> e = pool.get(i % pool.size());
+                String p = String.valueOf(e.getOrDefault("prompt", "")).trim();
+                if (!p.isBlank()) out.add(p);
+            }
+            return out;
+        } catch (Exception e) {
+            log.warn("主图构图库选择失败(category={}): {}", category, e.getMessage());
+            return List.of();
+        }
+    }
+
     /** 架类参考图落地：classpath assets/shelf-ref/<leaf>/<group>/<ref> → 用户目录。找不到返回 null。 */
     public File shelfRefFile(String leaf, String group, String ref) {
         if (ref == null || ref.isBlank()) return null;
