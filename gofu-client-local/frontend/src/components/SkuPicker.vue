@@ -51,6 +51,12 @@ async function refreshCache() {
   }
 }
 
+// 选品行白底图预览:picPath 为真实图(http 且非 no_pic 占位)才显示(源 rowImg)
+function rowImg(r) {
+  const p = r?.picPath
+  return (p && p.startsWith('http') && !p.includes('no_pic')) ? p : ''
+}
+
 function toggle(r) {
   const id = r.outerId
   if (roleFor[id]) delete roleFor[id]
@@ -89,6 +95,12 @@ watch(open, (v) => { if (v && !all.value.length) loadAll() })
           <el-checkbox :model-value="!!roleFor[row.outerId]" @change="toggle(row)" />
         </template>
       </el-table-column>
+      <el-table-column label="图" width="56">
+        <template #default="{ row }">
+          <img v-if="rowImg(row)" :src="rowImg(row)" class="row-thumb" title="白底图预览" />
+          <span v-else class="no-img">无图</span>
+        </template>
+      </el-table-column>
       <el-table-column label="名称" prop="title" show-overflow-tooltip />
       <el-table-column label="编码" prop="outerId" width="150" />
       <el-table-column label="角色" width="120">
@@ -112,4 +124,6 @@ watch(open, (v) => { if (v && !all.value.length) loadAll() })
 <style scoped>
 .picker-head { display: flex; gap: 12px; margin-bottom: 12px; }
 .hint { color: #909399; font-size: 12px; margin-right: auto; }
+.row-thumb { width: 40px; height: 40px; object-fit: contain; border: 1px solid #ebeef5; border-radius: 4px; }
+.no-img { color: #c0c4cc; font-size: 11px; }
 </style>

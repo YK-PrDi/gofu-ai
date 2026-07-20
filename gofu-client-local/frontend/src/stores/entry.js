@@ -64,6 +64,9 @@ export const useEntryStore = defineStore('entry', {
         })
         delete this.whiteCodeMap[code]
         delete this.importedFor[code]
+        // 修(旧版遗留):删单品时同步从缺图列表移除该编码,否则删掉选错的品后仍提示导入它的白底图
+        this.whiteCheck.missing = this.whiteCheck.missing.filter((c) => c !== code)
+        this.whiteCheck.has = this.whiteCheck.has.filter((c) => c !== code)
       }
       this.skus.splice(i, 1)
       if (!this.mainCodes.length) this.whiteCheck = { done: false, has: [], missing: [] }
