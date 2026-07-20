@@ -41,7 +41,11 @@ public class StoreService {
     @SuppressWarnings("unchecked")
     public List<Store> loadStores() {
         File f = storesFile();
-        if (!f.isFile()) return new ArrayList<>();
+        if (!f.isFile()) {
+            // 诊断#2：打包态最常见失配根因=baseDir()指到的目录里根本没有 stores.json(UI存的是另一个目录)。
+            log.info("[诊断·loadStores] stores.json 不存在，path={}", f.getAbsolutePath());
+            return new ArrayList<>();
+        }
         try {
             Map<String, Object> root = om.readValue(f, Map.class);
             List<Map<String, Object>> arr = (List<Map<String, Object>>) root.getOrDefault("stores", List.of());
@@ -53,9 +57,13 @@ public class StoreService {
                 if (m.get("dsrUrl") != null) s.setDsrUrl(String.valueOf(m.get("dsrUrl")));
                 if (!s.getProfile().isBlank()) out.add(s);
             }
+            // 诊断#2：打印实际路径+读到的店名(带引号露出首尾空格/全角)，与预检 warning 的目录名逐字对照即可定位失配。
+            log.info("[诊断·loadStores] path={} 读到 {} 个店: {}",
+                    f.getAbsolutePath(), out.size(),
+                    out.stream().map(s -> "「" + s.getName() + "」").toList());
             return out;
         } catch (Exception e) {
-            log.warn("加载 stores.json 失败: {}", e.getMessage());
+            log.warn("加载 stores.json 失败: path={} {}", f.getAbsolutePath(), e.getMessage());
             return new ArrayList<>();
         }
     }
@@ -91,7 +99,10 @@ public class StoreService {
         //    全角空格/半角空格/前后空格(打包态实测"已登店铺却未匹配"多因此)，不归一化会漏判。
         for (Store s : stores) if (key.equals(normName(s.getName()))) return s.getProfile();
         // 2) H1修：子串仅在【唯一命中】时采用。多于一个候选=歧义,返回 null;短店名(≤2字)不走子串。
-        if (key.length() <= 2) return null;
+        if (key.length() <= 2) {
+            log.info("[诊断·resolveProfile] 文件夹名「{}」归一化后 key「{}」精确未命中且≤2字不走子串，判未匹配", shopName, key);
+            return null;
+        }
         String hit = null;
         for (Store s : stores) {
             String n = normName(s.getName());
@@ -101,6 +112,10 @@ public class StoreService {
                 hit = s.getProfile();
             }
         }
+        // 诊断#2：失配时露出归一化后的文件夹名 key 与所有店名的归一化值，逐字对照即可判断差在哪(空格/全角/后缀)。
+        if (hit == null)
+            log.info("[诊断·resolveProfile] 文件夹名「{}」→ key「{}」未匹配任何店；候选店归一化值={}",
+                    shopName, key, stores.stream().map(s -> "「" + normName(s.getName()) + "」").toList());
         return hit;
     }
 

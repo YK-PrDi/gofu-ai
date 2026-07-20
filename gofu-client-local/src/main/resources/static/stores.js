@@ -37,12 +37,13 @@ window.StoreMixin = {
       try {
         const d = await (await fetch('/api/semi-auto/stores')).json();
         this.stores.list = d.stores || [];
-        // 目标店铺默认自动选中【第一个已登录】的店:避免运营在店铺管理登录了某店、
-        // 但第4步下拉停在"默认店铺"→上新跑单店默认profile(无该店登录态)→要求重登。
-        // 仅当当前 targetProfile 为空(没手动选过)时才自动选,不覆盖用户的手动选择。
+        // 目标店铺默认【顺位继承】:targetProfile 为空(没手动选过)时,按 store_1→store_2… 顺序
+        // 取第一个【已登录】的店(store_1没登录就跳2,直到有登录的)。都没登录则留空+提示去登录。
+        // 目的:避免登录了某店、下拉却停在别处→上新跑错店要重登。不覆盖用户手动选择。
         if (!this.targetProfile) {
           const logged = this.stores.list.find(s => s.loggedIn);
           if (logged) this.targetProfile = logged.profile;
+          // 都没登录则留空,第4步下拉旁的提示(targetStoreHint)会红字提醒去登录,不覆盖店铺管理弹窗的 msg。
         }
       } catch (e) {
         this.stores.msg = '加载店铺失败：' + e.message;

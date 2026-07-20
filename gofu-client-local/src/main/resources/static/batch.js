@@ -177,7 +177,7 @@ window.BatchMixin = {
     async batchPreflight() {
       this.batch.canRun = false;
       try {
-        const d = await this.batchApi('/api/semi-auto/preflight', { rootPath: this.batch.rootPath.trim() });
+        const d = await this.batchApi('/api/semi-auto/preflight', { rootPath: this.batch.rootPath.trim(), profitRate: this.profitRate });
         this.batch.outcomes = d.outcomes || [];
         this.batch.canRun = this.batchReadyCount > 0;
         this.batchMsg('预检完成：' + this.batchReadyCount + ' 个商品齐全可上新，其余见下方说明', this.batch.canRun ? 'ok' : 'err');
@@ -220,7 +220,7 @@ window.BatchMixin = {
         // 2) 文件夹本就齐全(无context)的走 /run。/run 重扫全根,context 商品会因本地缺SKU图被判非ready而跳过,
         //    故只取其返回里 listing_started 的行,按(店铺,商品名)回填到对应 folderItems,不覆盖 context 行。
         if (folderItems.length) {
-          const d = await this.batchApi('/api/semi-auto/run', { rootPath: this.batch.rootPath.trim() });
+          const d = await this.batchApi('/api/semi-auto/run', { rootPath: this.batch.rootPath.trim(), profitRate: this.profitRate });
           const runStarted = (d.outcomes || []).filter(x => x.status === 'listing_started');
           for (const { o, i } of folderItems) {
             const hit = runStarted.find(x => x.shopName === o.shopName && (x.productName === o.productName || x.mainItem === o.mainItem));

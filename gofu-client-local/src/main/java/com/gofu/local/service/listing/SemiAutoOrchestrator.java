@@ -64,19 +64,22 @@ public class SemiAutoOrchestrator {
      * @param skusByProduct 商品名→SKU列表(名/图/价，来自前端反推或选品)；无则视作缺 SKU。
      */
     public List<ProductOutcome> preflight(String rootPath,
-                                          Map<String, List<SemiAutoScan.SkuCheck>> skusByProduct) {
-        return walk(rootPath, skusByProduct, false);
+                                          Map<String, List<SemiAutoScan.SkuCheck>> skusByProduct,
+                                          double profitRate) {
+        return walk(rootPath, skusByProduct, false, profitRate);
     }
 
     /** 正式批量上新：预检通过的商品串行错开上新。 */
     public List<ProductOutcome> run(String rootPath,
-                                    Map<String, List<SemiAutoScan.SkuCheck>> skusByProduct) {
-        return walk(rootPath, skusByProduct, true);
+                                    Map<String, List<SemiAutoScan.SkuCheck>> skusByProduct,
+                                    double profitRate) {
+        return walk(rootPath, skusByProduct, true, profitRate);
     }
 
     private List<ProductOutcome> walk(String rootPath,
                                       Map<String, List<SemiAutoScan.SkuCheck>> skusByProduct,
-                                      boolean doListing) {
+                                      boolean doListing,
+                                      double profitRate) {
         List<ProductOutcome> outcomes = new ArrayList<>();
         SemiAutoScan.Result scan = semiAutoService.scanRoot(rootPath, storeService::resolveProfileByName);
         boolean firstListing = true;
@@ -132,7 +135,7 @@ public class SemiAutoOrchestrator {
                                 String code = String.valueOf(r.get("code"));
                                 if (!seenCodes.add(code)) continue;   // 跨源去重:同编码只建一个
                                 double cost = r.get("cost") instanceof Number n ? n.doubleValue() : 0;
-                                double price = pricingService.autoGroupPrice(cost);   // 进价→默认利润率算售价
+                                double price = pricingService.autoGroupPrice(cost, profitRate);   // 进价→本批利润率(前端随机档)算售价
                                 if (price <= 0) {
                                     nameHints.add("SKU「" + r.get("name") + "」快麦无进价，无法自动定价，请在快麦补进价或预览页手动定价");
                                     continue;

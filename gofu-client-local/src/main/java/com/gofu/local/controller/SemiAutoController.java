@@ -334,7 +334,7 @@ public class SemiAutoController {
     public ResponseEntity<?> preflight(@RequestBody Map<String, Object> body) {
         String rootPath = String.valueOf(body.getOrDefault("rootPath", ""));
         if (rootPath.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "rootPath 不能为空"));
-        return ResponseEntity.ok(Map.of("outcomes", orchestrator.preflight(rootPath, parseSkusByProduct(body))));
+        return ResponseEntity.ok(Map.of("outcomes", orchestrator.preflight(rootPath, parseSkusByProduct(body), profitRateOf(body))));
     }
 
     /** 正式批量上新：预检通过的商品串行错开上新。入参同 preflight。 */
@@ -342,7 +342,12 @@ public class SemiAutoController {
     public ResponseEntity<?> run(@RequestBody Map<String, Object> body) {
         String rootPath = String.valueOf(body.getOrDefault("rootPath", ""));
         if (rootPath.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "rootPath 不能为空"));
-        return ResponseEntity.ok(Map.of("outcomes", orchestrator.run(rootPath, parseSkusByProduct(body))));
+        return ResponseEntity.ok(Map.of("outcomes", orchestrator.run(rootPath, parseSkusByProduct(body), profitRateOf(body))));
+    }
+
+    /** 取前端本批随机到的利润率；缺省/非法回退 0（orchestrator 再回退 PricingService 默认）。 */
+    private double profitRateOf(Map<String, Object> body) {
+        return body.get("profitRate") instanceof Number pr ? pr.doubleValue() : 0;
     }
 
     /** 解析 {@code skusByProduct: { 商品名: [{name,imgPath,price}] }}。 */

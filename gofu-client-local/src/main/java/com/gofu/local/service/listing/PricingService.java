@@ -77,11 +77,21 @@ public class PricingService {
      * cost<=0 返回 0（调用方据此判定"无成本→不自动定价"）。
      */
     public double autoGroupPrice(double cost) {
+        return autoGroupPrice(cost, DEFAULT_PROFIT_RATE);
+    }
+
+    /**
+     * 便捷（带利润率）：全自动跑批把前端本批随机到的利润率透传进来算拼单价。
+     * profitRate<=0 时回退默认（等价旧行为）。修：原全自动链写死 DEFAULT_PROFIT_RATE，
+     * 前端 33/45/53 随机档形同虚设、恒定 58%→后端百分比 0.35，用户实测"利润率永远 35%"的真因。
+     */
+    public double autoGroupPrice(double cost, double profitRate) {
         if (cost <= 0) return 0;
+        double m = profitRate > 0 ? profitRate : DEFAULT_PROFIT_RATE;
         Map<String, Object> sku = new LinkedHashMap<>();
         sku.put("cost", cost);
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("profitRate", DEFAULT_PROFIT_RATE);
+        body.put("profitRate", m);
         body.put("skus", List.of(sku));
         List<Map<String, Object>> rows = (List<Map<String, Object>>) calculate(body).get("skus");
         return rows.isEmpty() ? 0 : ((Number) rows.get(0).get("pinPrice")).doubleValue();
