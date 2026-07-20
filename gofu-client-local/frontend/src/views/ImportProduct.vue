@@ -1,20 +1,15 @@
 <script setup>
-import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '@/api.js'
 import { useContextStore } from '@/stores/context.js'
+import { useImportStore } from '@/stores/import-flow.js'
 
 // P2-d:导入外部成品图→建商品。只做"选文件夹→上传→建context→载入",
 // 导入后自动链(补图/风格迁移/自动上新)依赖生图页(P2-f)/单品页(P2-e),暂留桩,那时再接。
 const router = useRouter()
 const ctxStore = useContextStore()
-
-const imp = reactive({
-  folderName: '', groups: null,
-  counts: { main: 0, detail: 0, white: 0, sku: 0 },
-  running: false, progress: 0, msg: '', msgType: '', done: false,
-})
-let lastImportedFolder = ''
+// imp 态放 store:切页再切回不丢(选的文件夹/识别结果/进度保持)
+const imp = useImportStore()
 
 // SkuItem.role 是后端枚举(MAIN/ACCESSORY/BATCH,大写),兼容大小写
 function roleLabel(r) {
@@ -72,9 +67,14 @@ async function processFiles(files) {
   if (groups.white.length === 0) notes.push('无「白底图」子目录 → 反推命中快麦编码后自动从快麦拉取，无需另放。')
   if (groups.main.length === 0) warns.push('没有「主图」——上新缺主图会被拦。')
   const head = `已读「${imp.folderName}」（主图${groups.main.length}·详情${groups.detail.length}·白底${groups.white.length}·sku${groups.sku.length}）。`
-  if (warns.length) { imp.msg = '⚠ ' + head + '注意：' + warns.concat(notes).join(' '); imp.msgType = 'err' }
-  else if (notes.length) { imp.msg = '✓ ' + head + notes.join(' ') + ' 点「导入并建商品」上传。'; imp.msgType = 'ok' }
-  else { imp.msg = '✓ ' + head + '命名/结构正常，点「导入并建商品」上传。'; imp.msgType = 'ok' }
+  if (warns.length) {
+    // 命名/结构有硬问题 → 拦下,等用户看提示决定(不自动导)
+    imp.msg = '⚠ ' + head + '注意：' + warns.concat(notes).join(' '); imp.msgType = 'err'
+    return
+  }
+  // 命名正确、结构正常 → 直接导入,不需人工再点「导入并建商品」
+  imp.msg = '✓ ' + head + (notes.length ? notes.join(' ') + ' ' : '') + '命名正常，开始导入…'; imp.msgType = 'ok'
+  runImport()
 }
 
 // 轮询导入进度(源 _pollImport)
@@ -92,8 +92,10 @@ async function pollImport(importId) {
 // 上传建商品(源 runImport 的本体,不含 autoAfterImport 自动链)
 async function runImport() {
   if (!imp.folderName || !imp.groups) return
+  // 名字正确(含"-")直接导入,不弹确认;只有格式不对才拦
   if (!imp.folderName.includes('-') && !confirm(`文件夹名「${imp.folderName}」没按「品类-主件名」命名，识别不出品类，方案/属性/标题会不准。仍要继续吗？`)) return
-  if (lastImportedFolder === imp.folderName && !confirm(`文件夹「${imp.folderName}」刚导入过，再次导入会新建重复商品。确认再导吗？`)) return
+  // 重复导入防呆:同名刚导过会建重复商品,提醒(名字正确但重复也该提醒)
+  if (imp.lastImportedFolder === imp.folderName && !confirm(`文件夹「${imp.folderName}」刚导入过，再次导入会新建重复商品。确认再导吗？`)) return
   imp.running = true; imp.progress = 0; imp.done = false
   imp.msg = '导入中（上传云端→反推SKU→出方案+AI标题）…'; imp.msgType = ''
   try {
@@ -107,7 +109,7 @@ async function runImport() {
     imp.msg = `✓ 已导入「${d.productName || imp.folderName}」：主图${d.mainCount}·详情${d.detailCount}·白底${d.whiteCount || 0}，SKU方案${d.skuPlanCount || 0}个。`
     imp.msgType = 'ok'; imp.done = true
     if (d.warnings?.length) d.warnings.forEach((w) => console.warn('[导入]', w))
-    lastImportedFolder = imp.folderName
+    imp.lastImportedFolder = imp.folderName
     await ctxStore.load(d.contextId) // 载入新建商品→顶部上下文切换器立即显示,跨页可用
     // TODO(P2-f/P2-e后接): autoAfterImport 自动链(补SKU图→风格迁移→自动上新)
   } catch (e) {
