@@ -51,6 +51,11 @@ erp-white/
 stores.json
 stores/
 sku-gen/
+# 标题库运行时缓存(userDataDir下,源是 gofu-server-cloud classpath prompt/title-lib.json)
+title-lib.json
+# 主图构图提示词素材(桌面拷入的xlsx源,不入库;已转成 main-compositions.json)。
+# 注意:底层信息/ 其余文件(花洒配件信息/产品信息填写参考/架类防比价参考图等)已入库跟踪,不能整目录忽略。
+底层信息/电商主图构图复刻提示词/
 # 备份文件
 *.bak-*
 

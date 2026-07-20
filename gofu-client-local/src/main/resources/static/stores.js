@@ -37,6 +37,13 @@ window.StoreMixin = {
       try {
         const d = await (await fetch('/api/semi-auto/stores')).json();
         this.stores.list = d.stores || [];
+        // 目标店铺默认自动选中【第一个已登录】的店:避免运营在店铺管理登录了某店、
+        // 但第4步下拉停在"默认店铺"→上新跑单店默认profile(无该店登录态)→要求重登。
+        // 仅当当前 targetProfile 为空(没手动选过)时才自动选,不覆盖用户的手动选择。
+        if (!this.targetProfile) {
+          const logged = this.stores.list.find(s => s.loggedIn);
+          if (logged) this.targetProfile = logged.profile;
+        }
       } catch (e) {
         this.stores.msg = '加载店铺失败：' + e.message;
         this.stores.msgType = 'err';

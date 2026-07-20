@@ -358,9 +358,13 @@
             <select v-model.number="genOpts.planCount" style="flex:1;max-width:110px"><option v-for="n in [1,2,3,4,5]" :key="n" :value="n">{{n}}套</option></select>
           </label>
           <label style="display:flex;align-items:center;justify-content:space-between;gap:6px">防比价模式
-            <select v-model="genOpts.templateId" style="flex:1;max-width:110px">
+            <!-- 花洒:列6套花洒防比价模板;非花洒(架类等):防比价靠后端按品类构图库随机,只给"自动"说明项 -->
+            <select v-if="isShowerCategory" v-model="genOpts.templateId" style="flex:1;max-width:110px">
               <option value="__random__">随机</option>
               <option v-for="t in antipriceTemplates" :key="t.id" :value="t.id">{{ t.name }}</option>
+            </select>
+            <select v-else disabled style="flex:1;max-width:110px" title="该品类防比价由系统按品类构图库自动处理，无需手动选模板">
+              <option>自动（按品类构图库）</option>
             </select>
           </label>
           <label style="display:flex;align-items:center;justify-content:space-between;gap:6px">改图风格
@@ -462,8 +466,10 @@
           </table>
         </template>
       </div>
-      <!-- 白底图预览（选主件即自动拉取，缺图提示导入）——独立于生成结果，先于 ctx 显示 -->
-      <div v-if="mainCodes.length || entry.whites.length" class="section">
+      <!-- 白底图预览（选主件即自动拉取，缺图提示导入）——仅左栏手动录入流(未加载ctx)显示；
+           导入/批量/风格迁移流已加载ctx时,白底图统一由下方"结果预览"里的块B(ctx.visual.whiteImages)呈现,
+           不再让本块跑到风格迁移上方错位。 -->
+      <div v-if="!ctx && (mainCodes.length || entry.whites.length)" class="section">
         <h2>产品白底图</h2>
         <div v-if="whiteFetching" class="hint">从快麦拉取白底图…</div>
         <div v-if="whiteCheck.missing.length" class="white-warn">
@@ -812,6 +818,12 @@ createApp({
     mainItemName() { const m = this.entry.skus.find(s => s.role === 'main'); return m ? m.name : ''; },
     mainCodes() { return this.entry.skus.filter(s => s.role === 'main').map(s => s.itemCode); },
     canGenerate() { return this.cat.path.length && this.entry.skus.length && this.entry.whites.length; },
+    // 防比价模板(antiprice-templates.json 6套)全是花洒专属(喷水/滤芯/拆解/人像…),只花洒品类可选;
+    // 非花洒(架类等)防比价靠后端按品类构图库随机取,没有可选模板→下拉不显示这些花洒模式,避免误选无效项。
+    isShowerCategory() {
+      const p = this.cat.path.join('>');
+      return p.includes('花洒') || p.includes('淋浴') || p.includes('喷头');
+    },
     // (#5.2b) 生成布局按钮点不了时，精确告诉用户缺哪一项(而非笼统"选品类/选主件/白底图")。
     genBlockReason() {
       const miss = [];
@@ -929,13 +941,21 @@ createApp({
       const keys = [...(this.ctx.visual.mainImages || []), ...(this.ctx.visual.detailImages || []), ...(this.ctx.visual.whiteImages || []), ...this.skuImages];
       for (const key of keys) {
         if (!key || this.signed[key]) continue;
-        // #1 一律走云端统一图片代理 /api/gen/img(经 cloudgw 转发到5020)：
-        // COS key/URL 云端用凭证 getObject 取(绕过防盗链/ACL——桶开防盗链时浏览器直连COS会403图变黑)，
-        // 本地路径云端读产物目录。不再前端直连 COS、也不再靠 sign 出预签名URL(那仍会被防盗链拦)。
-        // data:URL(极少数导入残留) 原样用。
+        // 路由分三类：
+        // ① data:URL 原样用。
+        // ② 本地路径(快麦白底图缓存 erp-white 等,Windows盘符/反斜杠/相对.\ )→ 走【本地】/api/erp/local-image(5021,读userDataDir)。
+        //    修:这类原来一律拼 /api/gen/img 走【云端】5020,但 erp-white 是本地机器目录、云端没有此文件且不在云端白名单→403碎图(根因)。
+        // ③ 其余(COS key/URL/外部OSS URL)→ 走云端 /api/gen/img(云端凭证取/服务端拉,绕防盗链)。
         this.signed[key] = key.startsWith('data:') ? key
-          : '/api/gen/img?ref=' + encodeURIComponent(key);
+          : this._isLocalPath(key) ? ('/api/erp/local-image?path=' + encodeURIComponent(key))
+          : ('/api/gen/img?ref=' + encodeURIComponent(key));
       }
+    },
+    // key 是否本地文件路径(非http URL/非COS key):Windows盘符 C:\、反斜杠、/开头、.\/./相对开头。
+    // 与后端 isLocalPath 一致;这类走本地 /api/erp/local-image 读 userDataDir(如快麦白底图缓存 erp-white)。
+    _isLocalPath(k) {
+      if (!k || k.startsWith('http://') || k.startsWith('https://') || k.startsWith('data:')) return false;
+      return /^[A-Za-z]:[\\/]/.test(k) || k.includes('\\') || k.startsWith('/') || k.startsWith('.');
     },
 
     // ── 品类级联 ──

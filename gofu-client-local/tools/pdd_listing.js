@@ -1122,33 +1122,54 @@ async function main() {
         }
         progress(60, '详情图上传完成');
 
-        // ── STEP 7：上传白底图（商品素材） ─────────────────────────────
+        // ── STEP 7：上传白底图（「商品辅助图 › 白底图 › 本地上传」） ─────────────
+        //   新版发布页白底图专区真实 DOM(用户实测)：区块 label「商品辅助图」+ 标记「白底图」，
+        //   本地上传的真实 input 是 input[data-tracking-click-viewid="white_bg_img_localfile_upload"]
+        //   (accept=image/jpeg,image/png, multiple)。原来用 [class*=white]/索引猜,匹配不到新版→白底图没传上。
+        //   改为精确定位该 input,把从快麦拉取落地的白底图(config.whiteImgDir)逐张塞进去。
         if (config.whiteImgDir && fs.existsSync(config.whiteImgDir)) {
             progress(62, '上传白底图');
-            await page.evaluate(() => window.scrollBy(0, 600));
-            await humanDelay(800, 1200);
-            // 用文字标签找白底图上传区域，而不是依赖索引
-            const whiteAreaLabel = await page.$('[class*="white"], label:has-text("白底"), label:has-text("素材"), [class*="素材"]');
-            if (whiteAreaLabel) {
-                const whiteFileInput = await page.evaluate(el => {
-                    let p = el;
-                    for (let i=0; i<5; i++) {
-                        const inp = p.querySelector('input[type="file"]');
-                        if (inp) return true;
-                        p = p.parentElement;
-                    }
-                    return false;
-                }, whiteAreaLabel);
-                log('找到白底图上传区域: ' + whiteAreaLabel + ', 有input: ' + whiteFileInput);
-            }
-            const imgInputsNow = await page.$$('input[type="file"][accept*="image"]');
-            log(`白底图上传前图片 input 总数: ${imgInputsNow.length}`);
-            if (imgInputsNow.length >= 3) {
-                const count = await uploadImagesToArea(page, 2, config.whiteImgDir);
-                log(`白底图上传完成，共 ${count} 张`);
-                await closePddPopups();
+            const whiteFiles = fs.readdirSync(config.whiteImgDir)
+                .filter(f => /\.(jpg|jpeg|png|webp)$/i.test(f)).sort()
+                .map(f => path.join(config.whiteImgDir, f));
+            if (whiteFiles.length === 0) {
+                log('白底图目录为空，跳过');
             } else {
-                log(`只有${imgInputsNow.length}个图片 input，白底图跳过（需手动上传）`);
+                await page.evaluate(() => window.scrollBy(0, 400));
+                await humanDelay(600, 1000);
+                await closePddPopups();
+                // 精确定位白底图专区本地上传 input；缺则回退旧特征(白底/素材区内的 file input)
+                let whiteInput = await page.$('input[data-tracking-click-viewid="white_bg_img_localfile_upload"]');
+                if (!whiteInput) {
+                    // 兜底：从含「白底图」标记的上传区往上找最近的 file input
+                    whiteInput = await page.evaluateHandle(() => {
+                        const marks = [...document.querySelectorAll('*')].filter(e =>
+                            (e.className && String(e.className).includes('activity-materials')) ||
+                            (e.textContent || '').replace(/\s+/g,'') === '白底图');
+                        for (const m of marks) {
+                            let p = m;
+                            for (let i=0;i<6 && p;i++,p=p.parentElement) {
+                                const inp = p.querySelector && p.querySelector('input[type="file"]');
+                                if (inp) return inp;
+                            }
+                        }
+                        return null;
+                    }).then(h => h.asElement());
+                }
+                if (whiteInput) {
+                    try {
+                        // 该 input 支持 multiple，一次塞全部白底图
+                        await whiteInput.setInputFiles(whiteFiles);
+                        await page.waitForTimeout(2000);
+                        await waitCaptchaCleared(page, '上传白底图');
+                        log(`白底图上传完成(商品辅助图·白底图)，共 ${whiteFiles.length} 张`);
+                    } catch (e) {
+                        log('白底图上传失败(不阻断上新): ' + e.message.split('\n')[0]);
+                    }
+                    await closePddPopups();
+                } else {
+                    log('未找到白底图专区上传 input（页面可能改版），跳过白底图（不影响主图/详情/SKU）');
+                }
             }
         }
 
