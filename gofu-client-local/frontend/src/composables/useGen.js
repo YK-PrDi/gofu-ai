@@ -97,8 +97,9 @@ export function useGen() {
       if (d1.error) throw new Error(d1.error)
       if (!d1.taskId) throw new Error('step1 未返回 taskId')
       ctxStore.contextId = d1.contextId
+      ctxStore.origin = 'single' // 生成一开始就标single,否则轮询期pageCtx因旧origin=import返null→预览空白,图全等结束才一次性出现(流式渲染失效)
       await pollFlowTask(d1.taskId, d1.total || 0, 12, 88)
-      await ctxStore.load(d1.contextId, 'single') // 单品页从零生成→标记来源single,本页正常显示
+      await ctxStore.load(d1.contextId, 'single')
       await fillCostAndPrice()
       gen.msg = '生成标题…'; await genTitle()
       await ctxStore.save?.(); await ctxStore.load(d1.contextId)
