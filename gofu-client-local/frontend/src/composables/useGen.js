@@ -98,7 +98,7 @@ export function useGen() {
       if (!d1.taskId) throw new Error('step1 未返回 taskId')
       ctxStore.contextId = d1.contextId
       await pollFlowTask(d1.taskId, d1.total || 0, 12, 88)
-      await ctxStore.load(d1.contextId)
+      await ctxStore.load(d1.contextId, 'single') // 单品页从零生成→标记来源single,本页正常显示
       await fillCostAndPrice()
       gen.msg = '生成标题…'; await genTitle()
       await ctxStore.save?.(); await ctxStore.load(d1.contextId)

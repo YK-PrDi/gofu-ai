@@ -86,19 +86,31 @@ function importForCode(code) {
   inp.click()
 }
 
-// ── 方案/定价(读 contextStore) ──
-const plans = computed(() => ctxStore.current?.structure?.plans || [])
+// 方案A:导入流建的商品不被动铺到单品页。除非用户主动"接管"或来源非import。
+const tookOver = ref(false)
+// pageCtx=本页承认的当前商品:来源非import,或用户已主动接管,才认;否则为空(留空等主动操作)
+const pageCtx = computed(() => {
+  if (!ctxStore.current) return null
+  if (ctxStore.origin === 'import' && !tookOver.value) return null
+  return ctxStore.current
+})
+// 有导入的商品但本页尚未接管 → 提示条
+const importPending = computed(() => ctxStore.current && ctxStore.origin === 'import' && !tookOver.value)
+function takeOver() { tookOver.value = true }
+
+// ── 方案/定价(读 pageCtx,不直接读 ctxStore.current) ──
+const plans = computed(() => pageCtx.value?.structure?.plans || [])
 const selectedPlan = computed({
-  get: () => ctxStore.current?.structure?.selectedPlanIndex || 0,
-  set: (i) => { if (ctxStore.current?.structure) ctxStore.current.structure.selectedPlanIndex = i },
+  get: () => pageCtx.value?.structure?.selectedPlanIndex || 0,
+  set: (i) => { if (pageCtx.value?.structure) pageCtx.value.structure.selectedPlanIndex = i },
 })
 const currentItems = computed(() => plans.value[selectedPlan.value]?.items || [])
 
 function onPriceEdit(it, idx) {
   it.__edited = true
-  if (!ctxStore.current.lockedFields) ctxStore.current.lockedFields = []
+  if (!pageCtx.value.lockedFields) pageCtx.value.lockedFields = []
   const f = `plans[${selectedPlan.value}].items[${idx}].groupPrice`
-  if (!ctxStore.current.lockedFields.includes(f)) ctxStore.current.lockedFields.push(f)
+  if (!pageCtx.value.lockedFields.includes(f)) pageCtx.value.lockedFields.push(f)
 }
 
 async function exportPricing() {
@@ -128,8 +140,8 @@ const targetStoreHint = computed(() => {
 })
 
 async function submitListing() {
-  if (!ctxStore.current) { ElMessage.error('请先生成或加载商品'); return }
-  if (settings.settings.reviewImages && !listing.value.dryRun && !(ctxStore.current.visual?.mainImages || []).length) {
+  if (!pageCtx.value) { ElMessage.error('请先生成或加载商品'); return }
+  if (settings.settings.reviewImages && !listing.value.dryRun && !(pageCtx.value.visual?.mainImages || []).length) {
     ElMessage.error('设置要求生图后人工过图：当前无主图，不允许上新'); return
   }
   if (!listing.value.dryRun && settings.settings.confirmBeforeListing && !confirm('将真实提交上新到拼多多，确认继续？')) return
@@ -269,7 +281,7 @@ onMounted(() => {
         </el-card>
 
         <!-- 6 上新 -->
-        <el-card v-if="ctxStore.hasContext" class="step">
+        <el-card v-if="pageCtx" class="step">
           <template #header>⑥ 上新</template>
           <p class="hint" :class="{ err: targetStoreHint.err }">{{ targetStoreHint.text }}</p>
           <el-checkbox v-model="listing.dryRun">诊断模式（不真实提交，留截图）</el-checkbox>
@@ -288,7 +300,18 @@ onMounted(() => {
       <!-- 右栏:预览 -->
       <div class="right">
         <el-card class="preview">
-          <template #header>预览{{ ctxStore.title !== '未选择商品' ? '：' + ctxStore.title : '' }}</template>
+          <template #header>预览{{ pageCtx ? '：' + ctxStore.title : '' }}</template>
+
+          <!-- 方案A提示条:有导入的商品但本页未接管 -->
+          <el-alert v-if="importPending" type="info" :closable="false" style="margin-bottom:12px"
+            title="检测到刚导入的商品（在「导入建品」流程建立）。单品页默认不接管它——如需在此继续编辑，点右侧接管。">
+            <template #default>
+              <div style="margin-top:6px">
+                检测到刚在「导入建品」建立的商品「{{ ctxStore.title }}」。单品页是从零新建流程，默认不接管它。
+                <el-button size="small" type="primary" @click="takeOver">接管到单品页</el-button>
+              </div>
+            </template>
+          </el-alert>
 
           <!-- 白底图预览(从左栏挪来,和其他图统一在右侧) -->
           <div v-if="entry.whites.length" class="psec">
@@ -298,14 +321,14 @@ onMounted(() => {
             </div>
           </div>
 
-          <el-empty v-if="!ctxStore.current && !entry.whites.length" description="生成或从导入/切换器载入商品后在此预览" />
+          <el-empty v-if="!pageCtx && !entry.whites.length && !importPending" description="选品/生成，或通过顶部切换器载入商品后在此预览" />
 
-          <template v-if="ctxStore.current">
-            <div v-if="ctxStore.current.visual?.title" class="ptitle">{{ ctxStore.current.visual.title }}</div>
-            <div v-if="(ctxStore.current.visual?.mainImages || []).length" class="psec">
-              <div class="psec-t">主图（{{ ctxStore.current.visual.mainImages.length }}）</div>
+          <template v-if="pageCtx">
+            <div v-if="pageCtx.visual?.title" class="ptitle">{{ pageCtx.visual.title }}</div>
+            <div v-if="(pageCtx.visual?.mainImages || []).length" class="psec">
+              <div class="psec-t">主图（{{ pageCtx.visual.mainImages.length }}）</div>
               <div class="pgrid">
-                <img v-for="(m, i) in ctxStore.current.visual.mainImages" :key="'m' + i"
+                <img v-for="(m, i) in pageCtx.visual.mainImages" :key="'m' + i"
                   :src="'/api/gen/img?ref=' + encodeURIComponent(m)" />
               </div>
             </div>

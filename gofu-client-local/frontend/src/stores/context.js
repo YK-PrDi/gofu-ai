@@ -8,6 +8,8 @@ export const useContextStore = defineStore('context', {
     contextId: '',
     current: null, // 完整 ProductContext 快照
     loading: false,
+    origin: '', // 来源:'import'导入流建 / 'single'单品页建 / 'switcher'切换器调入。
+                // 单品页据此决定是否自动接管(方案A:导入流建的不被动铺到单品页)。
   }),
   getters: {
     hasContext: (s) => !!s.contextId,
@@ -24,12 +26,13 @@ export const useContextStore = defineStore('context', {
     },
   },
   actions: {
-    async load(id) {
+    async load(id, origin = '') {
       if (!id) return
       this.loading = true
       try {
         this.current = await api.get(`/api/context/${id}`)
         this.contextId = id
+        if (origin) this.origin = origin
       } finally {
         this.loading = false
       }

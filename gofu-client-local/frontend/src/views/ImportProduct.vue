@@ -110,7 +110,7 @@ async function runImport() {
     imp.msgType = 'ok'; imp.done = true
     if (d.warnings?.length) d.warnings.forEach((w) => console.warn('[导入]', w))
     imp.lastImportedFolder = imp.folderName
-    await ctxStore.load(d.contextId) // 载入新建商品→顶部上下文切换器立即显示,跨页可用
+    await ctxStore.load(d.contextId, 'import') // 载入新建商品,标记来源=import(单品页据此不被动接管)
     // TODO(P2-f/P2-e后接): autoAfterImport 自动链(补SKU图→风格迁移→自动上新)
   } catch (e) {
     imp.msg = '导入失败：' + e.message; imp.msgType = 'err'
