@@ -41,6 +41,13 @@ export const useContextStore = defineStore('context', {
       this.current = ctx
       this.contextId = ctx?.contextId || ctx?.id || this.contextId
     },
+    // 保存当前 context 回云端(源 saveContext):清 __edited 临时标记后 POST
+    async save() {
+      if (!this.current) return
+      const payload = JSON.parse(JSON.stringify(this.current))
+      ;(payload.structure?.plans || []).forEach((p) => (p.items || []).forEach((it) => delete it.__edited))
+      await api.post('/api/context', payload)
+    },
     clear() {
       this.contextId = ''
       this.current = null
