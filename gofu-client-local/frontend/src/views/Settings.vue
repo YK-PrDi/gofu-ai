@@ -64,9 +64,9 @@ onMounted(() => { store.init(); loadErp() })
       <template #header>快麦 ERP 配置<span class="hint">会话约30天过期，过期后刷新 Token 或在快麦后台重取</span></template>
       <el-form label-width="110px" class="erp-form">
         <el-form-item label="appKey"><el-input v-model="erp.appKey" /></el-form-item>
-        <el-form-item label="appSecret"><el-input v-model="erp.appSecret" /></el-form-item>
-        <el-form-item label="accessToken"><el-input v-model="erp.accessToken" /></el-form-item>
-        <el-form-item label="refreshToken"><el-input v-model="erp.refreshToken" /></el-form-item>
+        <el-form-item label="appSecret"><el-input v-model="erp.appSecret" type="password" show-password /></el-form-item>
+        <el-form-item label="accessToken"><el-input v-model="erp.accessToken" type="password" show-password /></el-form-item>
+        <el-form-item label="refreshToken"><el-input v-model="erp.refreshToken" type="password" show-password /></el-form-item>
         <el-form-item label="companyId"><el-input v-model="erp.companyId" /></el-form-item>
         <el-form-item label="appTitle（公司名）"><el-input v-model="erp.appTitle" /></el-form-item>
         <el-form-item>
