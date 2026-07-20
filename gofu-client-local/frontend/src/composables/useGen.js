@@ -200,5 +200,14 @@ export function useGen() {
 
   async function recalcPrice() { await fillCostAndPrice() }
 
-  return { gen, pollFlowTask, stopGen, runLayout, runSkuImages, fillCostAndPrice, genTitle, recalcPrice, resolveTemplateId }
+  // 一键生成:布局+主图 → 接着生选定方案(默认方案1)的 SKU图+详情图。
+  // 注:当前后端 step1/step2 是两个独立接口(step1 出完全部主图才 return),故这里只能串接两步;
+  // "SKU只等第1张主图、详情随主图逐张生"的交叉并行需后端把两步融合成流式管线(见文档,后端优化项)。
+  async function runOneClick(antipriceTemplates) {
+    await runLayout()
+    if (!gen.layoutDone) return // 布局失败则不续跑SKU
+    await runSkuImages(antipriceTemplates)
+  }
+
+  return { gen, pollFlowTask, stopGen, runLayout, runSkuImages, runOneClick, fillCostAndPrice, genTitle, recalcPrice, resolveTemplateId }
 }

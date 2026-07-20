@@ -13,6 +13,7 @@ export const useSettingsStore = defineStore('settings', {
       batchAutoList: false,
       batchAutoPreview: true,
       batchAutoGen: true,
+      oneClickGen: true, // 一键生成:布局+主图 出完自动接生 SKU图+详情图(默认开);关则分两步手动
     },
     agents: [{ id: 'gpt-image', name: 'GPT-Image 2' }], // 兜底,init 拉全量
     antipriceTemplates: [], // 防比价模板库(云端)

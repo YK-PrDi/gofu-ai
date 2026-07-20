@@ -15,7 +15,7 @@ const entry = useEntryStore()
 const ctxStore = useContextStore()
 const settings = useSettingsStore()
 const storesStore = useStoresStore()
-const { gen, runLayout, runSkuImages, stopGen, recalcPrice } = useGen()
+const { gen, runLayout, runSkuImages, runOneClick, stopGen, recalcPrice } = useGen()
 
 const pickerOpen = ref(false)
 const styleOptions = [
@@ -240,7 +240,7 @@ onMounted(() => {
 
         <!-- 3 生图选项 + 生成 -->
         <el-card class="step">
-          <template #header>③ 生成布局 + 主图</template>
+          <template #header>③ 生成{{ settings.settings.oneClickGen ? '（一键：布局+主图+SKU图+详情图）' : '布局 + 主图' }}</template>
           <div class="opts">
             <label>主图张数<el-select v-model.number="entry.genOpts.mainCount" size="small">
               <el-option v-for="n in [3,4,5,6,8,10]" :key="n" :label="n" :value="n" /></el-select></label>
@@ -252,8 +252,12 @@ onMounted(() => {
               <el-option v-for="s in styleOptions" :key="s.id" :label="s.name" :value="s.id" /></el-select></label>
           </div>
           <el-input v-model="entry.genOpts.customRequest" placeholder="生图要求(选填)：如 浴室场景、突出增压水流" style="margin:10px 0" />
-          <el-button type="primary" :disabled="!entry.canGenerate || gen.running" :loading="gen.running" @click="runLayout">
-            生成布局 + 主图
+          <!-- 一键模式(默认):布局+主图 出完自动接生 SKU图+详情图(方案1);关则只生布局+主图,SKU在下方⑤手动 -->
+          <el-button
+            type="primary" :disabled="!entry.canGenerate || gen.running" :loading="gen.running"
+            @click="settings.settings.oneClickGen ? runOneClick(settings.antipriceTemplates) : runLayout()"
+          >
+            {{ settings.settings.oneClickGen ? '一键生成全部' : '生成布局 + 主图' }}
           </el-button>
           <el-button v-if="gen.running && gen.flowTaskId" @click="stopGen">停止</el-button>
           <span v-if="!entry.canGenerate" class="block-reason">还需：{{ entry.genBlockReason }}</span>
