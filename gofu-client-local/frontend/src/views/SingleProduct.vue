@@ -79,6 +79,7 @@ function importForCode(code) {
       if (isMain) { if (!entry.whites.includes(rd.result)) entry.whites.push(rd.result) }
       else if (!entry.accWhites.includes(rd.result)) entry.accWhites.push(rd.result)
       entry.recordWhiteCode(code, rd.result)
+      entry.resolveMissing(code) // 补图后从缺图列表移除,解硬拦
       ElMessage.success(`已为 ${code} 导入白底图`)
     }
     rd.readAsDataURL(f)
@@ -235,32 +236,11 @@ onMounted(() => {
           </div>
         </el-card>
 
-        <!-- 3 白底图操作条(预览在右侧;此处只留操作:拖拽/选图/缺图补传/回传快麦) -->
-        <el-card class="step compact">
-          <template #header>
-            ③ 白底图 · 已 {{ entry.whites.length }} 张
-            <span class="sub">选主件后自动拉快麦</span>
-          </template>
-          <div class="wbar" :class="{ over: dropOver }"
-            @dragover.prevent="dropOver = true" @dragleave.prevent="dropOver = false" @drop.prevent="onDrop">
-            <span class="drop-hint">拖图到此补充，或</span>
-            <el-button size="small" @click="pickWhiteFiles">选图片</el-button>
-          </div>
-          <!-- 缺图补传 + 回传快麦 -->
-          <div v-if="entry.whiteCheck.missing.length" class="missing">
-            <div v-for="c in entry.whiteCheck.missing" :key="c" class="miss-row">
-              <span class="miss-code">缺 {{ c }}</span>
-              <el-button size="small" type="warning" plain @click="importForCode(c)">导入白底图</el-button>
-              <el-button v-if="entry.importedFor[c]" size="small" :loading="pushing === c" @click="pushWhite(c)">
-                {{ entry.pushedCodes.includes(c) ? '已回传✓' : '回传快麦' }}
-              </el-button>
-            </div>
-          </div>
-        </el-card>
+        <!-- 白底图操作/预览已整合到右侧预览区(不再占左栏) -->
 
-        <!-- 4 生图选项 + 生成 -->
+        <!-- 3 生图选项 + 生成 -->
         <el-card class="step">
-          <template #header>④ 生成布局 + 主图</template>
+          <template #header>③ 生成布局 + 主图</template>
           <div class="opts">
             <label>主图张数<el-select v-model.number="entry.genOpts.mainCount" size="small">
               <el-option v-for="n in [3,4,5,6,8,10]" :key="n" :label="n" :value="n" /></el-select></label>
@@ -283,7 +263,7 @@ onMounted(() => {
 
         <!-- 5 SKU图 + 定价 -->
         <el-card v-if="plans.length" class="step">
-          <template #header>⑤ SKU 方案 / 定价</template>
+          <template #header>④ SKU 方案 / 定价</template>
           <el-tabs v-model="selectedPlan">
             <el-tab-pane v-for="(p, i) in plans" :key="i" :label="`方案${i + 1}`" :name="i" />
           </el-tabs>
@@ -308,7 +288,7 @@ onMounted(() => {
 
         <!-- 6 上新 -->
         <el-card v-if="pageCtx" class="step">
-          <template #header>⑥ 上新</template>
+          <template #header>⑤ 上新</template>
           <p class="hint" :class="{ err: targetStoreHint.err }">{{ targetStoreHint.text }}</p>
           <el-checkbox v-model="listing.dryRun">诊断模式（不真实提交，留截图）</el-checkbox>
           <div style="margin-top:10px">
@@ -339,15 +319,34 @@ onMounted(() => {
             </template>
           </el-alert>
 
-          <!-- 白底图预览(从左栏挪来,和其他图统一在右侧) -->
-          <div v-if="entry.whites.length" class="psec">
-            <div class="psec-t">白底图（{{ entry.whites.length }}）</div>
-            <div class="pgrid pgrid-sm">
-              <img v-for="(w, i) in entry.whites" :key="'w' + i" :src="whiteThumb(w)" />
+          <!-- 白底图:操作(补充/缺图导入/回传快麦)+ 预览,全在右侧 -->
+          <div class="psec">
+            <div class="psec-t">
+              白底图（{{ entry.whites.length }}）· 选主件后自动拉快麦
+              <el-button size="small" text @click="pickWhiteFiles">+ 补充白底图</el-button>
+            </div>
+            <div class="wdrop" :class="{ over: dropOver }"
+              @dragover.prevent="dropOver = true" @dragleave.prevent="dropOver = false" @drop.prevent="onDrop">
+              <div v-if="entry.whites.length" class="pgrid pgrid-sm">
+                <img v-for="(w, i) in entry.whites" :key="'w' + i" :src="whiteThumb(w)" />
+              </div>
+              <span v-else class="drop-hint">拖白底图到此，或点上方「补充白底图」</span>
+            </div>
+            <!-- 缺图硬拦提示 + 导入/回传 -->
+            <div v-if="entry.whiteCheck.missing.length" class="missing">
+              <div class="miss-warn">⚠ 以下编码快麦无白底图，补齐或移除后才能生成（缺件会生出废图）：</div>
+              <div v-for="c in entry.whiteCheck.missing" :key="c" class="miss-row">
+                <span class="miss-code">缺 {{ c }}</span>
+                <el-button size="small" type="warning" plain @click="importForCode(c)">导入白底图</el-button>
+                <el-button v-if="entry.importedFor[c]" size="small" :loading="pushing === c" @click="pushWhite(c)">
+                  {{ entry.pushedCodes.includes(c) ? '已回传✓' : '回传快麦' }}
+                </el-button>
+              </div>
             </div>
           </div>
 
-          <el-empty v-if="!pageCtx && !entry.whites.length && !importPending" description="选品/生成，或通过顶部切换器载入商品后在此预览" />
+          <el-empty v-if="!pageCtx && !importPending && !entry.whites.length && !entry.skus.length"
+            description="选品/生成，或通过顶部切换器载入商品后在此预览" :image-size="60" />
 
           <template v-if="pageCtx">
             <div v-if="pageCtx.visual?.title" class="ptitle">{{ pageCtx.visual.title }}</div>
@@ -376,11 +375,12 @@ onMounted(() => {
 .chips, .missing { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .chip { margin: 0; }
 .missing { margin-top: 10px; }
-.step .sub { font-size: 12px; color: #909399; font-weight: 400; margin-left: 8px; }
-.wbar { display: flex; align-items: center; gap: 10px; border: 1px dashed #dcdfe6; border-radius: 6px; padding: 8px 12px; }
-.wbar.over { border-color: #409eff; background: #ecf5ff; }
+.wdrop { border: 1px dashed #dcdfe6; border-radius: 6px; padding: 10px; min-height: 40px; }
+.wdrop.over { border-color: #409eff; background: #ecf5ff; }
 .drop-hint { color: #c0c4cc; font-size: 13px; }
-.miss-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.missing { margin-top: 10px; }
+.miss-warn { font-size: 12px; color: #e6a23c; margin-bottom: 6px; }
+.miss-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
 .miss-code { font-size: 13px; color: #e6a23c; min-width: 90px; }
 .opts { display: flex; flex-wrap: wrap; gap: 12px; }
 .opts label { display: flex; align-items: center; gap: 6px; font-size: 13px; }

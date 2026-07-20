@@ -35,10 +35,13 @@ export const useEntryStore = defineStore('entry', {
       if (!s.skus.length) miss.push('选主件/配件')
       else if (!s.skus.some((x) => x.role === 'main')) miss.push('把至少一个单品标为「主件」')
       if (!s.whites.length) miss.push('备齐主件白底图')
-      return miss.join('、')
+      // 硬拦:主件+配件任一缺白底图,必须补齐/移除才能生成(否则生出的SKU图缺件,白花钱)
+      if (s.whiteCheck.missing.length) miss.push(`补齐或移除缺白底图的编码：${s.whiteCheck.missing.join('、')}`)
+      return miss.join('；')
     },
     canGenerate() {
-      return this.catPath.length && this.skus.length && this.whites.length
+      // 无品类/无主件/无白底图 → 不可生成;有任一缺图 → 也不可(硬拦)
+      return this.catPath.length && this.skus.length && this.whites.length && !this.whiteCheck.missing.length
     },
   },
   actions: {
@@ -75,6 +78,11 @@ export const useEntryStore = defineStore('entry', {
       if (!code || !file) return
       const arr = this.whiteCodeMap[code] || (this.whiteCodeMap[code] = [])
       if (!arr.includes(file)) arr.push(file)
+    },
+    // 缺图编码已补上白底图 → 从 missing 移除(解硬拦),记入 has
+    resolveMissing(code) {
+      this.whiteCheck.missing = this.whiteCheck.missing.filter((c) => c !== code)
+      if (!this.whiteCheck.has.includes(code)) this.whiteCheck.has.push(code)
     },
     // 回传快麦:把导入的白底图写回该编码的快麦单品档案(源 pushWhiteToKuaimai,P2-e漏迁,补回)
     async pushWhiteToKuaimai(code) {
