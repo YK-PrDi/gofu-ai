@@ -85,17 +85,16 @@ public class StoreService {
      */
     public String resolveProfileByName(String shopName) {
         if (shopName == null || shopName.isBlank()) return null;
-        String key = shopName.trim();
+        String key = normName(shopName);
         List<Store> stores = loadStores();
-        // 1) 精确匹配(trim)优先
-        for (Store s : stores) if (key.equals(s.getName() == null ? null : s.getName().trim())) return s.getProfile();
-        // 2) H1修：子串仅在【唯一命中】时采用。原来双向 contains 会让"旗舰店A""旗舰店B"都匹配"旗舰店"→
-        //    多个店文件夹上到同一家、且无告警。现在多于一个候选=歧义,返回 null(上层标"店铺未匹配"),
-        //    且短店名(≤2字)不走子串,避免"GF""小店"这种误匹配。
+        // 1) 归一化后精确匹配优先。归一化=trim+全角转半角+去所有空白——文件夹名与扫码存的店名常差
+        //    全角空格/半角空格/前后空格(打包态实测"已登店铺却未匹配"多因此)，不归一化会漏判。
+        for (Store s : stores) if (key.equals(normName(s.getName()))) return s.getProfile();
+        // 2) H1修：子串仅在【唯一命中】时采用。多于一个候选=歧义,返回 null;短店名(≤2字)不走子串。
         if (key.length() <= 2) return null;
         String hit = null;
         for (Store s : stores) {
-            String n = s.getName() == null ? "" : s.getName().trim();
+            String n = normName(s.getName());
             if (n.length() <= 2) continue;
             if (key.contains(n) || n.contains(key)) {
                 if (hit != null && !hit.equals(s.getProfile())) return null;   // 命中多于一个不同店 → 歧义，不猜
@@ -103,6 +102,12 @@ public class StoreService {
             }
         }
         return hit;
+    }
+
+    /** 店名归一化：去首尾空白 + 全角空格/连字符转半角 + 去掉所有内部空白。用于文件夹名与stores.json店名匹配。 */
+    private String normName(String s) {
+        if (s == null) return "";
+        return s.trim().replace('　', ' ').replace('－', '-').replaceAll("\\s+", "");
     }
 
     /** 某店独立 user-data-dir（浏览器 profile，登录态存这）。 */

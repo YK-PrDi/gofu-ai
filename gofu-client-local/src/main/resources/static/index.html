@@ -391,16 +391,21 @@
         <div class="hint" v-if="genMsg">{{ genMsg }}</div>
       </div>
 
-      <div v-if="ctx" class="section">
+      <!-- 上新框一直显示(不再 v-if=ctx):导入/风格迁移后也能选目标店铺,否则自动链上新无店铺→失败。 -->
+      <div class="section">
         <h2><span class="num">4</span> 上新</h2>
+        <div v-if="!ctx" class="hint" style="margin-bottom:8px;color:var(--text-faint)">先在上方生成/导入/加载一个商品，再选店铺上新。目标店铺可先选好。</div>
         <div class="field">
           <label>目标店铺</label>
           <select v-model="targetProfile" @focus="stores.list.length||loadStores()">
-            <option value="">默认店铺（单店旧行为）</option>
+            <option v-if="!stores.list.length" value="">（无店铺，请先在🏪店铺管理添加并登录）</option>
             <option v-for="s in stores.list" :key="s.profile" :value="s.profile">
               {{ s.name }}（{{ s.profile }} · {{ storeLoginText(s) }}）
             </option>
           </select>
+          <div v-if="targetStoreHint" class="hint" :class="targetStoreHint.err?'':''" :style="{color: targetStoreHint.err?'#dc2626':'var(--text-dim)', marginTop:'4px', fontSize:'12px'}">
+            {{ targetStoreHint.text }}
+          </div>
         </div>
         <div class="settings-row" style="margin-bottom:12px;flex-direction:column;gap:8px">
           <label><input type="checkbox" v-model="settings.reviewImages" @change="saveSettings" /> 生图后必须人工过图</label>
@@ -823,6 +828,15 @@ createApp({
     isShowerCategory() {
       const p = this.cat.path.join('>');
       return p.includes('花洒') || p.includes('淋浴') || p.includes('喷头');
+    },
+    // 第4步目标店铺提示:明确本次上到哪个店+登录态,让运营确认(顺位继承默认可能不是想上的店)。
+    targetStoreHint() {
+      if (!this.stores.list.length) return { text: '尚无店铺，请先在🏪店铺管理添加并登录', err: true };
+      const s = this.stores.list.find(x => x.profile === this.targetProfile);
+      if (!s) return { text: '未选目标店铺，请在上方下拉选择要上新的店', err: true };
+      if (!s.loggedIn) return { text: '⚠ 将上到「' + (s.name || s.profile) + '」，但该店未登录，请先在🏪店铺管理登录', err: true };
+      const stale = this.storeLoginStale && this.storeLoginStale(s);
+      return { text: '本次将上新到「' + (s.name || s.profile) + '」（' + s.profile + '）' + (stale ? '·登录可能过期，建议重登' : ''), err: stale };
     },
     // (#5.2b) 生成布局按钮点不了时，精确告诉用户缺哪一项(而非笼统"选品类/选主件/白底图")。
     genBlockReason() {
@@ -1854,7 +1868,11 @@ createApp({
       } catch (e) { this.erpCfg.msg = '刷新失败（refreshToken 可能也过期，需在快麦后台重新获取）：' + e.message; this.erpCfg.msgType = 'err'; }
     },
   },
-  mounted() { this.loadSettings(); this.loadAgents(); this.loadAntipriceTemplates(); },
+  mounted() {
+    this.loadSettings(); this.loadAgents(); this.loadAntipriceTemplates(); this.loadStores();
+    // 利润率默认在 33/45/53 三档随机(而非固定值)。选批量大文件夹会再随机一次;手动流也从随机档起步、可拖动微调。
+    this.profitRate = [0.33, 0.45, 0.53][Math.floor(Math.random() * 3)];
+  },
 }).mount('#app');
 </script>
 </body>
