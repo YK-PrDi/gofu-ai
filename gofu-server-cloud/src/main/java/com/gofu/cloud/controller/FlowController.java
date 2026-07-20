@@ -179,6 +179,7 @@ public class FlowController {
 
         // M11：视觉分析白底图 → 产品专属多段 prompt。请求词优先用前端传入(customRequest)，否则自动生成。
         List<String> segPrompts = new ArrayList<>();
+        boolean fromLib = false;   // 主图构图库是否命中(命中则 buildSeriesPrompt 弱化连贯性+跳角度约束)
         String seriesPlan = "";   // 07.10#1 保留【总分析/系列文案规划】作全局共享上下文(原来被丢弃)
         // 0a 防同质化：先查【主图构图库】(按品类取N套确定的优质构图,库为主+白底图锁主体)。
         //   命中→直接用库构图当每张 base prompt(不再让 GPT 看白底图现编,构图从"AI随机"变"人工筛过的库里随机",
@@ -189,6 +190,7 @@ public class FlowController {
             List<String> libComps = templateService.pickMainCompositions(ctx.getCategory(), skuHint, mainTotal, hasFilter);
             if (!libComps.isEmpty()) {
                 segPrompts.addAll(libComps);
+                fromLib = true;   // 库命中:buildSeriesPrompt 据此弱化系列连贯性+跳过角度约束,让库构图差异化真正落地(防同质化)
                 log.info("0a 主图构图库命中 {} 套构图(品类={}, 带滤芯={}) → 用库构图,跳过AI现编", libComps.size(), ctx.getCategory(), hasFilter);
             }
         } catch (Exception e) { log.warn("0a 主图构图库查询失败(回退AI现编): {}", e.getMessage()); }
@@ -225,6 +227,7 @@ public class FlowController {
             log.warn("M11 自定义分析失败，降级静态模板: {}", e.getMessage());
         }
         final String fSeriesPlan = seriesPlan;
+        final boolean fFromLib = fromLib;   // 供 2~N 并发 lambda 用
 
         // B1：重新生成前清空旧主图，实现"覆盖而非追加"（重复点/一键重生都靠这里）。
         synchronized (ctx) { ctx.getVisual().getMainImages().clear(); }
@@ -240,7 +243,7 @@ public class FlowController {
             task.setCurrentProduct("主图 1/" + mainTotal);
             String out = new File(tmpOut, "main-0.jpg").getAbsolutePath();
             String base = !segPrompts.isEmpty() ? segPrompts.get(0) : buildMainPrompt(ctx, 1, fSeriesPlan);
-            String prompt = buildSeriesPrompt(base, 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true, structLock, isShower);
+            String prompt = buildSeriesPrompt(base, 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true, structLock, isShower, fromLib);
             if (genWithRetry(prompt, List.of(white), white, out, aspect, 2)) {
                 keys[0] = uploadIfCos(out);
                 firstRef = localizeWhite(keys[0]);
@@ -266,7 +269,7 @@ public class FlowController {
                         task.setCurrentProduct("主图 " + (idx + 1) + "/" + mainTotal);
                         String out = new File(tmpOut, "main-" + idx + ".jpg").getAbsolutePath();
                         String base = idx < segPrompts.size() ? segPrompts.get(idx) : buildMainPrompt(ctx, idx + 1, fSeriesPlan);
-                        String prompt = buildSeriesPrompt(base, idx + 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true, structLock, isShower);
+                        String prompt = buildSeriesPrompt(base, idx + 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true, structLock, isShower, fFromLib);
                         List<String> refs = new ArrayList<>();
                         refs.add(white);
                         if (fFirstRef != null) refs.add(fFirstRef);
@@ -809,7 +812,7 @@ public class FlowController {
                 mainAspect = resolveAutoAspect(mainAspect, white);
                 boolean structLock = isStructuralRigidCategory(ctx.getCategory());   // M19：重生与初次一致
                 boolean isShower = isShowerCategory(ctx.getCategory());
-                String prompt = buildSeriesPrompt(base, index + 1, total, seriesPlan, subjectLock, negative, styleReq, true, structLock, isShower);
+                String prompt = buildSeriesPrompt(base, index + 1, total, seriesPlan, subjectLock, negative, styleReq, true, structLock, isShower, false);   // 单图重生走AI现编,非库,fromLib=false
                 // A1：白底图进 refs（首图重生 ref=白底图；非首图 ref=白底图+第1张，双锚定保一致）
                 String firstRef = (index > 0 && !mains.isEmpty()) ? localizeWhite(mains.get(0)) : null;
                 List<String> refs = new ArrayList<>();
@@ -1136,7 +1139,7 @@ public class FlowController {
      */
     private String buildSeriesPrompt(String basePrompt, int currentIndex, int totalCount, String seriesPlan,
                                      String subjectLock, String negative, String styleReq, boolean withText,
-                                     boolean structLock, boolean isShower) {
+                                     boolean structLock, boolean isShower, boolean fromLib) {
         String base = basePrompt == null ? "" : basePrompt.trim();
         StringBuilder sb = new StringBuilder();
         // R5：品类主体一致性约束前置（最高优先级锚点，锁产品结构/材质/logo/物理合理性）
@@ -1159,18 +1162,33 @@ public class FlowController {
         // R5：改图风格直拼进生图 prompt（原来只喂分析）
         if (styleReq != null && !styleReq.isBlank()) sb.append("\n【画面风格】").append(styleReq.trim()).append("\n");
         // 系列连贯性 + 角度约束（R2 恢复多角度+防变形）
-        sb.append(String.format("""
+        if (fromLib) {
+            // 库命中：构图/机位由构图库指定(人工筛过、每套版式各异)。只保留"产品本体一致"约束，
+            // 去掉"同场景/同色调/同背景/连续感"和 buildAngleConstraint 的 flat 正面序列——
+            // 那两层是为"无库时防AI大旋转变形"设计的兜底，会把库的差异化机位/版式抹平→两次生图雷同(防同质化失效)。
+            sb.append(String.format("""
 
-                【系列连贯性·最高优先级】这是同一场景系列拍摄的第 %d/%d 张：
-                1. 产品主体必须100%%一致：外形、颜色、材质、品牌标识、关键结构完全相同
-                2. **产品原生文字必须与第1张完全相同**：产品本体上的LOGO、品牌名、型号、按钮标签、刻度等，字形/位置/颜色/清晰度一致，禁止模糊变形消失
-                3. 场景类型必须完全一致（浴室保持浴室、厨房保持厨房）
-                4. 整体色调、光线氛围、背景材质保持一致，营造"同一时间同一地点"的连续感
-                5. 允许变化：拍摄角度、景别(远近)、场景中摆放位置、光照角度、**画面营销文案（每张按本图卖点不同）**
-                6. 禁止：场景类型切换、色调剧变、产品变形、产品原生文字错误/模糊、风格跳跃
-                7. 最终效果：同一场景不同角度/景别拍同一产品的连续镜头，每张用不同营销文案强调不同卖点
-                """.trim(), currentIndex, totalCount));
-        sb.append(buildAngleConstraint(currentIndex, totalCount, structLock));
+                    【系列一致性·仅锁产品本体】这是同一产品系列的第 %d/%d 张：
+                    1. 产品主体必须100%%一致：外形、颜色、材质、品牌标识、关键结构完全相同
+                    2. **产品原生文字必须与第1张完全相同**：本体上的LOGO/品牌名/型号/标签/刻度，字形/位置/颜色/清晰度一致，禁止模糊变形消失
+                    3. 本张的构图、机位、景别、场景版式**以上方【第 %d 张方案】指定的为准**，各张可明显不同（这是防同质化的关键，不要强行统一成同一机位）
+                    4. 禁止：产品变形、产品原生文字错误/模糊
+                    """.trim(), currentIndex, totalCount, currentIndex));
+            // 不追加 buildAngleConstraint：机位由库方案主导，产品不变形已由 subjectLock+structLock 保障。
+        } else {
+            sb.append(String.format("""
+
+                    【系列连贯性·最高优先级】这是同一场景系列拍摄的第 %d/%d 张：
+                    1. 产品主体必须100%%一致：外形、颜色、材质、品牌标识、关键结构完全相同
+                    2. **产品原生文字必须与第1张完全相同**：产品本体上的LOGO、品牌名、型号、按钮标签、刻度等，字形/位置/颜色/清晰度一致，禁止模糊变形消失
+                    3. 场景类型必须完全一致（浴室保持浴室、厨房保持厨房）
+                    4. 整体色调、光线氛围、背景材质保持一致，营造"同一时间同一地点"的连续感
+                    5. 允许变化：拍摄角度、景别(远近)、场景中摆放位置、光照角度、**画面营销文案（每张按本图卖点不同）**
+                    6. 禁止：场景类型切换、色调剧变、产品变形、产品原生文字错误/模糊、风格跳跃
+                    7. 最终效果：同一场景不同角度/景别拍同一产品的连续镜头，每张用不同营销文案强调不同卖点
+                    """.trim(), currentIndex, totalCount));
+            sb.append(buildAngleConstraint(currentIndex, totalCount, structLock));
+        }
         // 花洒出水物理（#1）：若本张演示出水，水流必须从喷面正下方成束喷出、强劲有力如瀑布，
         // 不得从侧面/斜向乱喷、不得软弱无力或雾化飘散。仅花洒品类追加，不污染其它品类。
         if (isShower)
