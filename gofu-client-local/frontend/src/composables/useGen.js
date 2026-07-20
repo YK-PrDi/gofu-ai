@@ -135,8 +135,14 @@ export function useGen() {
     if (!plans.length) return
     const cp = entry.catPath.length ? entry.categoryStr : (ctxStore.current?.category || '')
     const productType = cp.includes('花洒') ? '花洒' : cp.includes('代发') ? '代发' : '架类'
-    for (const plan of plans) await fillOnePlan(plan.items || [], productType)
-    await ctxStore.save?.()
+    try {
+      for (const plan of plans) await fillOnePlan(plan.items || [], productType)
+      await ctxStore.save?.()
+    } catch (e) {
+      // 成本/定价接口失败(如后端不可达/快麦缓存空)要显式暴露,否则表里成本静默为0,用户以为算过了
+      gen.msg = '⚠ 成本/定价回填失败（成本可能显示为0）：' + (e.message || e) + '。请确认后端在跑、快麦缓存已建，再点「按此重算」。'
+      throw e
+    }
   }
 
   async function fillOnePlan(items, productType) {

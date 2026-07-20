@@ -203,17 +203,12 @@ onMounted(() => {
           </div>
         </el-card>
 
-        <!-- 3 白底图 -->
+        <!-- 3 白底图(输入:上传/拖拽/缺图补传;预览挪到右侧统一预览区) -->
         <el-card class="step">
-          <template #header>③ 白底图（选主件后自动拉快麦，可拖拽补充）</template>
+          <template #header>③ 白底图（选主件后自动拉快麦，可拖拽补充）· 已 {{ entry.whites.length }} 张</template>
           <div class="drop" :class="{ over: dropOver }"
             @dragover.prevent="dropOver = true" @dragleave.prevent="dropOver = false" @drop.prevent="onDrop">
-            <div class="thumbs">
-              <div v-for="(w, i) in entry.whites" :key="i" class="thumb">
-                <img :src="whiteThumb(w)" />
-              </div>
-              <div v-if="!entry.whites.length" class="drop-hint">拖图到此，或</div>
-            </div>
+            <span class="drop-hint">拖图到此，或</span>
             <el-button size="small" @click="pickWhiteFiles">选图片</el-button>
           </div>
           <!-- 缺图补传 -->
@@ -294,12 +289,25 @@ onMounted(() => {
       <div class="right">
         <el-card class="preview">
           <template #header>预览{{ ctxStore.title !== '未选择商品' ? '：' + ctxStore.title : '' }}</template>
-          <el-empty v-if="!ctxStore.current" description="生成或从导入/切换器载入商品后在此预览" />
-          <template v-else>
+
+          <!-- 白底图预览(从左栏挪来,和其他图统一在右侧) -->
+          <div v-if="entry.whites.length" class="psec">
+            <div class="psec-t">白底图（{{ entry.whites.length }}）</div>
+            <div class="pgrid pgrid-sm">
+              <img v-for="(w, i) in entry.whites" :key="'w' + i" :src="whiteThumb(w)" />
+            </div>
+          </div>
+
+          <el-empty v-if="!ctxStore.current && !entry.whites.length" description="生成或从导入/切换器载入商品后在此预览" />
+
+          <template v-if="ctxStore.current">
             <div v-if="ctxStore.current.visual?.title" class="ptitle">{{ ctxStore.current.visual.title }}</div>
-            <div class="pgrid">
-              <img v-for="(m, i) in (ctxStore.current.visual?.mainImages || [])" :key="'m' + i"
-                :src="'/api/gen/img?ref=' + encodeURIComponent(m)" />
+            <div v-if="(ctxStore.current.visual?.mainImages || []).length" class="psec">
+              <div class="psec-t">主图（{{ ctxStore.current.visual.mainImages.length }}）</div>
+              <div class="pgrid">
+                <img v-for="(m, i) in ctxStore.current.visual.mainImages" :key="'m' + i"
+                  :src="'/api/gen/img?ref=' + encodeURIComponent(m)" />
+              </div>
             </div>
           </template>
         </el-card>
@@ -335,6 +343,10 @@ onMounted(() => {
 .hint.err { color: #e6a23c; }
 .log { background: #111827; color: #d1d5db; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 200px; overflow: auto; white-space: pre-wrap; }
 .ptitle { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+.psec { margin-bottom: 16px; }
+.psec-t { font-size: 13px; color: #909399; margin-bottom: 8px; }
 .pgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .pgrid img { width: 100%; border: 1px solid #ebeef5; border-radius: 4px; }
+.pgrid-sm { grid-template-columns: repeat(4, 1fr); }
+.pgrid-sm img { aspect-ratio: 1; object-fit: contain; background: #fff; }
 </style>
