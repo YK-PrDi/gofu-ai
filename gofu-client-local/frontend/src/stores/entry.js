@@ -76,6 +76,15 @@ export const useEntryStore = defineStore('entry', {
       const arr = this.whiteCodeMap[code] || (this.whiteCodeMap[code] = [])
       if (!arr.includes(file)) arr.push(file)
     },
+    // 回传快麦:把导入的白底图写回该编码的快麦单品档案(源 pushWhiteToKuaimai,P2-e漏迁,补回)
+    async pushWhiteToKuaimai(code) {
+      const dataUrl = this.importedFor[code]
+      if (!dataUrl) throw new Error('请先为 ' + code + ' 导入白底图')
+      const d = await api.post('/api/erp/upload-white-image', { outerId: code, dataUrl })
+      if (d.error) throw new Error(d.error)
+      if (!this.pushedCodes.includes(code)) this.pushedCodes.push(code)
+      return d
+    },
     addWhites(dataUrls) {
       dataUrls.forEach((u) => { if (!this.whites.includes(u)) this.whites.push(u) })
     },

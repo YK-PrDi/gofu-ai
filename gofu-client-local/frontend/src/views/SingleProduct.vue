@@ -86,6 +86,18 @@ function importForCode(code) {
   inp.click()
 }
 
+// 回传快麦:把导入的白底图写回该编码快麦档案(会改线上,先二次确认)。源 pushWhiteToKuaimai,P2-e漏迁补回。
+const pushing = ref('')
+async function pushWhite(code) {
+  if (!confirm(`确认把这张白底图回传到快麦单品【${code}】？这会修改快麦线上商品档案的图片。`)) return
+  pushing.value = code
+  try {
+    await entry.pushWhiteToKuaimai(code)
+    ElMessage.success('✓ 已回传快麦：' + code)
+  } catch (e) { ElMessage.error('回传快麦失败：' + (e.message || e)) }
+  finally { pushing.value = '' }
+}
+
 // 方案A:导入流建的商品不被动铺到单品页。除非用户主动"接管"或来源非import。
 const tookOver = ref(false)
 // pageCtx=本页承认的当前商品:来源非import,或用户已主动接管,才认;否则为空(留空等主动操作)
@@ -96,7 +108,15 @@ const pageCtx = computed(() => {
 })
 // 有导入的商品但本页尚未接管 → 提示条
 const importPending = computed(() => ctxStore.current && ctxStore.origin === 'import' && !tookOver.value)
-function takeOver() { tookOver.value = true }
+// 接管:导入流不算成本(后端generatePlansAndTitle没算,见文档根治项B),接管时前端补算一次(方案A)
+async function takeOver() {
+  tookOver.value = true
+  try {
+    ElMessage.info('接管中，正在补算成本/定价…')
+    await recalcPrice()
+    ElMessage.success('已接管并补算成本/定价')
+  } catch (e) { ElMessage.error('接管成功，但成本补算失败：' + (e.message || e)) }
+}
 
 // ── 方案/定价(读 pageCtx,不直接读 ctxStore.current) ──
 const plans = computed(() => pageCtx.value?.structure?.plans || [])
@@ -215,20 +235,26 @@ onMounted(() => {
           </div>
         </el-card>
 
-        <!-- 3 白底图(输入:上传/拖拽/缺图补传;预览挪到右侧统一预览区) -->
-        <el-card class="step">
-          <template #header>③ 白底图（选主件后自动拉快麦，可拖拽补充）· 已 {{ entry.whites.length }} 张</template>
-          <div class="drop" :class="{ over: dropOver }"
+        <!-- 3 白底图操作条(预览在右侧;此处只留操作:拖拽/选图/缺图补传/回传快麦) -->
+        <el-card class="step compact">
+          <template #header>
+            ③ 白底图 · 已 {{ entry.whites.length }} 张
+            <span class="sub">选主件后自动拉快麦</span>
+          </template>
+          <div class="wbar" :class="{ over: dropOver }"
             @dragover.prevent="dropOver = true" @dragleave.prevent="dropOver = false" @drop.prevent="onDrop">
-            <span class="drop-hint">拖图到此，或</span>
+            <span class="drop-hint">拖图到此补充，或</span>
             <el-button size="small" @click="pickWhiteFiles">选图片</el-button>
           </div>
-          <!-- 缺图补传 -->
+          <!-- 缺图补传 + 回传快麦 -->
           <div v-if="entry.whiteCheck.missing.length" class="missing">
-            <span>缺白底图编码：</span>
-            <el-button v-for="c in entry.whiteCheck.missing" :key="c" size="small" type="warning" plain @click="importForCode(c)">
-              导入 {{ c }}
-            </el-button>
+            <div v-for="c in entry.whiteCheck.missing" :key="c" class="miss-row">
+              <span class="miss-code">缺 {{ c }}</span>
+              <el-button size="small" type="warning" plain @click="importForCode(c)">导入白底图</el-button>
+              <el-button v-if="entry.importedFor[c]" size="small" :loading="pushing === c" @click="pushWhite(c)">
+                {{ entry.pushedCodes.includes(c) ? '已回传✓' : '回传快麦' }}
+              </el-button>
+            </div>
           </div>
         </el-card>
 
@@ -350,12 +376,12 @@ onMounted(() => {
 .chips, .missing { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .chip { margin: 0; }
 .missing { margin-top: 10px; }
-.drop { border: 1px dashed #dcdfe6; border-radius: 6px; padding: 12px; }
-.drop.over { border-color: #409eff; background: #ecf5ff; }
-.thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; min-height: 40px; }
-.thumb { width: 60px; height: 60px; border: 1px solid #ebeef5; border-radius: 4px; overflow: hidden; }
-.thumb img { width: 100%; height: 100%; object-fit: contain; }
-.drop-hint { color: #c0c4cc; font-size: 13px; align-self: center; }
+.step .sub { font-size: 12px; color: #909399; font-weight: 400; margin-left: 8px; }
+.wbar { display: flex; align-items: center; gap: 10px; border: 1px dashed #dcdfe6; border-radius: 6px; padding: 8px 12px; }
+.wbar.over { border-color: #409eff; background: #ecf5ff; }
+.drop-hint { color: #c0c4cc; font-size: 13px; }
+.miss-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.miss-code { font-size: 13px; color: #e6a23c; min-width: 90px; }
 .opts { display: flex; flex-wrap: wrap; gap: 12px; }
 .opts label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
 .opts :deep(.el-select) { width: 100px; }
