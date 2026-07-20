@@ -260,7 +260,19 @@ public class GenController {
         if (ref == null || ref.isBlank()) return ResponseEntity.notFound().build();
         if (isLocalPath(ref)) return localImage(ref);   // 本地路径走读盘(含越界校验)
         // 外部 http URL(非本项目COS,如快麦阿里云OSS白底图)→ 302 让浏览器直连,别拿去腾讯COS getObject(必 NoSuchKey 404)。
-        if (isForeignHttpUrl(ref)) return ResponseEntity.status(302).header("Location", ref).build();
+        // 外部 http URL(如快麦阿里云OSS白底图)：原来 302 让浏览器直连,但快麦OSS开了防盗链→浏览器直连403/碎图。
+        //   改为服务端拉字节返回(服务端无浏览器referer防盗链限制),绕过。拉失败再退回302让浏览器碰运气。
+        if (isForeignHttpUrl(ref)) {
+            try {
+                byte[] bytes = fetchForeign(ref);
+                String lower = ref.toLowerCase();
+                String ct = lower.contains(".png") ? "image/png" : "image/jpeg";
+                return ResponseEntity.ok().header("Content-Type", ct).header("Cache-Control", "max-age=3600").body(bytes);
+            } catch (Exception e) {
+                log.warn("img 代理取外部URL失败({}), 退回302直连: {}", ref, e.getMessage());
+                return ResponseEntity.status(302).header("Location", ref).build();
+            }
+        }
         if (!cosService.isEnabled()) {
             // COS 未启用却是 http URL：无凭证代理，让浏览器自行直连(退化)
             return ResponseEntity.status(302).header("Location", ref).build();
@@ -285,6 +297,19 @@ public class GenController {
         String low = ref.toLowerCase();
         if (!low.startsWith("http://") && !low.startsWith("https://")) return false;
         return !low.contains(".myqcloud.com");   // 本项目COS URL含myqcloud;其余http视为外部直连
+    }
+
+    /** 服务端拉外部 URL 字节(绕浏览器防盗链)。用 JDK HttpClient,不引额外依赖;10s 超时,非2xx抛异常。 */
+    private byte[] fetchForeign(String url) throws Exception {
+        java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                .connectTimeout(java.time.Duration.ofSeconds(10))
+                .followRedirects(java.net.http.HttpClient.Redirect.NORMAL).build();
+        java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
+                .uri(java.net.URI.create(url)).timeout(java.time.Duration.ofSeconds(10))
+                .header("User-Agent", "Mozilla/5.0").GET().build();
+        java.net.http.HttpResponse<byte[]> resp = client.send(req, java.net.http.HttpResponse.BodyHandlers.ofByteArray());
+        if (resp.statusCode() / 100 != 2) throw new RuntimeException("HTTP " + resp.statusCode());
+        return resp.body();
     }
 
     /** 用 SKU 生图模板拼 prompt。填充 productType/skuName/compDesc。 */
