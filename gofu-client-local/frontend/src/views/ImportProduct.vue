@@ -16,6 +16,11 @@ const imp = reactive({
 })
 let lastImportedFolder = ''
 
+// SkuItem.role 是后端枚举(MAIN/ACCESSORY/BATCH,大写),兼容大小写
+function roleLabel(r) {
+  return { main: '主件', accessory: '配件', batch: '批量件' }[String(r || '').toLowerCase()] || r || ''
+}
+
 // 选文件夹(webkitdirectory):程序化建 input(源 pickImportFolder)
 function pickFolder() {
   const inp = document.createElement('input')
@@ -141,6 +146,28 @@ async function runImport() {
         :closable="false" style="margin-top:12px"
       />
 
+      <!-- 导入结果概览:后端反推的品类 + SKU(识别不出则置空) -->
+      <div v-if="imp.done" class="result">
+        <div class="field">
+          <label>品类</label>
+          <div class="box" :class="{ empty: !ctxStore.category }">
+            {{ ctxStore.category || '未识别（文件夹名未按「品类-主件名」命名）' }}
+          </div>
+        </div>
+        <div class="field">
+          <label>选品（SKU）</label>
+          <div class="box" :class="{ empty: !ctxStore.skuItems.length }">
+            <template v-if="ctxStore.skuItems.length">
+              <el-tag
+                v-for="(s, i) in ctxStore.skuItems" :key="i"
+                :type="String(s.role).toLowerCase() === 'main' ? 'success' : 'info'" class="stag"
+              >{{ roleLabel(s.role) }} · {{ s.name }}</el-tag>
+            </template>
+            <template v-else>未识别到 SKU 单品</template>
+          </div>
+        </div>
+      </div>
+
       <!-- 下一步引导:导入成功后 -->
       <div v-if="imp.done" class="next">
         <span>商品已建好并载入（见顶部当前商品）。下一步：</span>
@@ -160,4 +187,10 @@ async function runImport() {
 .counts { color: #909399; }
 .next { margin-top: 16px; padding-top: 16px; border-top: 1px solid #ebeef5; display: flex; align-items: center; gap: 12px; }
 .next span { color: #606266; font-size: 14px; }
+.result { margin-top: 16px; display: flex; flex-direction: column; gap: 12px; }
+.field { display: flex; align-items: flex-start; gap: 12px; }
+.field label { width: 84px; flex-shrink: 0; color: #606266; font-size: 14px; padding-top: 6px; }
+.box { flex: 1; min-height: 34px; padding: 6px 10px; border: 1px solid #dcdfe6; border-radius: 4px; background: #fff; }
+.box.empty { color: #c0c4cc; background: #fafafa; }
+.stag { margin: 2px 6px 2px 0; }
 </style>

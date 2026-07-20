@@ -11,7 +11,17 @@ export const useContextStore = defineStore('context', {
   }),
   getters: {
     hasContext: (s) => !!s.contextId,
-    title: (s) => s.current?.basic?.title || s.contextId || '未选择商品',
+    title: (s) => s.current?.basic?.title || s.current?.mainItem || s.contextId || '未选择商品',
+    // 品类/主件:后端反推,识别不出为空(ctx.category / ctx.mainItem)
+    category: (s) => s.current?.category || '',
+    mainItem: (s) => s.current?.mainItem || '',
+    // 当前选中方案的 SKU 单品列表(展示用)
+    skuItems: (s) => {
+      const st = s.current?.structure
+      if (!st?.plans?.length) return []
+      const p = st.plans[st.selectedPlanIndex || 0]
+      return p?.items || []
+    },
   },
   actions: {
     async load(id) {
