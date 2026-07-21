@@ -62,7 +62,11 @@ async function afterPick() {
   if (!entry.mainCodes.length) return
   try {
     const { matched, missing } = await entry.autoFetchWhite()
-    ElMessage[missing ? 'warning' : 'success'](`自动取白底图：${matched} 张${missing ? `，缺 ${missing} 张待导入` : '（齐全）'}`)
+    // 配件白底图也当场查(如052滤芯)→缺则当场进missing、当场拦住生成;
+    // 否则原来配件缺图要等runLayout里fetchAccWhites才发现,主图已在生了(主图也会用到配件)
+    await entry.fetchAccWhites()
+    const totalMiss = entry.whiteCheck.missing.length
+    ElMessage[totalMiss ? 'warning' : 'success'](`自动取白底图：主件${matched}张${totalMiss ? `，缺 ${totalMiss} 个编码待导入（含配件）` : '（齐全）'}`)
   } catch (e) { ElMessage.error('自动取白底图失败：' + e.message) }
 }
 
