@@ -10,7 +10,7 @@ import { useGen } from '@/composables/useGen.js'
 import { useSettingsStore } from '@/stores/settings.js'
 const ctxStore = useContextStore()
 const settings = useSettingsStore()
-const { style, gen, runStyleTransfer, runSkuImages, regenImage } = useGen()
+const { style, gen, runStyleTransfer, regenImage } = useGen()
 
 const styleOptions = [
   { id: 'original', name: '原图延展' }, { id: 'tech-blue', name: '科技蓝' }, { id: 'girl-pink', name: '少女粉' },
@@ -22,17 +22,8 @@ const ctx = computed(() => ctxStore.current)
 const mainImages = computed(() => ctx.value?.visual?.mainImages || [])
 const detailImages = computed(() => ctx.value?.visual?.detailImages || [])
 const hasImages = computed(() => mainImages.value.length || detailImages.value.length)
-// SKU 方案:导入流/单品页已建。SKU 图参考主图第一张(后端 refMain),故换风格后再生SKU会跟迁移后主图风格。
-const plans = computed(() => ctx.value?.structure?.plans || [])
-const skuItems = computed(() => plans.value[ctx.value?.structure?.selectedPlanIndex || 0]?.items || [])
-const skuWithImg = computed(() => skuItems.value.filter((it) => it.imgDir).length)
 
 function imgUrl(ref) { return '/api/gen/img?ref=' + encodeURIComponent(ref) }
-
-async function genSku() {
-  await runSkuImages(settings.antipriceTemplates)
-  if (gen.msg) ElMessage.info(gen.msg)
-}
 
 onMounted(() => settings.init())
 
@@ -52,14 +43,14 @@ async function regen(kind, i) {
       <!-- 风格迁移 -->
       <el-card class="sec">
         <template #header>🎨 整套换风格</template>
-        <p class="hint">对当前商品「{{ ctxStore.title }}」已有主图/详情整套换视觉基调（产品/构图/文案不变，只换风格），换完覆盖回写，可接着上新。</p>
+        <p class="hint">对当前商品「{{ ctxStore.title }}」整套换视觉基调（产品/构图/文案不变，只换风格），换完自动重新生成 SKU 图+详情图（跟随新风格），可直接上架。测哪种风格销量好就靠它。</p>
         <div v-if="!hasImages" class="warn">当前商品还没有成品图，先去生成或导入成品图。</div>
         <div v-else class="style-bar">
           <el-select v-model="style.styleId" placeholder="选择目标风格…" style="width:200px">
             <el-option v-for="s in styleOptions" :key="s.id" :label="s.name" :value="s.id" />
           </el-select>
-          <el-button type="primary" :disabled="!style.styleId || style.running" :loading="style.running" @click="runStyleTransfer">
-            {{ style.running ? '迁移中…' : '整套换风格' }}
+          <el-button type="primary" :disabled="!style.styleId || style.running" :loading="style.running" @click="runStyleTransfer(settings.antipriceTemplates)">
+            {{ style.running ? '处理中…' : '整套换风格并生成SKU' }}
           </el-button>
         </div>
         <el-progress v-if="style.running" :percentage="gen.progress" style="margin-top:10px" />
@@ -67,20 +58,7 @@ async function regen(kind, i) {
           :type="style.msgType === 'ok' ? 'success' : style.msgType === 'err' ? 'error' : 'info'" />
       </el-card>
 
-      <!-- 生成SKU图:换风格后→生SKU(参考迁移后主图)→才能上架。导入流不带SKU图,在此补生。 -->
-      <el-card v-if="plans.length" class="sec">
-        <template #header>🧩 生成 SKU 图 + 详情图（上架需要）</template>
-        <p class="hint">
-          SKU 图参考第一张主图生成——若刚换过风格，SKU 会跟着新风格走。
-          当前方案 {{ skuItems.length }} 个 SKU，已生图 {{ skuWithImg }} 个。
-        </p>
-        <el-button type="primary" :disabled="gen.running || !mainImages.length" :loading="gen.running" @click="genSku">
-          生成 SKU 图 + 详情图
-        </el-button>
-        <span v-if="!mainImages.length" class="warn"> 需先有主图（换风格或生成主图后再生 SKU）</span>
-        <el-progress v-if="gen.running" :percentage="gen.progress" style="margin-top:10px" />
-        <p v-if="gen.msg" class="hint" style="margin-top:8px">{{ gen.msg }}</p>
-      </el-card>
+      <!-- 生成SKU已并入上方"整套换风格并生成SKU"一个按钮,不再单列 -->
 
       <!-- 主图:单张重生 -->
       <el-card v-if="mainImages.length" class="sec">
