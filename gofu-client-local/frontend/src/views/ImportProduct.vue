@@ -157,14 +157,10 @@ async function autoAfterImport() {
     await fillCostAndPrice()
     const zero = plans().reduce((n, p) => n + (p.items || []).filter((it) => !(it.groupPrice > 0)).length, 0)
     if (zero > 0) { imp.msg = `⚠ 有 ${zero} 个 SKU 定不出价(快麦缺进价),已中断上新,请手动定价后上新。`; imp.msgType = 'err'; return }
-    // 4/4 按设置:任一勾选(过图/上新前确认)=停下等人工;都没勾=自动上新
-    if (settings.settings.reviewImages || settings.settings.confirmBeforeListing) {
-      imp.progress = 100; imp.done = true
-      imp.msg = '✓ 导入+补图+迁移+定价完成。设置要求人工确认,请检查后点「上新」。'; imp.msgType = 'ok'; return
-    }
-    imp.msg = '步骤4/4 全自动上新中…'
+    // 4/4 直接进上新:是否弹二次确认/是否要主图,由全局设置(confirmBeforeListing/reviewImages)在 submitListing 内统一管,不再额外停一次
+    imp.progress = 100; imp.done = true
+    imp.msg = '步骤4/4 上新中…'
     await submitListing(false)
-    imp.done = true
   } catch (e) {
     imp.msg = '自动链失败：' + (e.message || e); imp.msgType = 'err'
   } finally {
@@ -191,10 +187,16 @@ const curItems = computed(() => plans.value[selPlan.value]?.items || [])
 const detailImages = computed(() => ctxStore.current?.visual?.detailImages || [])
 function skuImg(it) { return it.imgDir ? imgUrl(it.imgDir) : '' }
 
-// 上新(dryRun=false 正式)。源 submitListing。
+// 上新(dryRun=false 正式)。源 submitListing。二次确认由全局设置 confirmBeforeListing 统一管。
 const listing = ref({ running: false, log: '' })
 async function submitListing(dryRun) {
   if (!ctxStore.current) return
+  // reviewImages(生图后必须人工过图):无主图不让上
+  if (settings.settings.reviewImages && !dryRun && !(ctxStore.current.visual?.mainImages || []).length) {
+    imp.msg = '设置要求生图后人工过图:当前无主图,不允许上新'; imp.msgType = 'err'; return
+  }
+  // 上新前二次确认(全局设置):勾了才弹。导入自动链也走这里,不再额外停一次。
+  if (!dryRun && settings.settings.confirmBeforeListing && !confirm('将真实提交上新到拼多多,确认继续?')) return
   listing.value.running = true
   try {
     const d = await api.post('/api/listing/from-context', {

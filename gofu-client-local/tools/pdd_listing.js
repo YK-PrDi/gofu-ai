@@ -912,6 +912,12 @@ async function main() {
                 titleInput = await page.$(titleSel);
             }
             if (titleInput) {
+                // 先等 init-loading 遮罩消失再点：慢机/弱网下页面进表单时 init-loading 的 .contain 会拦截点击，
+                // 导致「intercepts pointer events / Element is not attached to the DOM」。复用别处(如1255行)同款等待。
+                await page.waitForFunction(
+                    () => !document.querySelector('.init-loading, [class*="init-loading"]'),
+                    { timeout: 15000 }
+                ).catch(() => {});
                 await titleInput.click();
                 await titleInput.fill('');
                 await titleInput.type(config.title, { delay: 30 });
