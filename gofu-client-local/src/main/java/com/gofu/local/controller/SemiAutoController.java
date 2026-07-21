@@ -51,10 +51,12 @@ public class SemiAutoController {
         // 异步：上传16张+反推+云端出方案≈90秒，同步会让前端像卡死。这里起后台任务立即返回 importId，前端轮询进度。
         String folderName = String.valueOf(body.getOrDefault("folderName", ""));
         if (folderName.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "folderName 不能为空"));
+        // 方案套数:前端从设置传入(默认1,测试期省算力);缺省或非法回退1。
+        int planCount = body.get("planCount") instanceof Number n ? Math.max(1, n.intValue()) : 1;
         String importId = java.util.UUID.randomUUID().toString();
         styleImportService.importAsync(importId, folderName,
                 toUpImgs(body.get("main")), toUpImgs(body.get("detail")),
-                toUpImgs(body.get("white")), toUpImgs(body.get("sku")));
+                toUpImgs(body.get("white")), toUpImgs(body.get("sku")), planCount);
         return ResponseEntity.ok(Map.of("importId", importId));
     }
 

@@ -193,7 +193,8 @@ const fmt = (n) => (Number(n) || 0).toFixed(2)
 onMounted(() => {
   settings.init()
   storesStore.loadStores()
-  // 若从导入页/切换器带入了 context,同步 profitRate 无需处理;方案已在 contextStore
+  // 方案套数默认跟随设置(defaultPlanCount);用户在④生图选项里仍可临时改
+  entry.genOpts.planCount = settings.settings.defaultPlanCount || 1
 })
 </script>
 <template>

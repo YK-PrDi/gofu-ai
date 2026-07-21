@@ -111,7 +111,7 @@ async function runImport() {
   imp.msg = '导入中（上传云端→反推SKU→出方案+AI标题）…'; imp.msgType = ''
   try {
     const g = imp.groups
-    const started = await api.post('/api/semi-auto/import-to-context', { folderName: imp.folderName, main: g.main, detail: g.detail, white: g.white, sku: g.sku })
+    const started = await api.post('/api/semi-auto/import-to-context', { folderName: imp.folderName, main: g.main, detail: g.detail, white: g.white, sku: g.sku, planCount: settings.settings.defaultPlanCount || 1 })
     if (started.error) throw new Error(started.error)
     if (!started.importId) throw new Error('未返回 importId')
     const d = await pollImport(started.importId)

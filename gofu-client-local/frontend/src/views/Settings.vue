@@ -59,6 +59,13 @@ onMounted(() => { store.init(); loadErp() })
       <div class="flags">
         <el-checkbox v-for="f in flags" :key="f.key" v-model="store.settings[f.key]" :label="f.label" />
       </div>
+      <div class="num-row">
+        <span>SKU 方案默认生成套数</span>
+        <el-select v-model.number="store.settings.defaultPlanCount" size="small" style="width:100px">
+          <el-option v-for="n in [1, 2, 3, 4, 5]" :key="n" :label="n + ' 套'" :value="n" />
+        </el-select>
+        <span class="num-hint">测试期建议 1 套省算力/额度；正式想多套挑选可调大</span>
+      </div>
     </el-card>
 
     <el-card class="sec">
@@ -96,6 +103,8 @@ onMounted(() => { store.init(); loadErp() })
 .sec { margin-bottom: 16px; }
 .hint { font-size: 12px; color: #909399; margin-left: 12px; font-weight: 400; }
 .flags { display: flex; flex-direction: column; gap: 8px; }
+.num-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; font-size: 14px; }
+.num-hint { color: #909399; font-size: 12px; }
 .erp-form { max-width: 560px; }
 .row { display: flex; gap: 16px; }
 .half { flex: 1; }

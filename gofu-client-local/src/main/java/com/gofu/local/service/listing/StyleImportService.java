@@ -67,12 +67,12 @@ public class StyleImportService {
 
     /** 起一次异步导入，立即返回。前端拿 importId 轮询 getProgress。 */
     public void importAsync(String importId, String folderName, List<UpImg> mainImgs, List<UpImg> detailImgs,
-                            List<UpImg> whiteImgs, List<UpImg> skuImgs) {
+                            List<UpImg> whiteImgs, List<UpImg> skuImgs, int planCount) {
         Progress pg = new Progress();
         importProgress.put(importId, pg);
         importPool.submit(() -> {
             try {
-                Map<String, Object> out = importToContext(folderName, mainImgs, detailImgs, whiteImgs, skuImgs, pg);
+                Map<String, Object> out = importToContext(folderName, mainImgs, detailImgs, whiteImgs, skuImgs, pg, planCount);
                 pg.result = out; pg.set("完成", 100); pg.done = true;
             } catch (Exception e) {
                 log.warn("[导入异步] 失败: {}", e.getMessage(), e);
@@ -96,7 +96,7 @@ public class StyleImportService {
         List<UpImg> detail = readDirImgs(dir, "详情", "detail");
         List<UpImg> white = readDirImgs(dir, "白底", "white");
         List<UpImg> sku = readDirImgs(dir, "sku", "款式", "颜色");
-        importAsync(importId, folderName, main, detail, white, sku);
+        importAsync(importId, folderName, main, detail, white, sku, 3); // 批量流复用路径:套数默认3(不受单品导入设置影响)
     }
 
     /** 读商品文件夹下匹配任一关键词的子目录里的图，转 UpImg(base64)。找不到子目录返回空。 */
@@ -133,15 +133,15 @@ public class StyleImportService {
      * @param folderName 顶层文件夹名，如「锅盖架-圣诞树收纳架」
      * @param mainImgs/detailImgs/whiteImgs/skuImgs 各子目录图片(name+base64)
      */
-    /** 同步导入(保留供直接调用)：内部转发到带进度版，进度写到一个丢弃的 Progress。 */
+    /** 同步导入(保留供直接调用)：内部转发到带进度版，进度写到一个丢弃的 Progress。planCount 默认3(批量流复用路径)。 */
     public Map<String, Object> importToContext(String folderName, List<UpImg> mainImgs, List<UpImg> detailImgs,
                                                List<UpImg> whiteImgs, List<UpImg> skuImgs) throws Exception {
-        return importToContext(folderName, mainImgs, detailImgs, whiteImgs, skuImgs, new Progress());
+        return importToContext(folderName, mainImgs, detailImgs, whiteImgs, skuImgs, new Progress(), 3);
     }
 
     @SuppressWarnings("unchecked")
     public Map<String, Object> importToContext(String folderName, List<UpImg> mainImgs, List<UpImg> detailImgs,
-                                               List<UpImg> whiteImgs, List<UpImg> skuImgs, Progress pg) throws Exception {
+                                               List<UpImg> whiteImgs, List<UpImg> skuImgs, Progress pg, int planCount) throws Exception {
         if ((mainImgs == null || mainImgs.isEmpty()) && (detailImgs == null || detailImgs.isEmpty())
                 && (whiteImgs == null || whiteImgs.isEmpty()))
             throw new IllegalStateException("没找到主图/详情图/白底图（文件夹需含 主图/ 详情/ 白底图/ 子目录）");
@@ -287,7 +287,7 @@ public class StyleImportService {
         String contextId = String.valueOf(saved.get("id"));
 
         // 4) 云端出 SKU 方案(默认3套)+AI标题，再把 sku 图按尺寸名次挂到方案(与自动上新同一条链)
-        int planItemCount = generatePlansAndTitle(contextId, category, productName, mainSkus, skuImgs, pg);
+        int planItemCount = generatePlansAndTitle(contextId, category, productName, mainSkus, skuImgs, pg, planCount);
 
         log.info("[导入重构] 文件夹={} → contextId={} 主图{} 详情{} 白底{} 主件{} 方案SKU{}",
                 folderName, contextId, mainKeys.size(), detailKeys.size(), whiteKeys.size(), mainSkus.size(), planItemCount);
@@ -359,7 +359,7 @@ public class StyleImportService {
      */
     @SuppressWarnings("unchecked")
     private int generatePlansAndTitle(String contextId, String category, String productName,
-                                      List<Map<String, Object>> mainSkus, List<UpImg> skuImgs, Progress pg) {
+                                      List<Map<String, Object>> mainSkus, List<UpImg> skuImgs, Progress pg, int planCount) {
         int itemCount = 0;
         List<String> skuNames = new ArrayList<>();
         // 4a) SKU 方案：有反推到主件才出(默认3套供挑选)。这步最慢(云端LLM规划)。
@@ -369,7 +369,7 @@ public class StyleImportService {
                 Map<String, Object> req = new LinkedHashMap<>();
                 req.put("contextId", contextId); req.put("category", category == null ? "" : category);
                 req.put("productName", productName); req.put("brand", "GOFU");
-                req.put("skus", mainSkus); req.put("planCount", 3);   // 默认3套(后续前端再让用户选套数)
+                req.put("skus", mainSkus); req.put("planCount", Math.max(1, planCount));   // 套数由前端设置传入(默认1,测试省算力)
                 Map<String, Object> r = postJson("/api/gen/sku-plans", req);
                 if (r.get("savedItemCount") instanceof Number n) itemCount = n.intValue();
             } catch (Exception e) { log.warn("导入·SKU方案生成失败(不阻断): {}", e.getMessage()); }
