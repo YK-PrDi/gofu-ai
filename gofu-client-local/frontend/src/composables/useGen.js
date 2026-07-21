@@ -200,6 +200,45 @@ export function useGen() {
 
   async function recalcPrice() { await fillCostAndPrice() }
 
+  // ── 风格迁移(源 runStyleTransfer):对已有成品图整套换基调,覆盖回写 ──
+  const style = reactive({ styleId: '', running: false, msg: '', msgType: '' })
+  async function runStyleTransfer() {
+    const ctx = ctxStore.current
+    if (!ctx || !style.styleId) return
+    const hasFinished = (ctx.visual?.mainImages || []).length > 0 || (ctx.visual?.detailImages || []).length > 0
+    if (!hasFinished) { style.msg = '当前商品没有成品图(主图/详情),无法换风格'; style.msgType = 'err'; return }
+    const skuN = (ctx.structure?.plans || []).reduce((s, p) => s + (p.items || []).filter((it) => it.imgDir).length, 0)
+    const n = (ctx.visual.mainImages || []).length + (ctx.visual.detailImages || []).length + skuN
+    if (!confirm(`将对当前商品 ${n} 张成品图(含主图/详情/SKU)整套换风格,换完覆盖原图(可接着上新)。继续?`)) return
+    style.running = true; style.msg = '风格迁移中…'; style.msgType = ''
+    try {
+      const d = await api.post('/api/flow/style-transfer', { contextId: ctxStore.contextId, styleId: style.styleId })
+      if (d.error) throw new Error(d.error)
+      if (!d.taskId) throw new Error('未返回 taskId')
+      await pollFlowTask(d.taskId, d.total || 0, 5, 98)
+      await ctxStore.load(ctxStore.contextId)
+      style.msg = '✓ 风格迁移完成,预览已更新'; style.msgType = 'ok'
+    } catch (e) { style.msg = '风格迁移失败：' + e.message; style.msgType = 'err' }
+    finally { style.running = false }
+  }
+
+  // ── 单张重生(源 regenImage):走 regen-main,原地替换第 i 张 ──
+  async function regenImage(kind, i) {
+    const ctx = ctxStore.current
+    if (!ctx) return
+    gen.imgBusy = true
+    try {
+      const d = await api.post('/api/flow/regen-main', {
+        contextId: ctx.id, kind, index: i,
+        mainAspect: entry.genOpts.mainAspect, customRequest: entry.genOpts.customRequest, styleId: entry.genOpts.styleId,
+      })
+      if (d.error) throw new Error(d.error)
+      await ctxStore.load(ctxStore.contextId)
+      gen.msg = `第 ${i + 1} 张已重生`
+    } catch (e) { gen.msg = '重生失败：' + e.message }
+    finally { gen.imgBusy = false }
+  }
+
   // 一键生成:布局+主图 → 接着生选定方案(默认方案1)的 SKU图+详情图。
   // 注:当前后端 step1/step2 是两个独立接口(step1 出完全部主图才 return),故这里只能串接两步;
   // "SKU只等第1张主图、详情随主图逐张生"的交叉并行需后端把两步融合成流式管线(见文档,后端优化项)。
@@ -209,5 +248,5 @@ export function useGen() {
     await runSkuImages(antipriceTemplates)
   }
 
-  return { gen, pollFlowTask, stopGen, runLayout, runSkuImages, runOneClick, fillCostAndPrice, genTitle, recalcPrice, resolveTemplateId }
+  return { gen, style, pollFlowTask, stopGen, runLayout, runSkuImages, runOneClick, runStyleTransfer, regenImage, fillCostAndPrice, genTitle, recalcPrice, resolveTemplateId }
 }
