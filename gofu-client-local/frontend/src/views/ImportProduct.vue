@@ -1,15 +1,26 @@
 <script setup>
-import { useRouter } from 'vue-router'
+import { ref, onMounted } from 'vue'
 import { api } from '@/api.js'
 import { useContextStore } from '@/stores/context.js'
 import { useImportStore } from '@/stores/import-flow.js'
+import { useSettingsStore } from '@/stores/settings.js'
+import { useStoresStore } from '@/stores/stores-mgmt.js'
+import { useGen } from '@/composables/useGen.js'
 
-// P2-d:导入外部成品图→建商品。只做"选文件夹→上传→建context→载入",
-// 导入后自动链(补图/风格迁移/自动上新)依赖生图页(P2-f)/单品页(P2-e),暂留桩,那时再接。
-const router = useRouter()
+// 导入建品:完整自动链(选文件夹符合要求→建商品→补SKU图→自动风格迁移→定价→上新)。
+// 不符合(缺"-")提示改名。页内含手动风格迁移(旧版🎨,测哪种风格销量好)。
 const ctxStore = useContextStore()
-// imp 态放 store:切页再切回不丢(选的文件夹/识别结果/进度保持)
-const imp = useImportStore()
+const imp = useImportStore() // 态放store,切页不丢
+const settings = useSettingsStore()
+const storesStore = useStoresStore()
+const { gen, style, runSkuImages, runStyleTransfer, fillCostAndPrice } = useGen()
+
+const styleOptions = [
+  { id: 'tech-blue', name: '科技蓝' }, { id: 'girl-pink', name: '少女粉' }, { id: 'premium-gray', name: '高级灰' },
+  { id: 'natural-green', name: '自然绿' }, { id: 'sunset-orange', name: '暖阳橙' }, { id: 'khaki', name: '卡其色' },
+  { id: 'light-yellow', name: '淡黄色' }, { id: 'beige', name: '米黄色' },
+]
+const imgUrl = (r) => '/api/gen/img?ref=' + encodeURIComponent(r)
 
 // SkuItem.role 是后端枚举(MAIN/ACCESSORY/BATCH,大写),兼容大小写
 function roleLabel(r) {
@@ -110,14 +121,90 @@ async function runImport() {
     imp.msgType = 'ok'; imp.done = true
     if (d.warnings?.length) d.warnings.forEach((w) => console.warn('[导入]', w))
     imp.lastImportedFolder = imp.folderName
-    await ctxStore.load(d.contextId, 'import') // 载入新建商品,标记来源=import(单品页据此不被动接管)
-    // TODO(P2-f/P2-e后接): autoAfterImport 自动链(补SKU图→风格迁移→自动上新)
+    await ctxStore.load(d.contextId)
+    imp.running = false
+    // 建好后进自动链:补SKU图→风格迁移→定价→上新
+    await autoAfterImport()
   } catch (e) {
-    imp.msg = '导入失败：' + e.message; imp.msgType = 'err'
+    imp.msg = '导入失败：' + e.message; imp.msgType = 'err'; imp.running = false
+  }
+}
+
+// 导入后自动链(源 autoAfterImport):补缺SKU图→自动随机风格迁移→定价→按设置上新/停下等人工。
+async function autoAfterImport() {
+  const plans = () => ctxStore.current?.structure?.plans || []
+  imp.running = true
+  try {
+    // 1/4 补生缺失SKU图(方案有item但无成品图),需白底图参考
+    const hasWhite = (ctxStore.current?.visual?.whiteImages || []).length > 0
+    const missing = plans().reduce((n, p) => n + (p.items || []).filter((it) => !it.imgDir).length, 0)
+    if (missing > 0 && hasWhite) {
+      imp.msg = `步骤1/4 补生缺失的 SKU 图中…（${missing} 张）`; imp.msgType = ''
+      await runSkuImages(settings.antipriceTemplates) // step2 生选定方案SKU图+详情图
+    } else if (missing > 0 && !hasWhite) {
+      imp.msg = `⚠ 有 ${missing} 个 SKU 缺成品图但无白底图可参考,无法自动补生,请手动补白底图。`; imp.msgType = 'err'; return
+    }
+    // 2/4 自动随机风格迁移(定基调)
+    const pickable = styleOptions
+    style.styleId = pickable[Math.floor(Math.random() * pickable.length)].id
+    imp.msg = '步骤2/4 自动风格迁移中（不满意可在下方🎨手动重换）…'
+    await runStyleTransfer(style.styleId, { auto: true })
+    if (style.msgType === 'err') { imp.msg = '⚠ 自动风格迁移失败,已中断:' + style.msg + '（可在下方🎨手动重试）'; imp.msgType = 'err'; return }
+    // 3/4 定价(导入方案价为0,上新前必须回填)
+    imp.msg = '步骤3/4 自动定价中…'
+    await fillCostAndPrice()
+    const zero = plans().reduce((n, p) => n + (p.items || []).filter((it) => !(it.groupPrice > 0)).length, 0)
+    if (zero > 0) { imp.msg = `⚠ 有 ${zero} 个 SKU 定不出价(快麦缺进价),已中断上新,请手动定价后上新。`; imp.msgType = 'err'; return }
+    // 4/4 按设置:任一勾选(过图/上新前确认)=停下等人工;都没勾=自动上新
+    if (settings.settings.reviewImages || settings.settings.confirmBeforeListing) {
+      imp.msg = '✓ 导入+补图+迁移+定价完成。设置要求人工确认,请检查后点「上新」。'; imp.msgType = 'ok'; return
+    }
+    imp.msg = '步骤4/4 全自动上新中…'
+    await submitListing(false)
+  } catch (e) {
+    imp.msg = '自动链失败：' + (e.message || e); imp.msgType = 'err'
   } finally {
     imp.running = false
   }
 }
+
+// 手动换风格(旧版🎨):测哪种风格销量好
+async function manualStyle() {
+  if (!style.styleId) return
+  await runStyleTransfer(style.styleId)
+}
+
+// 上新(dryRun=false 正式)。源 submitListing。
+const listing = ref({ running: false, log: '' })
+async function submitListing(dryRun) {
+  if (!ctxStore.current) return
+  listing.value.running = true
+  try {
+    const d = await api.post('/api/listing/from-context', {
+      contextId: ctxStore.contextId, planIndex: ctxStore.current?.structure?.selectedPlanIndex || 0,
+      dryRun, brand: '', storeProfile: storesStore.targetProfile || '',
+    })
+    if (d.error) throw new Error(d.error)
+    if (!d.taskId) throw new Error('未返回 taskId')
+    await pollListing(d.taskId)
+  } catch (e) { imp.msg = '上新启动失败：' + e.message; imp.msgType = 'err'; listing.value.running = false }
+}
+async function pollListing(taskId, tries = 0) {
+  if (tries > 1200) { imp.msg = '上新轮询超时'; imp.msgType = 'err'; listing.value.running = false; return }
+  try {
+    const t = await api.get('/api/task/' + taskId)
+    listing.value.log = (t.results || []).map((x) => x.message || '').join('\n')
+    const last = [...(t.results || [])].reverse().find((x) => ['captcha', 'done', 'error'].includes(x.type))
+    if (t.status === 'running' && last?.type === 'captcha') { imp.msg = '🛑 需人工完成滑块验证,脚本会自动继续'; imp.msgType = 'err' }
+    else imp.msg = `上新中… ${t.status} ${t.progress}/${t.total}`
+    if (t.status === 'running') { setTimeout(() => pollListing(taskId, tries + 1), 1500); return }
+    listing.value.running = false
+    const ok = t.status === 'done'
+    imp.msg = ok ? '✓ 全自动完成:导入→补图→风格迁移→定价→上新成功。' : '✗ 上新未成功:' + t.status; imp.msgType = ok ? 'ok' : 'err'
+  } catch (e) { imp.msg = '上新轮询失败：' + e.message; imp.msgType = 'err'; listing.value.running = false }
+}
+
+onMounted(() => { settings.init(); storesStore.loadStores() })
 </script>
 <template>
   <div class="import">
@@ -170,13 +257,36 @@ async function runImport() {
         </div>
       </div>
 
-      <!-- 下一步引导:导入成功后 -->
-      <div v-if="imp.done" class="next">
-        <span>商品已建好并载入（见顶部当前商品）。下一步：</span>
-        <el-button type="primary" @click="router.push({ name: 'single' })">去单品上新继续</el-button>
-        <el-button @click="router.push({ name: 'studio' })">去生图工作室换风格</el-button>
+    </el-card>
+
+    <!-- 手动风格迁移(旧版🎨):对当前商品整套换基调,测哪种风格销量好。换完覆盖,可再上新 -->
+    <el-card v-if="ctxStore.current" class="sec" style="margin-top:16px">
+      <template #header>🎨 风格迁移（测哪种风格销量好，可反复换）</template>
+      <p class="desc">对当前商品「{{ ctxStore.title }}」已有主图/详情/SKU 整套换视觉基调（产品/构图/文案不变，只换风格），换完覆盖回写，可接着上新。</p>
+      <div class="style-bar">
+        <el-select v-model="style.styleId" placeholder="选择目标风格…" style="width:200px">
+          <el-option v-for="s in styleOptions" :key="s.id" :label="s.name" :value="s.id" />
+        </el-select>
+        <el-button type="primary" :disabled="!style.styleId || style.running || imp.running" :loading="style.running" @click="manualStyle">
+          整套换风格
+        </el-button>
+        <el-button :disabled="listing.running || imp.running" :loading="listing.running" @click="submitListing(false)">
+          上新到平台
+        </el-button>
+      </div>
+      <el-alert v-if="style.msg" :title="style.msg" :closable="false" style="margin-top:10px"
+        :type="style.msgType === 'ok' ? 'success' : style.msgType === 'err' ? 'error' : 'info'" />
+    </el-card>
+
+    <!-- 预览:主图 -->
+    <el-card v-if="(ctxStore.current?.visual?.mainImages || []).length" class="sec" style="margin-top:16px">
+      <template #header>主图预览（{{ ctxStore.current.visual.mainImages.length }}）</template>
+      <div class="pgrid">
+        <img v-for="(m, i) in ctxStore.current.visual.mainImages" :key="i" :src="imgUrl(m)" />
       </div>
     </el-card>
+
+    <pre v-if="listing.log" class="log">{{ listing.log }}</pre>
   </div>
 </template>
 
@@ -195,4 +305,9 @@ async function runImport() {
 .box { flex: 1; min-height: 34px; padding: 6px 10px; border: 1px solid #dcdfe6; border-radius: 4px; background: #fff; }
 .box.empty { color: #c0c4cc; background: #fafafa; }
 .stag { margin: 2px 6px 2px 0; }
+.sec { max-width: 800px; }
+.style-bar { display: flex; gap: 12px; align-items: center; }
+.pgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.pgrid img { width: 100%; border: 1px solid #ebeef5; border-radius: 4px; }
+.log { background: #111827; color: #d1d5db; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 200px; overflow: auto; white-space: pre-wrap; max-width: 800px; margin-top: 12px; }
 </style>

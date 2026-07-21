@@ -13,7 +13,6 @@ const routes = [
       { path: 'dashboard', name: 'dashboard', component: () => import('@/views/Dashboard.vue'), meta: { title: '工作台', icon: 'HomeFilled' } },
       { path: 'single', name: 'single', component: () => import('@/views/SingleProduct.vue'), meta: { title: '单品上新', icon: 'Goods' } },
       { path: 'batch', name: 'batch', component: () => import('@/views/BatchListing.vue'), meta: { title: '批量上新', icon: 'Files' } },
-      { path: 'studio', name: 'studio', component: () => import('@/views/ImageStudio.vue'), meta: { title: '生图工作室', icon: 'Picture' } },
       { path: 'import', name: 'import', component: () => import('@/views/ImportProduct.vue'), meta: { title: '导入建品', icon: 'Upload' } },
       { path: 'stores', name: 'stores', component: () => import('@/views/Stores.vue'), meta: { title: '店铺管理', icon: 'Shop' } },
       { path: 'settings', name: 'settings', component: () => import('@/views/Settings.vue'), meta: { title: '设置', icon: 'Setting' } },

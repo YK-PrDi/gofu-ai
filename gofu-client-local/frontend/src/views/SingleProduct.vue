@@ -103,27 +103,10 @@ async function pushWhite(code) {
   finally { pushing.value = '' }
 }
 
-// 方案A:导入流建的商品不被动铺到单品页。除非用户主动"接管"或来源非import。
-const tookOver = ref(false)
-// pageCtx=本页承认的当前商品:来源非import,或用户已主动接管,才认;否则为空(留空等主动操作)
-const pageCtx = computed(() => {
-  if (!ctxStore.current) return null
-  if (ctxStore.origin === 'import' && !tookOver.value) return null
-  return ctxStore.current
-})
-// 有导入的商品但本页尚未接管 → 提示条
-const importPending = computed(() => ctxStore.current && ctxStore.origin === 'import' && !tookOver.value)
-// 接管:导入流不算成本(后端generatePlansAndTitle没算,见文档根治项B),接管时前端补算一次(方案A)
-async function takeOver() {
-  tookOver.value = true
-  try {
-    ElMessage.info('接管中，正在补算成本/定价…')
-    await recalcPrice()
-    ElMessage.success('已接管并补算成本/定价')
-  } catch (e) { ElMessage.error('接管成功，但成本补算失败：' + (e.message || e)) }
-}
+// 单品上新与导入建品是两条独立流程,单品页直接读当前商品,不做导入接管逻辑。
+const pageCtx = computed(() => ctxStore.current)
 
-// ── 方案/定价(读 pageCtx,不直接读 ctxStore.current) ──
+// ── 方案/定价 ──
 const plans = computed(() => pageCtx.value?.structure?.plans || [])
 const selectedPlan = computed({
   get: () => pageCtx.value?.structure?.selectedPlanIndex || 0,
@@ -316,17 +299,6 @@ onMounted(() => {
         <el-card class="preview">
           <template #header>预览{{ pageCtx ? '：' + ctxStore.title : '' }}</template>
 
-          <!-- 方案A提示条:有导入的商品但本页未接管 -->
-          <el-alert v-if="importPending" type="info" :closable="false" style="margin-bottom:12px"
-            title="检测到刚导入的商品（在「导入建品」流程建立）。单品页默认不接管它——如需在此继续编辑，点右侧接管。">
-            <template #default>
-              <div style="margin-top:6px">
-                检测到刚在「导入建品」建立的商品「{{ ctxStore.title }}」。单品页是从零新建流程，默认不接管它。
-                <el-button size="small" type="primary" @click="takeOver">接管到单品页</el-button>
-              </div>
-            </template>
-          </el-alert>
-
           <!-- 白底图:操作(补充/缺图导入/回传快麦)+ 预览,全在右侧 -->
           <div class="psec">
             <div class="psec-t">
@@ -353,8 +325,8 @@ onMounted(() => {
             </div>
           </div>
 
-          <el-empty v-if="!pageCtx && !importPending && !entry.whites.length && !entry.skus.length"
-            description="选品/生成，或通过顶部切换器载入商品后在此预览" :image-size="60" />
+          <el-empty v-if="!pageCtx && !entry.whites.length && !entry.skus.length"
+            description="选品、生成后在此预览" :image-size="60" />
 
           <template v-if="pageCtx">
             <div v-if="pageCtx.visual?.title" class="ptitle">{{ pageCtx.visual.title }}</div>

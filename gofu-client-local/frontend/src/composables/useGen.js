@@ -202,29 +202,29 @@ export function useGen() {
 
   // ── 风格迁移(源 runStyleTransfer):对已有成品图整套换基调,覆盖回写 ──
   const style = reactive({ styleId: '', running: false, msg: '', msgType: '' })
-  // 换风格 → 换完自动接生 SKU图+详情图(参考换风格后的主图,SKU跟新风格)。一个动作到底,直到可上架。
-  async function runStyleTransfer(antipriceTemplates) {
+  // 风格迁移(源 runStyleTransfer):对已有成品图(主图/详情/SKU图)整套换基调,覆盖回写。
+  // 后端 style-transfer 已覆盖主图/详情/SKU 三者(见 FlowController #2c),不需前端再串生SKU。
+  // auto=true:导入自动链调用,跳过 confirm 静默跑。
+  async function runStyleTransfer(styleId, { auto = false } = {}) {
     const ctx = ctxStore.current
-    if (!ctx || !style.styleId) return
+    const sid = styleId || style.styleId
+    if (!ctx || !sid) return
     const hasFinished = (ctx.visual?.mainImages || []).length > 0 || (ctx.visual?.detailImages || []).length > 0
     if (!hasFinished) { style.msg = '当前商品没有成品图(主图/详情),无法换风格'; style.msgType = 'err'; return }
-    const skuN = (ctx.structure?.plans || []).reduce((s, p) => s + (p.items || []).filter((it) => it.imgDir).length, 0)
-    const n = (ctx.visual.mainImages || []).length + (ctx.visual.detailImages || []).length + skuN
-    if (!confirm(`将对当前商品整套换风格(${n}张成品图),换完自动重新生成 SKU 图+详情图(跟随新风格),可直接上架。继续?`)) return
+    if (!auto) {
+      const skuN = (ctx.structure?.plans || []).reduce((s, p) => s + (p.items || []).filter((it) => it.imgDir).length, 0)
+      const n = (ctx.visual.mainImages || []).length + (ctx.visual.detailImages || []).length + skuN
+      if (!confirm(`将对当前商品 ${n} 张成品图(含主图/详情/SKU)整套换风格,换完覆盖原图(可接着上新)。继续?`)) return
+    }
     style.running = true; style.msg = '风格迁移中…'; style.msgType = ''
     try {
-      const d = await api.post('/api/flow/style-transfer', { contextId: ctxStore.contextId, styleId: style.styleId })
+      const d = await api.post('/api/flow/style-transfer', { contextId: ctxStore.contextId, styleId: sid })
       if (d.error) throw new Error(d.error)
       if (!d.taskId) throw new Error('未返回 taskId')
-      await pollFlowTask(d.taskId, d.total || 0, 5, 60)
+      await pollFlowTask(d.taskId, d.total || 0, 5, 98)
       await ctxStore.load(ctxStore.contextId)
-      // 接着生 SKU图+详情图(参考换风格后的主图)。有方案才生;无方案(纯换图)则跳过。
-      if ((ctxStore.current?.structure?.plans || []).length) {
-        style.msg = '风格已换,正在生成 SKU 图+详情图…'
-        await runSkuImages(antipriceTemplates)
-      }
-      style.msg = '✓ 换风格 + SKU/详情图已生成,可上架'; style.msgType = 'ok'
-    } catch (e) { style.msg = '失败：' + e.message; style.msgType = 'err' }
+      style.msg = '✓ 风格迁移完成,预览已更新'; style.msgType = 'ok'
+    } catch (e) { style.msg = '风格迁移失败：' + e.message; style.msgType = 'err' }
     finally { style.running = false }
   }
 
