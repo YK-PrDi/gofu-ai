@@ -118,6 +118,7 @@ public class SemiAutoController {
         if (pg == null) return ResponseEntity.ok(Map.of("phase", "未知任务", "pct", 0, "done", true, "error", "任务不存在或已过期"));
         Map<String, Object> out = new java.util.LinkedHashMap<>();
         out.put("phase", pg.phase); out.put("pct", pg.pct); out.put("done", pg.done);
+        if (pg.contextId != null) out.put("contextId", pg.contextId);   // 中途暴露,前端可提前载入实时出图
         if (pg.error != null) out.put("error", pg.error);
         if (pg.result != null) out.put("result", pg.result);
         return ResponseEntity.ok(out);

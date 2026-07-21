@@ -96,6 +96,8 @@ async function pollImport(importId) {
     try { t = await api.get('/api/semi-auto/import-progress/' + importId) } catch (_) { continue }
     imp.progress = t.pct || 0
     imp.msg = `导入中 ${t.pct || 0}% · ${t.phase || '处理中…'}`; imp.msgType = ''
+    // 建完context即中途载入并持续刷新,右侧预览实时出图(主图/详情先显示,方案/SKU随后陆续刷入),不必等100%
+    if (t.contextId) { try { await ctxStore.load(t.contextId) } catch (_) {} }
     if (t.done) { if (t.error) throw new Error(t.error); return t.result }
   }
 }

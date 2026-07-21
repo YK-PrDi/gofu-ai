@@ -61,6 +61,7 @@ public class StyleImportService {
         public volatile boolean done = false;
         public volatile String error;            // 非空=失败
         public volatile Map<String, Object> result;   // done=true 时的 importToContext 返回值
+        public volatile String contextId;             // 建完context即置(42%),供前端中途载入实时出图,不必等生成方案完
         public final long startedAt = System.currentTimeMillis();
         void set(String ph, int p) { this.phase = ph; this.pct = p; }
     }
@@ -285,6 +286,7 @@ public class StyleImportService {
         pg.set("创建商品档案…", 42);
         Map<String, Object> saved = postJson("/api/context", ctx);
         String contextId = String.valueOf(saved.get("id"));
+        pg.contextId = contextId;   // 建完context即暴露:前端可中途载入,主图/详情实时出图,不必等方案生成完
 
         // 4) 云端出 SKU 方案(默认3套)+AI标题，再把 sku 图按尺寸名次挂到方案(与自动上新同一条链)
         int planItemCount = generatePlansAndTitle(contextId, category, productName, mainSkus, skuImgs, pg, planCount);
@@ -364,7 +366,7 @@ public class StyleImportService {
         List<String> skuNames = new ArrayList<>();
         // 4a) SKU 方案：有反推到主件才出(默认3套供挑选)。这步最慢(云端LLM规划)。
         if (!mainSkus.isEmpty()) {
-            pg.set("AI 生成 SKU 方案中（默认3套，主件" + mainSkus.size() + "个，约需 1 分钟）…", 52);
+            pg.set("AI 生成 SKU 方案中（" + Math.max(1, planCount) + "套，主件" + mainSkus.size() + "个，约需 1 分钟）…", 52);
             try {
                 Map<String, Object> req = new LinkedHashMap<>();
                 req.put("contextId", contextId); req.put("category", category == null ? "" : category);
