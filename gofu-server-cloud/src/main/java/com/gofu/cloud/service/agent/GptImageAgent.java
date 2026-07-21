@@ -30,15 +30,24 @@ public class GptImageAgent implements ImageGeneratorAgent {
     private static final Logger log = LoggerFactory.getLogger(GptImageAgent.class);
     private final ObjectMapper mapper = new ObjectMapper();
     private final AppProperties appProperties;
+    // 轮询计数:多张图并发时轮流从不同key起,让3个key真正负载均衡分担(原来每张都从key[0]起→全挤key[0]被单key限流卡成串行)
+    private static final java.util.concurrent.atomic.AtomicInteger KEY_RR = new java.util.concurrent.atomic.AtomicInteger(0);
 
     public GptImageAgent(AppProperties appProperties) {
         this.appProperties = appProperties;
     }
 
+    // 返回本次生图要试的key顺序:以轮询offset为起点旋转整个列表。
+    // 效果:并发的N张图起点各不同→均摊到各key(负载均衡);列表仍含全部key→某key失败自动试下一个(failover保留)。
     private List<String> orderedKeys() {
         List<String> keys = appProperties.getGptImage().getApiKeys();
         if (keys == null || keys.isEmpty()) return List.of();
-        return new ArrayList<>(keys);
+        int n = keys.size();
+        if (n == 1) return new ArrayList<>(keys);
+        int start = Math.floorMod(KEY_RR.getAndIncrement(), n);
+        List<String> rotated = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) rotated.add(keys.get((start + i) % n));
+        return rotated;
     }
 
     private String baseUrlForKey(String apiKey) {
