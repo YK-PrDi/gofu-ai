@@ -143,6 +143,22 @@ const previewPlanIdx = ref(0)
             :type="batch.msgType === 'ok' ? 'success' : batch.msgType === 'err' ? 'error' : 'info'" />
         </el-card>
 
+        <!-- SKU 方案布局(带定价):放左侧,与右侧图预览均衡 -->
+        <el-card v-if="batch.preview && batch.preview.plans && batch.preview.plans.length" class="sec">
+          <template #header>SKU 方案 / 定价 · {{ batch.preview.name }}</template>
+          <el-tabs v-model="previewPlanIdx">
+            <el-tab-pane v-for="(pl, i) in batch.preview.plans" :key="i" :label="`方案${i + 1}`" :name="i" />
+          </el-tabs>
+          <el-table :data="batch.preview.plans[previewPlanIdx]?.items || []" size="small" max-height="320">
+            <el-table-column label="图" width="56">
+              <template #default="{ row }"><img v-if="row._img" :src="row._img" class="sku-thumb" /><span v-else class="miss">缺</span></template>
+            </el-table-column>
+            <el-table-column label="SKU" prop="skuDisplayName" show-overflow-tooltip />
+            <el-table-column label="成本" width="70"><template #default="{ row }">{{ (row.cost || 0).toFixed(2) }}</template></el-table-column>
+            <el-table-column label="拼单价" width="80"><template #default="{ row }">{{ (row.groupPrice || 0).toFixed(2) }}</template></el-table-column>
+          </el-table>
+        </el-card>
+
         <!-- 按店铺分组的商品列表 -->
         <el-card v-for="g in batch.byShop" :key="g.shop" class="sec">
           <template #header>🏬 {{ g.shop }}（{{ g.rows.length }} 个商品）</template>
@@ -201,8 +217,8 @@ const previewPlanIdx = ref(0)
 <style scoped>
 .batch { max-width: 1400px; }
 .cols { display: flex; gap: 16px; align-items: flex-start; }
-.left { flex: 0 0 560px; display: flex; flex-direction: column; gap: 12px; }
-.right { flex: 1; position: sticky; top: 16px; }
+.left { flex: 1 1 0; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.right { flex: 1 1 0; position: sticky; top: 16px; min-width: 0; }
 .desc { color: #606266; font-size: 13px; line-height: 1.6; }
 .actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .picked { font-size: 13px; }
@@ -220,4 +236,6 @@ const previewPlanIdx = ref(0)
 .pgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .pgrid img { width: 100%; border: 1px solid #ebeef5; border-radius: 4px; }
 .pgrid-sm { grid-template-columns: repeat(6, 1fr); }
+.sku-thumb { width: 40px; height: 40px; object-fit: contain; border: 1px solid #ebeef5; border-radius: 4px; }
+.miss { color: #c0c4cc; font-size: 11px; }
 </style>

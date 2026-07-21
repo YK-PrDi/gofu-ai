@@ -15,11 +15,12 @@ export const useBatchStore = defineStore('batch', {
     busy: false,
     msg: '',
     msgType: '',
-    canRun: false,
     profitRate: 0.45, // 批量流默认在33/45/53随机
   }),
   getters: {
     readyCount: (s) => s.outcomes.filter((o) => o.status === 'ready' || o.status === 'listing_started').length,
+    // canRun 用 getter 实时算(不用state):补生完把商品置ready后,按钮立即可点(修:原state只在preflight算一次→补生完按钮一直灰)
+    canRun() { return this.outcomes.some((o) => o.status === 'ready') },
     // 按店铺分组(保留原索引 _i 供定位)
     byShop: (s) => {
       const groups = []; const idx = {}
@@ -46,7 +47,7 @@ export const useBatchStore = defineStore('batch', {
       const imgs = [...files].filter((f) => f.type && f.type.startsWith('image/'))
       if (!imgs.length) { this.setMsg('该文件夹没有图片', 'err'); return }
       this.folderName = (imgs[0].webkitRelativePath || '').split('/')[0] || ''
-      this.busy = true; this.canRun = false; this.outcomes = []
+      this.busy = true; this.outcomes = []
       this.randomProfit()
       this.setMsg(`上传大文件夹（${imgs.length} 张图，本批利润率随机=${(this.profitRate * 100).toFixed(0)}%）到后端…`, '')
       try {
@@ -66,12 +67,10 @@ export const useBatchStore = defineStore('batch', {
       finally { this.busy = false }
     },
     async preflight() {
-      this.canRun = false
       const d = await api.post('/api/semi-auto/preflight', { rootPath: this.rootPath.trim(), profitRate: this.profitRate })
       if (d.error) throw new Error(d.error)
       this.outcomes = d.outcomes || []
-      this.canRun = this.readyCount > 0
-      this.setMsg(`预检完成：${this.readyCount} 个商品齐全可上新，其余见下方说明`, this.canRun ? 'ok' : 'err')
+      this.setMsg(`预检完成：${this.readyCount} 个商品齐全可上新，其余见下方说明`, this.readyCount > 0 ? 'ok' : 'err')
     },
     // 轻量预览(只读本地图,零云端)
     async previewOne(idx) {
