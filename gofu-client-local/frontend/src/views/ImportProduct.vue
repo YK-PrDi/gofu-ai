@@ -118,17 +118,17 @@ async function runImport() {
     if (!started.importId) throw new Error('未返回 importId')
     const d = await pollImport(started.importId)
     if (!d || !d.contextId) throw new Error('未返回 contextId')
-    imp.progress = 100
-    imp.msg = `✓ 已导入「${d.productName || imp.folderName}」：主图${d.mainCount}·详情${d.detailCount}·白底${d.whiteCount || 0}，SKU方案${d.skuPlanCount || 0}个。`
-    imp.msgType = 'ok'; imp.done = true
+    // 导入本体完成≠整条自动链完成:不在此置100%/done,交给autoAfterImport走完各步后再终态
+    imp.msg = `已导入「${d.productName || imp.folderName}」，进入自动链…`; imp.msgType = ''
     if (d.warnings?.length) d.warnings.forEach((w) => console.warn('[导入]', w))
     imp.lastImportedFolder = imp.folderName
     await ctxStore.load(d.contextId)
-    imp.running = false
     // 建好后进自动链:补SKU图→风格迁移→定价→上新
     await autoAfterImport()
   } catch (e) {
-    imp.msg = '导入失败：' + e.message; imp.msgType = 'err'; imp.running = false
+    imp.msg = '导入失败：' + e.message; imp.msgType = 'err'
+  } finally {
+    imp.running = false
   }
 }
 
@@ -159,10 +159,12 @@ async function autoAfterImport() {
     if (zero > 0) { imp.msg = `⚠ 有 ${zero} 个 SKU 定不出价(快麦缺进价),已中断上新,请手动定价后上新。`; imp.msgType = 'err'; return }
     // 4/4 按设置:任一勾选(过图/上新前确认)=停下等人工;都没勾=自动上新
     if (settings.settings.reviewImages || settings.settings.confirmBeforeListing) {
+      imp.progress = 100; imp.done = true
       imp.msg = '✓ 导入+补图+迁移+定价完成。设置要求人工确认,请检查后点「上新」。'; imp.msgType = 'ok'; return
     }
     imp.msg = '步骤4/4 全自动上新中…'
     await submitListing(false)
+    imp.done = true
   } catch (e) {
     imp.msg = '自动链失败：' + (e.message || e); imp.msgType = 'err'
   } finally {
