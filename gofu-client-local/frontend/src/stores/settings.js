@@ -15,6 +15,7 @@ export const useSettingsStore = defineStore('settings', {
       batchAutoGen: true,
       oneClickGen: true, // 一键生成:布局+主图 出完自动接生 SKU图+详情图(默认开);关则分两步手动
       defaultPlanCount: 1, // SKU 方案默认生成套数(测试期1套省算力;正式可调3+供挑选)
+      reshipAutoDownload: true, // 补发完成后自动下载结果表到浏览器默认目录(默认开);关则手动点下载
     },
     agents: [{ id: 'gpt-image', name: 'GPT-Image 2' }], // 兜底,init 拉全量
     antipriceTemplates: [], // 防比价模板库(云端)

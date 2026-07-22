@@ -78,14 +78,16 @@ public class ReshipController {
     public ResponseEntity<Map<String, Object>> run(@RequestBody Map<String, Object> body) {
         String sourcePath = String.valueOf(body.getOrDefault("sourcePath", "")).trim();
         String targetPath = String.valueOf(body.getOrDefault("targetPath", "")).trim();
-        if (sourcePath.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "缺少补发表路径 sourcePath"));
-        if (targetPath.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "缺少 GOFU 补发表路径 targetPath"));
-        // 路径校验:必须是存在的 .xlsx 文件(不是目录/不存在)。否则 node 读时报看不懂的 EISDIR。
-        File srcF = new File(sourcePath), tgtF = new File(targetPath);
-        if (!srcF.isFile()) return ResponseEntity.badRequest().body(Map.of("error",
-                "补发表路径不是文件(是目录或不存在):" + sourcePath + " —— 请在设置里填到具体 .xlsx 文件"));
-        if (!tgtF.isFile()) return ResponseEntity.badRequest().body(Map.of("error",
-                "GOFU补发表路径不是文件(是目录或不存在):" + targetPath + " —— 请在设置里填到具体 .xlsx 文件"));
+        // 模式:local(路径,来自上传临时文件) / wps(kdocs.cn 云文档 URL)。默认 local。
+        String sourceKind = "wps".equals(body.get("sourceKind")) ? "wps" : "local";
+        String targetKind = "wps".equals(body.get("targetKind")) ? "wps" : "local";
+        if (sourcePath.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "缺少补发表" + ("wps".equals(sourceKind) ? " URL" : "路径")));
+        if (targetPath.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "缺少 GOFU 补发表" + ("wps".equals(targetKind) ? " URL" : "路径")));
+        // 仅 local 校验文件存在(wps 是 URL 不校验)。否则 node 读时报看不懂的 EISDIR。
+        if ("local".equals(sourceKind) && !new File(sourcePath).isFile())
+            return ResponseEntity.badRequest().body(Map.of("error", "补发表不是有效文件:" + sourcePath));
+        if ("local".equals(targetKind) && !new File(targetPath).isFile())
+            return ResponseEntity.badRequest().body(Map.of("error", "GOFU补发表不是有效文件:" + targetPath));
 
         // 读 ERP 凭据
         File f = configFile();
@@ -100,6 +102,15 @@ public class ReshipController {
         runCfg.put("erpPassword", cfg.getOrDefault("erpPassword", ""));
         runCfg.put("sourcePath", sourcePath);
         runCfg.put("targetPath", targetPath);
+        runCfg.put("sourceKind", sourceKind);
+        runCfg.put("targetKind", targetKind);
+        // WPS 登录态目录(任一端 wps 才用)
+        if ("wps".equals(sourceKind) || "wps".equals(targetKind)) {
+            String dir = appProperties.getPaths().getUserDataDir();
+            if (dir == null || dir.isBlank()) dir = System.getProperty("user.dir");
+            File wd = new File(dir, "wps_cloud_profile"); wd.mkdirs();
+            runCfg.put("wpsUserDataDir", wd.getAbsolutePath());
+        }
 
         try {
             String taskId = reshipService.runReship(runCfg);

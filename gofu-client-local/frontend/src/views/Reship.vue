@@ -7,8 +7,11 @@ import { useReshipStore } from '@/stores/reship.js'
 // 备注/待定行迁移到GOFU补发表。ERP账号在【设置·订单补发】配。第一期仅本地XLSX。
 const reship = useReshipStore()
 
+const mode = ref('local') // local本地文件 / wps云表
 const sourceFile = ref(null)
 const targetFile = ref(null)
+const sourceUrl = ref('') // WPS 补发表云文档URL
+const targetUrl = ref('') // WPS GOFU补发表云文档URL
 
 function pickFile(role) {
   const inp = document.createElement('input')
@@ -23,9 +26,15 @@ function pickFile(role) {
 }
 
 async function start() {
-  if (!sourceFile.value || !targetFile.value) { ElMessage.error('请先选择 补发表 和 GOFU补发表 两个文件'); return }
-  if (!confirm('将逐单在快麦 ERP 真实创建补发单(改线上业务数据)。确认开始?')) return
-  await reship.runWithFiles(sourceFile.value, targetFile.value)
+  if (mode.value === 'local') {
+    if (!sourceFile.value || !targetFile.value) { ElMessage.error('请先选择 补发表 和 GOFU补发表 两个文件'); return }
+    if (!confirm('将逐单在快麦 ERP 真实创建补发单(改线上业务数据)。确认开始?')) return
+    await reship.runWithFiles(sourceFile.value, targetFile.value)
+  } else {
+    if (!sourceUrl.value.trim() || !targetUrl.value.trim()) { ElMessage.error('请填 补发表 和 GOFU补发表 两个 WPS 云文档链接'); return }
+    if (!confirm('将读 WPS 云表逐单在快麦 ERP 创建补发单,结果就地写回云表(改线上业务数据)。确认开始?')) return
+    await reship.runWithWps(sourceUrl.value.trim(), targetUrl.value.trim())
+  }
 }
 
 // 日志行样式:成功绿/失败红/跳过灰
@@ -47,7 +56,13 @@ function rowType(r) {
         流程：已补发跳过 → 备注/待定行迁移到 GOFU 补发表 → 其余在快麦 ERP 创建补发单；无法补发的订单在补发表中<b style="color:#f56c6c">整行标红</b>。
         处理完可下载两个结果表。ERP 账号在 <b>设置 · 订单补发</b> 配。第一期仅本地 XLSX。
       </p>
-      <div class="files">
+      <el-radio-group v-model="mode" style="margin-bottom:12px">
+        <el-radio-button label="local">本地 XLSX 文件</el-radio-button>
+        <el-radio-button label="wps">WPS 云表</el-radio-button>
+      </el-radio-group>
+
+      <!-- 本地模式:选文件 -->
+      <div v-if="mode === 'local'" class="files">
         <div class="file-row">
           <el-button @click="pickFile('source')">选择补发表</el-button>
           <span :class="{ picked: sourceFile }">{{ sourceFile ? sourceFile.name : '未选择' }}</span>
@@ -57,18 +72,29 @@ function rowType(r) {
           <span :class="{ picked: targetFile }">{{ targetFile ? targetFile.name : '未选择' }}</span>
         </div>
       </div>
-      <el-button type="primary" :disabled="!sourceFile || !targetFile || reship.running" :loading="reship.running" @click="start">
+      <!-- WPS模式:填云文档URL -->
+      <div v-else class="files">
+        <el-input v-model="sourceUrl" placeholder="补发表 WPS 云文档链接(kdocs.cn/...)" style="margin-bottom:8px" />
+        <el-input v-model="targetUrl" placeholder="GOFU补发表 WPS 云文档链接(kdocs.cn/...)" />
+        <p class="wps-hint">首次用需在弹出的浏览器里登录 WPS(kdocs.cn)。结果就地写回云表,不下载本地文件。</p>
+      </div>
+
+      <el-button type="primary" :disabled="reship.running" :loading="reship.running" @click="start">
         开始补发
       </el-button>
       <el-alert v-if="reship.msg" :title="reship.msg" :closable="false" style="margin-top:12px"
         :type="reship.msgType === 'ok' ? 'success' : reship.msgType === 'err' ? 'error' : 'info'" />
 
-      <!-- 完成后下载两个结果表 -->
+      <!-- 完成后:本地模式下载结果表(WPS就地写回云表无本地文件) -->
       <div v-if="reship.done" class="downloads">
         <el-alert v-if="reship.redCount > 0" type="warning" :closable="false" style="margin-bottom:10px"
-          :title="`有 ${reship.redCount} 单无法在快麦补发,已在补发表中标红——需人工去拼多多补发。`" />
-        <el-button type="success" @click="reship.downloadResult('source')">下载补发表(标红版,含无法补发行)</el-button>
-        <el-button @click="reship.downloadResult('target')">下载 GOFU补发表(迁移后)</el-button>
+          :title="`有 ${reship.redCount} 单无法在快麦补发,已标红——需人工去拼多多补发。`" />
+        <template v-if="reship.mode === 'local'">
+          <p v-if="reship.redCount >= 0" class="dl-hint">结果表已按设置自动下载到浏览器默认目录;也可手动下载：</p>
+          <el-button type="success" @click="reship.downloadResult('source')">下载补发表(标红版,含无法补发行)</el-button>
+          <el-button @click="reship.downloadResult('target')">下载 GOFU补发表(迁移后)</el-button>
+        </template>
+        <p v-else class="dl-hint">WPS 云表模式:结果已就地写回云表(标红/迁移),打开云文档即可查看。</p>
       </div>
     </el-card>
 
@@ -92,6 +118,8 @@ function rowType(r) {
 .file-row span { color: #c0c4cc; }
 .file-row span.picked { color: #303133; }
 .downloads { margin-top: 12px; }
+.wps-hint { font-size: 12px; color: #909399; margin: 8px 0 0; }
+.dl-hint { font-size: 13px; color: #606266; margin: 0 0 8px; }
 .sec { margin-top: 16px; }
 .log-list { max-height: 420px; overflow-y: auto; }
 .log-row { padding: 6px 10px; border-bottom: 1px solid #f0f2f5; font-size: 13px; }

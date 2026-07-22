@@ -6,6 +6,7 @@
 import fs from 'node:fs'
 import { ErpBrowserRunner } from './erp-browser-runner.js'
 import { AutomationService } from './automation-service.js'
+import { WpsCloudGateway } from './wps-cloud-gateway.js'
 import { readOrderRows } from './order-workbook.js'
 import { readRemarkRecords, migrateRemarkArchive } from './migrate-image-note.js'
 
@@ -71,15 +72,26 @@ async function main() {
   if (!password) { emit({ type: 'error', message: '请填写 ERP 密码' }); process.exitCode = 1; return }
   if (!userDataDir) { emit({ type: 'error', message: '请提供 ERP 浏览器 userDataDir' }); process.exitCode = 1; return }
 
-  const runner = new ErpBrowserRunner({ userDataDir })
-  const service = new AutomationService({ runner })
+  // 模式:local(sourcePath/targetPath是文件路径) 或 wps(是kdocs.cn云文档URL)。默认local。
+  const sourceKind = String(cfg.sourceKind ?? 'local').trim() === 'wps' ? 'wps' : 'local'
+  const targetKind = String(cfg.targetKind ?? 'local').trim() === 'wps' ? 'wps' : 'local'
+  const wpsUserDataDir = String(cfg.wpsUserDataDir ?? '').trim()
 
-  // 请求形状同 desktop/main/run-request.js:erp 凭据 + 本地 source/target
+  const runner = new ErpBrowserRunner({ userDataDir })
+  // 任一端是 wps 才建网关(需 WPS 登录态目录)
+  let wpsGateway = null
+  if (sourceKind === 'wps' || targetKind === 'wps') {
+    if (!wpsUserDataDir) { emit({ type: 'error', message: 'WPS 模式需提供 wpsUserDataDir' }); process.exitCode = 1; return }
+    wpsGateway = new WpsCloudGateway({ userDataDir: wpsUserDataDir })
+  }
+  const service = new AutomationService({ runner, wpsGateway })
+
+  // 请求形状同 desktop/main/run-request.js:erp 凭据 + source/target(local=路径,wps=URL)
   const request = {
     createdAt: new Date().toISOString(),
     erp: { company, account, password },
-    source: { kind: 'local', value: sourcePath },
-    target: { kind: 'local', value: targetPath },
+    source: { kind: sourceKind, value: sourcePath },
+    target: { kind: targetKind, value: targetPath },
   }
 
   const onProgress = (event) => {
@@ -95,8 +107,9 @@ async function main() {
     emit({ type: 'error', message: e.message || String(e) })
     process.exitCode = 1
   } finally {
-    // runner 无 close 方法,直接关它的 persistent context(否则 Edge 上下文残留)
+    // 关 persistent context(否则 Edge 上下文残留)。ERP + WPS 两个浏览器都关。
     try { await runner.context?.close() } catch (_) {}
+    try { await wpsGateway?.context?.close() } catch (_) {}
   }
 }
 

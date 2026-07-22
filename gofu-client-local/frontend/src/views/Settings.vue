@@ -15,6 +15,7 @@ const flags = [
   { key: 'batchAutoPreview', label: '批量流预检后自动预览首个商品（默认开：轻量读本地图，零额度）' },
   { key: 'batchAutoGen', label: '批量流预检后自动为缺图商品AI补生SKU图（默认开：串行走云端，费额度）' },
   { key: 'oneClickGen', label: '单品一键生成（默认开：生成布局+主图后自动接生SKU图+详情图；关则分两步手动）' },
+  { key: 'reshipAutoDownload', label: '补发完成后自动下载结果表（默认开：下到浏览器默认下载目录；关则手动点下载）' },
 ]
 
 // 快麦 ERP 配置表单
