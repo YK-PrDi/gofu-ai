@@ -17,8 +17,21 @@ function emit(obj) {
 async function main() {
   // --migrate-only:安全旁路,只跑备注迁移(不碰ERP浏览器/不改线上数据),供先验证迁移+文件读写。
   const migrateOnly = process.argv.includes('--migrate-only')
-  const raw = process.argv.find((a, i) => i >= 2 && a.startsWith('{'))
-  if (!raw) { emit({ type: 'error', message: '缺少配置参数(JSON)' }); process.exitCode = 1; return }
+
+  // 配置来源:优先命令行 argv 里的 JSON(手动测试用);否则从 stdin 读(后端调用走这条,
+  // 避免 Windows 下 ProcessBuilder 把含双引号的 JSON 参数转义搞坏,也不让密码出现在进程命令行)。
+  let raw = process.argv.find((a, i) => i >= 2 && a.trim().startsWith('{'))
+  if (!raw) {
+    raw = await new Promise((resolve) => {
+      let buf = ''
+      process.stdin.setEncoding('utf8')
+      process.stdin.on('data', (d) => (buf += d))
+      process.stdin.on('end', () => resolve(buf.trim()))
+      // 若无 stdin(直接跑无参),2秒后放弃
+      setTimeout(() => resolve(buf.trim()), 2000)
+    })
+  }
+  if (!raw) { emit({ type: 'error', message: '缺少配置(命令行JSON或stdin)' }); process.exitCode = 1; return }
 
   let cfg
   try { cfg = JSON.parse(raw) } catch (e) { emit({ type: 'error', message: '配置JSON解析失败: ' + e.message }); process.exitCode = 1; return }

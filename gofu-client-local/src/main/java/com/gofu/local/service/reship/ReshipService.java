@@ -84,11 +84,16 @@ public class ReshipService {
         taskService.submit(task, () -> {
             Process proc = null;
             try {
+                // JSON 配置走 stdin 传(不走命令行参数):避开 Windows ProcessBuilder 对含双引号参数的转义,
+                // 密码也不出现在进程命令行。cli 从 stdin 读。
                 ProcessBuilder pb = new ProcessBuilder(
-                        listingService.resolveNodeExe(), scriptFile.getAbsolutePath(), cfgJson)
+                        listingService.resolveNodeExe(), scriptFile.getAbsolutePath())
                         .directory(projectRoot).redirectErrorStream(false);
                 proc = pb.start();
-                try { proc.getOutputStream().close(); } catch (Exception ignore) {}
+                // 写配置到子进程 stdin 后关闭(cli 的 stdin 'end' 事件触发读取)
+                try (java.io.OutputStream os = proc.getOutputStream()) {
+                    os.write(cfgJson.getBytes(StandardCharsets.UTF_8));
+                } catch (Exception ignore) {}
 
                 boolean sawDone = false;
                 try (BufferedReader reader = new BufferedReader(
