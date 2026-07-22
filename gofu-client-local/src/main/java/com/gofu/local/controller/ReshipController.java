@@ -80,6 +80,12 @@ public class ReshipController {
         String targetPath = String.valueOf(body.getOrDefault("targetPath", "")).trim();
         if (sourcePath.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "缺少补发表路径 sourcePath"));
         if (targetPath.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "缺少 GOFU 补发表路径 targetPath"));
+        // 路径校验:必须是存在的 .xlsx 文件(不是目录/不存在)。否则 node 读时报看不懂的 EISDIR。
+        File srcF = new File(sourcePath), tgtF = new File(targetPath);
+        if (!srcF.isFile()) return ResponseEntity.badRequest().body(Map.of("error",
+                "补发表路径不是文件(是目录或不存在):" + sourcePath + " —— 请在设置里填到具体 .xlsx 文件"));
+        if (!tgtF.isFile()) return ResponseEntity.badRequest().body(Map.of("error",
+                "GOFU补发表路径不是文件(是目录或不存在):" + targetPath + " —— 请在设置里填到具体 .xlsx 文件"));
 
         // 读 ERP 凭据
         File f = configFile();
