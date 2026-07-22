@@ -283,16 +283,25 @@ export async function fillOrderAndClickSearch(page, orderNo) {
     // 回车没触发查询请求,回退到点击查询按钮
   }
 
-  // 路径2兜底:点 a.btn.btn-search 且文字="查询"的按钮
-  const searches = inputContext.frame.locator("a.btn.btn-search");
-  const count = await searches.count();
-  for (let index = 0; index < count; index += 1) {
-    const search = searches.nth(index);
-    if (!await search.isVisible().catch(() => false)) continue;
-    if ((await search.innerText()).replace(/\s+/g, "") !== "查询") continue;
-    const responsePromise = page.waitForResponse(searchResponseMatcher, { timeout: 30_000 });
-    await search.click();
-    return await awaitSearchResult(responsePromise);
+  // 路径2兜底:点查询按钮。兼容两种 ERP 版式——
+  //   新版(实测):<button class="el-button el-button--primary" trackname="trade_new62_ChaXun"><span>查询</span>
+  //   旧版:<a class="btn btn-search">查询</a>
+  const buttonSelectors = [
+    'button[trackname="trade_new62_ChaXun"]',       // 新版最稳:trackname=查询拼音
+    'button.el-button--primary',                    // 新版兜底:主按钮里筛文字
+    'a.btn.btn-search',                             // 旧版
+  ];
+  for (const sel of buttonSelectors) {
+    const searches = inputContext.frame.locator(sel);
+    const count = await searches.count();
+    for (let index = 0; index < count; index += 1) {
+      const search = searches.nth(index);
+      if (!await search.isVisible().catch(() => false)) continue;
+      if ((await search.innerText()).replace(/\s+/g, "") !== "查询") continue;
+      const responsePromise = page.waitForResponse(searchResponseMatcher, { timeout: 30_000 });
+      await search.click();
+      return await awaitSearchResult(responsePromise);
+    }
   }
 
   throw new Error("无法触发订单查询(回车无响应,且未找到查询按钮)");
