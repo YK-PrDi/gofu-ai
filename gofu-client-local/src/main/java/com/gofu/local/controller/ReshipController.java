@@ -120,6 +120,20 @@ public class ReshipController {
         }
     }
 
+    /**
+     * 先登录 WPS 云文档(与补发分开,避免首次登录慢撞超时)。入参 { docUrl }。返回 { taskId },复用 /api/task 轮询。
+     */
+    @PostMapping("/wps-login")
+    public ResponseEntity<Map<String, Object>> wpsLogin(@RequestBody Map<String, Object> body) {
+        String docUrl = String.valueOf(body.getOrDefault("docUrl", "")).trim();
+        if (docUrl.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "缺少 WPS 云文档链接 docUrl"));
+        try {
+            return ResponseEntity.ok(Map.of("taskId", reshipService.wpsLogin(docUrl)));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", "启动 WPS 登录失败：" + e.getMessage()));
+        }
+    }
+
     /** 补发临时目录:上传的表存这,补发就地标红/追加也在这,下载从这取。 */
     private File reshipTempDir() {
         String dir = appProperties.getPaths().getUserDataDir();

@@ -45,6 +45,29 @@ async function main() {
   const userDataDir = String(cfg.userDataDir ?? '').trim()
 
   if (!sourcePath) { emit({ type: 'error', message: '请提供补发表路径 sourcePath' }); process.exitCode = 1; return }
+
+  // --wps-login:先登录WPS云文档(打开URL,用户在弹出Edge里登录,等文档就绪)。与补发分开,
+  // 避免首次登录慢撞补发超时。sourcePath 当云文档URL用,wpsUserDataDir 存登录态。
+  if (process.argv.includes('--wps-login')) {
+    const wd = String(cfg.wpsUserDataDir ?? '').trim()
+    if (!wd) { emit({ type: 'error', message: '缺少 wpsUserDataDir' }); process.exitCode = 1; return }
+    const gw = new WpsCloudGateway({ userDataDir: wd, timeout: 180_000 }) // 登录给3分钟宽限
+    try {
+      emit({ type: 'progress', message: '正在打开 WPS 云文档,请在弹出的浏览器里登录…' })
+      await gw.openLogin(sourcePath) // 打开文档URL(未登录会停在登录页)
+      const r = await gw.inspectDocument(sourcePath) // 等文档就绪(登录+加载完)
+      if (r.ok) emit({ type: 'done', ok: true, message: 'WPS 已登录,文档可编辑,可开始补发' })
+      else emit({ type: 'done', ok: false, message: r.message || 'WPS 未就绪' })
+      process.exitCode = r.ok ? 0 : 1
+    } catch (e) {
+      emit({ type: 'error', message: 'WPS 登录失败: ' + e.message }); process.exitCode = 1
+    } finally {
+      // 登录态已存 profile,关掉窗口(下次补发复用登录态)
+      try { await gw.context?.close() } catch (_) {}
+    }
+    return
+  }
+
   if (!targetPath) { emit({ type: 'error', message: '请提供 GOFU 补发表路径 targetPath' }); process.exitCode = 1; return }
 
   // --migrate-only:只读订单+跑迁移,输出到 targetPath 旁的 _迁移结果.xlsx,不碰 ERP、不改源表。

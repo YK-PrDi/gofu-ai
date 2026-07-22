@@ -37,6 +37,12 @@ async function start() {
   }
 }
 
+// 先登录 WPS(用补发表URL登一次,登录态按域名共享)。首次登录慢先走这个,再点开始补发。
+async function loginWps() {
+  if (!sourceUrl.value.trim()) { ElMessage.error('请先填补发表 WPS 云文档链接'); return }
+  await reship.wpsLogin(sourceUrl.value.trim())
+}
+
 // 日志行样式:成功绿/失败红/跳过灰
 function rowType(r) {
   if (r.type === 'error' || (r.code && /NOT_FOUND|EMPTY|FAILED/i.test(r.code))) return 'err'
@@ -76,7 +82,10 @@ function rowType(r) {
       <div v-else class="files">
         <el-input v-model="sourceUrl" placeholder="补发表 WPS 云文档链接(kdocs.cn/...)" style="margin-bottom:8px" />
         <el-input v-model="targetUrl" placeholder="GOFU补发表 WPS 云文档链接(kdocs.cn/...)" />
-        <p class="wps-hint">首次用需在弹出的浏览器里登录 WPS(kdocs.cn)。结果就地写回云表,不下载本地文件。</p>
+        <div style="margin-top:8px">
+          <el-button :disabled="reship.running" :loading="reship.running" @click="loginWps">1. 登录 WPS(首次先点)</el-button>
+        </div>
+        <p class="wps-hint">首次用先点「登录 WPS」,在弹出浏览器里登录 kdocs.cn(慢慢等登完),再点下方「开始补发」——分开避免首次登录慢导致补发超时。结果就地写回云表,不下载本地文件。</p>
       </div>
 
       <el-button type="primary" :disabled="reship.running" :loading="reship.running" @click="start">

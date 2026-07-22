@@ -61,6 +61,64 @@ public class ReshipService {
         return d.getAbsolutePath();
     }
 
+    /** WPS 登录目录:与补发运行时同一目录,登录态复用。 */
+    private String wpsUserDataDir() {
+        String dir = appProperties.getPaths().getUserDataDir();
+        if (dir == null || dir.isBlank()) dir = System.getProperty("user.dir");
+        File d = new File(dir, "wps_cloud_profile"); d.mkdirs();
+        return d.getAbsolutePath();
+    }
+
+    /**
+     * 先登录 WPS 云文档(异步任务,弹 Edge 让用户登录,等文档就绪)。与补发分开,避免首次登录慢撞超时。
+     * 返回 taskId,前端轮询 /api/task/{id}。docUrl=补发表云文档链接(登录态按域名共享,登一个即可)。
+     */
+    public String wpsLogin(String docUrl) throws Exception {
+        File scriptFile = resolveReshipScript();
+        if (scriptFile == null || !scriptFile.exists()) throw new RuntimeException("找不到补发脚本");
+        java.util.Map<String, Object> cfg = new java.util.LinkedHashMap<>();
+        cfg.put("sourcePath", docUrl);
+        cfg.put("wpsUserDataDir", wpsUserDataDir());
+        String cfgJson = objectMapper.writeValueAsString(cfg);
+
+        GenerationTask task = taskService.createTask(1);
+        File projectRoot = scriptFile.getParentFile();
+        taskService.submit(task, () -> {
+            Process proc = null;
+            try {
+                ProcessBuilder pb = new ProcessBuilder(
+                        listingService.resolveNodeExe(), scriptFile.getAbsolutePath(), "--wps-login")
+                        .directory(projectRoot).redirectErrorStream(false);
+                proc = pb.start();
+                try (java.io.OutputStream os = proc.getOutputStream()) {
+                    os.write(cfgJson.getBytes(StandardCharsets.UTF_8));
+                } catch (Exception ignore) {}
+                boolean ok = false;
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = r.readLine()) != null) {
+                        log.info("[wps-login] {}", line);
+                        Map<String, Object> ev;
+                        try { ev = objectMapper.readValue(line, Map.class); } catch (Exception ex) { continue; }
+                        String type = String.valueOf(ev.get("type"));
+                        if ("progress".equals(type)) task.addResult(Map.of("type", "progress", "message", String.valueOf(ev.getOrDefault("message", ""))));
+                        else if ("done".equals(type)) { ok = Boolean.TRUE.equals(ev.get("ok")); task.addResult(Map.of("type", ok ? "done" : "error", "message", String.valueOf(ev.getOrDefault("message", "")))); }
+                        else if ("error".equals(type)) task.addResult(Map.of("type", "error", "message", String.valueOf(ev.getOrDefault("message", ""))));
+                    }
+                }
+                int code = proc.waitFor();
+                if (!(ok && code == 0)) throw new RuntimeException("WPS 登录未就绪");
+            } catch (Exception e) {
+                task.addResult(Map.of("type", "error", "message", "WPS登录失败：" + e.getMessage()));
+                if (proc != null && proc.isAlive()) proc.destroy();
+                throw new RuntimeException(e.getMessage(), e);
+            } finally {
+                if (proc != null && proc.isAlive()) proc.destroy();
+            }
+        });
+        return task.getId();
+    }
+
     /**
      * 启动补发。config:{erpCompany,erpAccount,erpPassword,sourcePath,targetPath}。返回 taskId,前端轮询 /api/task/{id}。
      */

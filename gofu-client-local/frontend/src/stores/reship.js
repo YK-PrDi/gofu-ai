@@ -45,6 +45,19 @@ export const useReshipStore = defineStore('reship', {
         this.setMsg('失败：' + e.message, 'err'); this.running = false
       }
     },
+    // 先登录 WPS 云文档(与补发分开,首次登录慢不会撞补发超时)。轮询到就绪。
+    async wpsLogin(docUrl) {
+      this.running = true; this.logs = []; this.done = false; this.mode = 'wps'
+      this.setMsg('打开 WPS 云文档,请在弹出浏览器里登录…', '')
+      try {
+        const d = await api.post('/api/reship/wps-login', { docUrl })
+        if (d.error) throw new Error(d.error)
+        if (!d.taskId) throw new Error('未返回 taskId')
+        await this.poll(d.taskId)
+      } catch (e) {
+        this.setMsg('WPS 登录失败：' + e.message, 'err'); this.running = false
+      }
+    },
     // WPS 模式:两个 kdocs.cn 云文档 URL 直接跑(无需上传)。结果就地写回云表,不走本地下载。
     async runWithWps(sourceUrl, targetUrl) {
       this.running = true; this.logs = []; this.redCount = 0; this.done = false; this.mode = 'wps'
