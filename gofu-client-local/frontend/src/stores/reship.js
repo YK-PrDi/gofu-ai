@@ -13,17 +13,40 @@ export const useReshipStore = defineStore('reship', {
   }),
   actions: {
     setMsg(m, t) { this.msg = m; this.msgType = t || '' },
-    async run(sourcePath, targetPath) {
+    // 文件转base64(去data:前缀)
+    fileToB64(file) {
+      return new Promise((resolve, reject) => {
+        const rd = new FileReader()
+        rd.onload = () => resolve(String(rd.result).split(',')[1] || '')
+        rd.onerror = reject
+        rd.readAsDataURL(file)
+      })
+    },
+    // 方案2:上传两个表→拿临时路径→run→轮询。sourceFile/targetFile 是 File 对象。
+    async runWithFiles(sourceFile, targetFile) {
       this.running = true; this.logs = []; this.redCount = 0; this.done = false
-      this.setMsg('启动补发…', '')
+      this.setMsg('上传补发表…', '')
       try {
-        const d = await api.post('/api/reship/run', { sourcePath, targetPath })
+        const [sb, tb] = await Promise.all([this.fileToB64(sourceFile), this.fileToB64(targetFile)])
+        const su = await api.post('/api/reship/upload', { role: 'source', name: sourceFile.name, b64: sb })
+        if (su.error) throw new Error(su.error)
+        const tu = await api.post('/api/reship/upload', { role: 'target', name: targetFile.name, b64: tb })
+        if (tu.error) throw new Error(tu.error)
+        this.setMsg('启动补发…', '')
+        const d = await api.post('/api/reship/run', { sourcePath: su.path, targetPath: tu.path })
         if (d.error) throw new Error(d.error)
         if (!d.taskId) throw new Error('未返回 taskId')
         await this.poll(d.taskId)
       } catch (e) {
-        this.setMsg('启动失败：' + e.message, 'err'); this.running = false
+        this.setMsg('失败：' + e.message, 'err'); this.running = false
       }
+    },
+    // 下载结果表(role=source标红版/target迁移版)
+    downloadResult(role) {
+      const a = document.createElement('a')
+      a.href = '/api/reship/download?role=' + role
+      a.download = ''
+      a.click()
     },
     async poll(taskId, tries = 0) {
       if (tries > 1600) { this.setMsg('补发轮询超时', 'err'); this.running = false; return }

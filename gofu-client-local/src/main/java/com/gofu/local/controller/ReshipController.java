@@ -108,4 +108,56 @@ public class ReshipController {
             return ResponseEntity.internalServerError().body(Map.of("error", "启动补发失败：" + e.getMessage()));
         }
     }
+
+    /** 补发临时目录:上传的表存这,补发就地标红/追加也在这,下载从这取。 */
+    private File reshipTempDir() {
+        String dir = appProperties.getPaths().getUserDataDir();
+        if (dir == null || dir.isBlank()) dir = System.getProperty("user.dir");
+        File d = new File(dir, "reship-tmp");
+        d.mkdirs();
+        return d;
+    }
+
+    /**
+     * 方案2:上传补发表(base64)→存临时文件→返回临时路径。前端选文件后调,拿到路径再传给 /run。
+     * 入参 { role:'source'|'target', name, b64 }。返回 { path }。
+     */
+    @PostMapping("/upload")
+    public ResponseEntity<Map<String, Object>> upload(@RequestBody Map<String, Object> body) {
+        try {
+            String role = String.valueOf(body.getOrDefault("role", "source"));
+            String b64 = String.valueOf(body.getOrDefault("b64", ""));
+            if (b64.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "空文件"));
+            byte[] bytes = java.util.Base64.getDecoder().decode(b64);
+            // 固定文件名(按role),同会话覆盖;避免堆积。source标红回写它、target追加迁移写它。
+            String fn = ("target".equals(role) ? "gofu_target" : "reship_source") + ".xlsx";
+            File out = new File(reshipTempDir(), fn);
+            java.nio.file.Files.write(out.toPath(), bytes);
+            return ResponseEntity.ok(Map.of("path", out.getAbsolutePath()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", "上传失败：" + e.getMessage()));
+        }
+    }
+
+    /**
+     * 方案2:下载处理后的结果表。role=source(标红版补发表)/target(迁移后GOFU表)。
+     */
+    @GetMapping("/download")
+    public ResponseEntity<byte[]> download(@RequestParam String role) {
+        String fn = "target".equals(role) ? "gofu_target.xlsx" : "reship_source.xlsx";
+        File f = new File(reshipTempDir(), fn);
+        if (!f.isFile()) return ResponseEntity.notFound().build();
+        try {
+            byte[] data = java.nio.file.Files.readAllBytes(f.toPath());
+            String dl = "target".equals(role) ? "GOFU补发表_迁移结果.xlsx" : "补发表_标红结果.xlsx";
+            return ResponseEntity.ok()
+                    .header(org.springframework.http.HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename*=UTF-8''" + java.net.URLEncoder.encode(dl, "UTF-8").replace("+", "%20"))
+                    .header(org.springframework.http.HttpHeaders.CONTENT_TYPE,
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    .body(data);
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().build();
+        }
+    }
 }

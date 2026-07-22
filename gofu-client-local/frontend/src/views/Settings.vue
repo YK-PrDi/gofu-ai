@@ -104,7 +104,7 @@ onMounted(() => { store.init(); loadErp(); loadReshipErp() })
 
     <!-- 售后·订单补发 -->
     <el-card class="sec">
-      <template #header>订单补发（售后）· ERP 账号 + 补发表路径</template>
+      <template #header>订单补发（售后）· ERP 账号</template>
       <el-form label-width="130px" class="erp-form">
         <el-form-item label="ERP 公司"><el-input v-model="reshipErp.erpCompany" placeholder="快麦 ERP 登录公司" /></el-form-item>
         <el-form-item label="ERP 账号"><el-input v-model="reshipErp.erpAccount" /></el-form-item>
@@ -112,13 +112,7 @@ onMounted(() => { store.init(); loadErp(); loadReshipErp() })
         <el-form-item>
           <el-button type="primary" :loading="reshipBusy" @click="saveReshipErp">保存 ERP 账号</el-button>
         </el-form-item>
-        <el-form-item label="补发表路径">
-          <el-input v-model="store.settings.reshipSourcePath" placeholder="空=用 GOFU 目录默认；可填绝对路径如 D:\补发表.xlsx" />
-        </el-form-item>
-        <el-form-item label="GOFU补发表路径">
-          <el-input v-model="store.settings.reshipTargetPath" placeholder="备注/待定行迁移写入的目标表路径" />
-        </el-form-item>
-        <el-form-item><span class="hint">路径本地持久化；ERP 账号存 reship-config.json（本地，不上云）。密码不写日志。</span></el-form-item>
+        <el-form-item><span class="hint">补发表在「订单补发」页直接选文件上传，无需在此填路径。ERP 账号存 reship-config.json（本地，不上云）。密码不写日志。</span></el-form-item>
       </el-form>
     </el-card>
 
