@@ -36,6 +36,8 @@ user-prefs.json
 # 快麦真实凭证（appSecret/accessToken 等，绝不提交）
 kuaimai-config.json
 kuaimai-sku-cache.json
+# 补发 ERP 凭证（公司/账号/密码明文，绝不提交）
+reship-config.json
 
 # 便携打包产物与运行时（体积大/含登录态，不入库）
 packaging/dist/

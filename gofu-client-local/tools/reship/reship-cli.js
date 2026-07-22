@@ -3,8 +3,11 @@
 // 用法: node reship-cli.js '<jsonConfig>'
 //   config: { erpCompany, erpAccount, erpPassword, sourcePath, targetPath, userDataDir }
 // 进度: 每行 stdout 输出一条 JSON: {"type":"progress"|"done"|"error", ...}。密码不写日志。
+import fs from 'node:fs'
 import { ErpBrowserRunner } from './erp-browser-runner.js'
 import { AutomationService } from './automation-service.js'
+import { readOrderRows } from './order-workbook.js'
+import { readRemarkRecords, migrateRemarkArchive } from './migrate-image-note.js'
 
 function emit(obj) {
   // 单行 JSON,后端按行读。绝不带 password。
@@ -12,7 +15,9 @@ function emit(obj) {
 }
 
 async function main() {
-  const raw = process.argv[2]
+  // --migrate-only:安全旁路,只跑备注迁移(不碰ERP浏览器/不改线上数据),供先验证迁移+文件读写。
+  const migrateOnly = process.argv.includes('--migrate-only')
+  const raw = process.argv.find((a, i) => i >= 2 && a.startsWith('{'))
   if (!raw) { emit({ type: 'error', message: '缺少配置参数(JSON)' }); process.exitCode = 1; return }
 
   let cfg
@@ -25,11 +30,32 @@ async function main() {
   const targetPath = String(cfg.targetPath ?? '').trim()
   const userDataDir = String(cfg.userDataDir ?? '').trim()
 
+  if (!sourcePath) { emit({ type: 'error', message: '请提供补发表路径 sourcePath' }); process.exitCode = 1; return }
+  if (!targetPath) { emit({ type: 'error', message: '请提供 GOFU 补发表路径 targetPath' }); process.exitCode = 1; return }
+
+  // --migrate-only:只读订单+跑迁移,输出到 targetPath 旁的 _迁移结果.xlsx,不碰 ERP、不改源表。
+  if (migrateOnly) {
+    try {
+      const srcBytes = fs.readFileSync(sourcePath)
+      const tgtBytes = fs.readFileSync(targetPath)
+      const orders = readOrderRows(srcBytes)
+      const remarks = readRemarkRecords(srcBytes)
+      emit({ type: 'progress', message: `读到 ${orders.length} 条订单,${remarks.length} 条备注/待定行待迁移` })
+      const out = migrateRemarkArchive(srcBytes, tgtBytes)
+      const outPath = targetPath.replace(/\.xlsx$/i, '') + '_迁移结果.xlsx'
+      fs.writeFileSync(outPath, out)
+      emit({ type: 'done', ok: true, message: `迁移完成 → ${outPath}(源表/目标表未改)` })
+      process.exitCode = 0
+    } catch (e) {
+      emit({ type: 'error', message: '迁移失败: ' + e.message }); process.exitCode = 1
+    }
+    return
+  }
+
+  // 完整模式需 ERP 凭据
   if (!company) { emit({ type: 'error', message: '请填写 ERP 公司' }); process.exitCode = 1; return }
   if (!account) { emit({ type: 'error', message: '请填写 ERP 账号' }); process.exitCode = 1; return }
   if (!password) { emit({ type: 'error', message: '请填写 ERP 密码' }); process.exitCode = 1; return }
-  if (!sourcePath) { emit({ type: 'error', message: '请提供补发表路径 sourcePath' }); process.exitCode = 1; return }
-  if (!targetPath) { emit({ type: 'error', message: '请提供 GOFU 补发表路径 targetPath' }); process.exitCode = 1; return }
   if (!userDataDir) { emit({ type: 'error', message: '请提供 ERP 浏览器 userDataDir' }); process.exitCode = 1; return }
 
   const runner = new ErpBrowserRunner({ userDataDir })
