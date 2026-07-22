@@ -469,8 +469,39 @@ export class ErpBrowserRunner {
     );
   }
 
+  // 清障:等全屏 loading 遮罩消失 + 关掉授权到期等弹窗(shopAuthorizeDlgWinHandle/el-dialog),
+  // 否则遮罩/弹窗拦截点击 → intercepts pointer events。每个关键点击前调。
+  async clearBlockers() {
+    // 1) 等所有全屏 loading 遮罩消失(最多8s)
+    try {
+      await this.page.waitForFunction(
+        () => !document.querySelector('.el-loading-mask.is-fullscreen'),
+        { timeout: 8_000 },
+      );
+    } catch (_) {}
+    // 2) 关授权/启动弹窗:优先点关闭图标(用户给的 el-dialog__close),其次通用启动弹窗清理
+    for (let i = 0; i < 5; i += 1) {
+      const closeIcon = this.page.locator('.el-dialog__wrapper .el-dialog__close, .shopAuthorizeDlgWinHandle .el-dialog__close').first();
+      if (await closeIcon.isVisible().catch(() => false)) {
+        await closeIcon.click().catch(() => {});
+        await this.page.waitForTimeout(500);
+        continue;
+      }
+      break;
+    }
+    try { await dismissStartupDialogs(this.page); } catch (_) {}
+    // 3) 再等一次遮罩(关弹窗可能触发新加载)
+    try {
+      await this.page.waitForFunction(
+        () => !document.querySelector('.el-loading-mask.is-fullscreen'),
+        { timeout: 8_000 },
+      );
+    } catch (_) {}
+  }
+
   async openOrderManagement(progress) {
     report(progress, "navigate", "正在进入订单管理");
+    await this.clearBlockers();
     const orderManagement = await findText(this.page, "订单管理");
     if (!orderManagement) throw new Error("无法定位订单管理");
     await orderManagement.locator.click();
@@ -479,12 +510,14 @@ export class ErpBrowserRunner {
       30_000,
       "订单管理页面未加载平台单号筛选项",
     );
+    await this.clearBlockers();   // 点平台单号前再清一次(进订单管理常触发遮罩/授权弹窗)
     const platformOrder = await findText(this.page, "平台单号");
     await platformOrder.locator.click();
   }
 
   async processOrder(order, progress) {
     report(progress, "query", `正在查询 Excel 第 ${order.row} 行订单`);
+    await this.clearBlockers();   // 查询前清遮罩/弹窗(逐单处理中弹窗可能随时冒出)
     const queryContext = await fillOrderAndClickSearch(this.page, order.orderNo);
     report(progress, "query", `订单查询已完成，返回 ${queryContext.expectedRowCount} 条结果`);
 
