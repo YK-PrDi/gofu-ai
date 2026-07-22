@@ -47,7 +47,25 @@ async function refreshToken() {
   } finally { erpBusy.value = false }
 }
 
-onMounted(() => { store.init(); loadErp() })
+// 补发 ERP 配置(售后区)
+const reshipErp = reactive({ erpCompany: '', erpAccount: '', erpPassword: '' })
+const reshipBusy = ref(false)
+async function loadReshipErp() {
+  try {
+    const c = await store.loadReshipConfig()
+    Object.keys(reshipErp).forEach((k) => { if (c?.[k] != null) reshipErp[k] = c[k] })
+  } catch (_) {}
+}
+async function saveReshipErp() {
+  reshipBusy.value = true
+  try {
+    await store.saveReshipConfig({ ...reshipErp })
+    ElMessage.success('补发 ERP 配置已保存（写入 reship-config.json）')
+  } catch (e) { ElMessage.error('保存失败：' + e.message) }
+  finally { reshipBusy.value = false }
+}
+
+onMounted(() => { store.init(); loadErp(); loadReshipErp() })
 </script>
 
 <template>
@@ -81,6 +99,26 @@ onMounted(() => { store.init(); loadErp() })
           <el-button type="primary" :loading="erpBusy" @click="saveErp">保存</el-button>
           <el-button :loading="erpBusy" @click="refreshToken">刷新 Token</el-button>
         </el-form-item>
+      </el-form>
+    </el-card>
+
+    <!-- 售后·订单补发 -->
+    <el-card class="sec">
+      <template #header>订单补发（售后）· ERP 账号 + 补发表路径</template>
+      <el-form label-width="130px" class="erp-form">
+        <el-form-item label="ERP 公司"><el-input v-model="reshipErp.erpCompany" placeholder="快麦 ERP 登录公司" /></el-form-item>
+        <el-form-item label="ERP 账号"><el-input v-model="reshipErp.erpAccount" /></el-form-item>
+        <el-form-item label="ERP 密码"><el-input v-model="reshipErp.erpPassword" type="password" show-password /></el-form-item>
+        <el-form-item>
+          <el-button type="primary" :loading="reshipBusy" @click="saveReshipErp">保存 ERP 账号</el-button>
+        </el-form-item>
+        <el-form-item label="补发表路径">
+          <el-input v-model="store.settings.reshipSourcePath" placeholder="空=用 GOFU 目录默认；可填绝对路径如 D:\补发表.xlsx" />
+        </el-form-item>
+        <el-form-item label="GOFU补发表路径">
+          <el-input v-model="store.settings.reshipTargetPath" placeholder="备注/待定行迁移写入的目标表路径" />
+        </el-form-item>
+        <el-form-item><span class="hint">路径本地持久化；ERP 账号存 reship-config.json（本地，不上云）。密码不写日志。</span></el-form-item>
       </el-form>
     </el-card>
 

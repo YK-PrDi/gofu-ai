@@ -1,0 +1,136 @@
+package com.gofu.local.service.reship;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.gofu.local.config.AppProperties;
+import com.gofu.local.model.GenerationTask;
+import com.gofu.local.service.listing.ListingService;
+import com.gofu.local.service.listing.TaskService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+
+/**
+ * 快麦 ERP 订单补发:起便携 node 跑 tools/reship/reship-cli.js,读 stdout 每行 JSON 进度写进 TaskService。
+ * 复用 ListingService 的 node 解析(resolveNodeExe)。与上新同为本地自动化(Playwright 驱动真实网页+真实登录态)。
+ * ERP 密码只透传给子进程,不写日志。
+ */
+@Service
+public class ReshipService {
+
+    private static final Logger log = LoggerFactory.getLogger(ReshipService.class);
+
+    private final TaskService taskService;
+    private final ListingService listingService;   // 复用 resolveNodeExe / 定位 tools
+    private final AppProperties appProperties;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    public ReshipService(TaskService taskService, ListingService listingService, AppProperties appProperties) {
+        this.taskService = taskService;
+        this.listingService = listingService;
+        this.appProperties = appProperties;
+    }
+
+    /** 定位 tools/reship/reship-cli.js(参照 resolvePlaywrightScript 多候选)。 */
+    public File resolveReshipScript() {
+        String resourcesPath = System.getProperty("app.resources-path");
+        if (resourcesPath != null && !resourcesPath.isBlank()) {
+            File f = new File(resourcesPath, "tools/reship/reship-cli.js");
+            if (f.exists()) return f;
+        }
+        String userDir = System.getProperty("user.dir");
+        File[] candidates = {
+                new File(userDir, "tools/reship/reship-cli.js"),
+                new File(userDir, "gofu-client-local/tools/reship/reship-cli.js"),
+        };
+        for (File f : candidates) if (f.exists()) return f;
+        return null;
+    }
+
+    /** ERP 浏览器持久化目录:独立于上新的 pdd_browser_profile,存 ERP 登录态。 */
+    private String erpUserDataDir() {
+        String dir = appProperties.getPaths().getUserDataDir();
+        if (dir == null || dir.isBlank()) dir = System.getProperty("user.dir");
+        File d = new File(dir, "erp_reship_profile");
+        d.mkdirs();
+        return d.getAbsolutePath();
+    }
+
+    /**
+     * 启动补发。config:{erpCompany,erpAccount,erpPassword,sourcePath,targetPath}。返回 taskId,前端轮询 /api/task/{id}。
+     */
+    public String runReship(Map<String, Object> reqConfig) throws Exception {
+        File scriptFile = resolveReshipScript();
+        if (scriptFile == null || !scriptFile.exists()) {
+            throw new RuntimeException("找不到补发脚本 tools/reship/reship-cli.js");
+        }
+
+        // 组装 CLI 配置(补 userDataDir)。密码只进 JSON 传子进程,不打日志。
+        java.util.Map<String, Object> cliCfg = new java.util.LinkedHashMap<>(reqConfig);
+        cliCfg.put("userDataDir", erpUserDataDir());
+        String cfgJson = objectMapper.writeValueAsString(cliCfg);
+
+        log.info("[补发] 启动:source={} target={} (公司/账号已配,密码不记录)",
+                reqConfig.get("sourcePath"), reqConfig.get("targetPath"));
+
+        GenerationTask task = taskService.createTask(100);
+        File projectRoot = scriptFile.getParentFile();
+
+        taskService.submit(task, () -> {
+            Process proc = null;
+            try {
+                ProcessBuilder pb = new ProcessBuilder(
+                        listingService.resolveNodeExe(), scriptFile.getAbsolutePath(), cfgJson)
+                        .directory(projectRoot).redirectErrorStream(false);
+                proc = pb.start();
+                try { proc.getOutputStream().close(); } catch (Exception ignore) {}
+
+                boolean sawDone = false;
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        log.info("[reship] {}", line);
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> ev;
+                        try { ev = objectMapper.readValue(line, Map.class); }
+                        catch (Exception parseErr) { continue; }   // 非JSON行(依赖告警等)忽略
+                        String type = String.valueOf(ev.get("type"));
+                        if ("progress".equals(type)) {
+                            task.addResult(Map.of("type", "progress",
+                                    "message", String.valueOf(ev.getOrDefault("message", ""))));
+                            task.incrementProgress();
+                        } else if ("done".equals(type)) {
+                            sawDone = Boolean.TRUE.equals(ev.get("ok"));
+                            task.addResult(Map.of("type", sawDone ? "done" : "error",
+                                    "message", String.valueOf(ev.getOrDefault("message", "补发完成"))));
+                        } else if ("error".equals(type)) {
+                            task.addResult(Map.of("type", "error",
+                                    "message", String.valueOf(ev.getOrDefault("message", "补发失败"))));
+                        }
+                    }
+                }
+                int code = proc.waitFor();
+                // 失败必须抛出:TaskService.submit 在 work 正常返回时会强制置 done,只有抛异常才会置 error。
+                if (!(sawDone && code == 0)) {
+                    throw new RuntimeException("补发未成功(exit=" + code + ")");
+                }
+                // 成功:不手动置 done,交给 submit 统一置(避免与其状态机冲突)。
+            } catch (Exception e) {
+                log.error("[补发] 执行异常: {}", e.getMessage(), e);
+                task.addResult(Map.of("type", "error", "message", "补发失败：" + e.getMessage()));
+                if (proc != null && proc.isAlive()) proc.destroy();
+                throw new RuntimeException(e.getMessage(), e);   // 抛出→submit 置 error
+            } finally {
+                if (proc != null && proc.isAlive()) proc.destroy();
+            }
+        });
+
+        return task.getId();
+    }
+}

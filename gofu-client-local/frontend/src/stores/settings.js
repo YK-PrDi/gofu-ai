@@ -15,6 +15,8 @@ export const useSettingsStore = defineStore('settings', {
       batchAutoGen: true,
       oneClickGen: true, // 一键生成:布局+主图 出完自动接生 SKU图+详情图(默认开);关则分两步手动
       defaultPlanCount: 1, // SKU 方案默认生成套数(测试期1套省算力;正式可调3+供挑选)
+      reshipSourcePath: '', // 补发表(源)路径,空=用GOFU目录默认;可改
+      reshipTargetPath: '', // GOFU补发表(目标,备注迁移写入)路径
     },
     agents: [{ id: 'gpt-image', name: 'GPT-Image 2' }], // 兜底,init 拉全量
     antipriceTemplates: [], // 防比价模板库(云端)
@@ -50,6 +52,15 @@ export const useSettingsStore = defineStore('settings', {
       const d = await api.post('/api/erp/refresh-token')
       if (d.error) throw new Error(d.error)
       return api.get('/api/erp/config')
+    },
+    // 补发 ERP 配置(公司/账号/密码,存后端 reship-config.json)
+    async loadReshipConfig() {
+      return api.get('/api/reship/config')
+    },
+    async saveReshipConfig(form) {
+      const d = await api.post('/api/reship/config', form)
+      if (d.error) throw new Error(d.error)
+      return d
     },
     async init() {
       if (this.loaded) return

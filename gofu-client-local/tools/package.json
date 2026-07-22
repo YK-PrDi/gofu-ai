@@ -11,6 +11,9 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "playwright": "^1.60.0"
+    "playwright": "^1.60.0",
+    "playwright-core": "^1.60.0",
+    "@xmldom/xmldom": "^0.8.11",
+    "fflate": "^0.8.2"
   }
 }

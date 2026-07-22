@@ -9,12 +9,21 @@ const router = useRouter()
 const session = useSessionStore()
 const ctx = useContextStore()
 
-// 侧边导航项 = 带 title 的业务路由
-const navItems = computed(() =>
+// 侧边导航按业务分区(zone)分组:生产/运营/售后/系统。zone 顺序固定,内按路由声明序。
+const ZONE_ORDER = ['生产', '运营', '售后', '系统']
+const navZones = computed(() => {
+  const byZone = {}
   router.getRoutes()
     .filter((r) => r.meta?.title && r.name !== 'login')
-    .map((r) => ({ name: r.name, title: r.meta.title, icon: r.meta.icon, path: r.path }))
-)
+    .forEach((r) => {
+      const z = r.meta.zone || '其他'
+      ;(byZone[z] ||= []).push({ name: r.name, title: r.meta.title, icon: r.meta.icon })
+    })
+  const zones = ZONE_ORDER.filter((z) => byZone[z]).map((z) => ({ zone: z, items: byZone[z] }))
+  // 未列入 ZONE_ORDER 的兜底追加
+  Object.keys(byZone).filter((z) => !ZONE_ORDER.includes(z)).forEach((z) => zones.push({ zone: z, items: byZone[z] }))
+  return zones
+})
 
 function logout() {
   session.logout()
@@ -42,10 +51,13 @@ function logout() {
     <el-container>
       <el-aside width="200px" class="sidebar">
         <el-menu :default-active="route.name" router>
-          <el-menu-item v-for="it in navItems" :key="it.name" :index="it.name" :route="{ name: it.name }">
-            <el-icon v-if="it.icon"><component :is="it.icon" /></el-icon>
-            <span>{{ it.title }}</span>
-          </el-menu-item>
+          <template v-for="z in navZones" :key="z.zone">
+            <div class="zone-title">{{ z.zone }}</div>
+            <el-menu-item v-for="it in z.items" :key="it.name" :index="it.name" :route="{ name: it.name }">
+              <el-icon v-if="it.icon"><component :is="it.icon" /></el-icon>
+              <span>{{ it.title }}</span>
+            </el-menu-item>
+          </template>
         </el-menu>
       </el-aside>
       <el-main class="content">
@@ -67,5 +79,6 @@ function logout() {
 .user { display: flex; align-items: center; gap: 8px; }
 .user :deep(.el-button) { color: #fff; }
 .sidebar { border-right: 1px solid #e4e7ed; }
+.zone-title { padding: 12px 20px 4px; font-size: 12px; color: #909399; font-weight: 600; letter-spacing: 1px; }
 .content { background: #f5f7fa; padding: 20px; }
 </style>

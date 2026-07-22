@@ -1,0 +1,7 @@
+{
+  "name": "reship",
+  "version": "1.0.0",
+  "description": "快麦ERP订单补发自动化(从 gofu-image-migration 迁入,归GOFU维护)。ESM。",
+  "type": "module",
+  "main": "reship-cli.js"
+}

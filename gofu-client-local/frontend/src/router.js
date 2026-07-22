@@ -10,12 +10,14 @@ const routes = [
     meta: { requiresAuth: true },
     children: [
       { path: '', redirect: '/dashboard' },
-      { path: 'dashboard', name: 'dashboard', component: () => import('@/views/Dashboard.vue'), meta: { title: '工作台', icon: 'HomeFilled' } },
-      { path: 'single', name: 'single', component: () => import('@/views/SingleProduct.vue'), meta: { title: '单品上新', icon: 'Goods' } },
-      { path: 'batch', name: 'batch', component: () => import('@/views/BatchListing.vue'), meta: { title: '批量上新', icon: 'Files' } },
-      { path: 'import', name: 'import', component: () => import('@/views/ImportProduct.vue'), meta: { title: '导入建品', icon: 'Upload' } },
-      { path: 'stores', name: 'stores', component: () => import('@/views/Stores.vue'), meta: { title: '店铺管理', icon: 'Shop' } },
-      { path: 'settings', name: 'settings', component: () => import('@/views/Settings.vue'), meta: { title: '设置', icon: 'Setting' } },
+      // zone=业务分区(运营/售后/系统),AppShell 按 zone 分组渲染导航
+      { path: 'dashboard', name: 'dashboard', component: () => import('@/views/Dashboard.vue'), meta: { title: '工作台', icon: 'HomeFilled', zone: '运营' } },
+      { path: 'single', name: 'single', component: () => import('@/views/SingleProduct.vue'), meta: { title: '单品上新', icon: 'Goods', zone: '运营' } },
+      { path: 'batch', name: 'batch', component: () => import('@/views/BatchListing.vue'), meta: { title: '批量上新', icon: 'Files', zone: '运营' } },
+      { path: 'import', name: 'import', component: () => import('@/views/ImportProduct.vue'), meta: { title: '导入建品', icon: 'Upload', zone: '运营' } },
+      { path: 'reship', name: 'reship', component: () => import('@/views/Reship.vue'), meta: { title: '订单补发', icon: 'RefreshRight', zone: '售后' } },
+      { path: 'stores', name: 'stores', component: () => import('@/views/Stores.vue'), meta: { title: '店铺管理', icon: 'Shop', zone: '系统' } },
+      { path: 'settings', name: 'settings', component: () => import('@/views/Settings.vue'), meta: { title: '设置', icon: 'Setting', zone: '系统' } },
     ],
   },
 ]
