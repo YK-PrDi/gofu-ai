@@ -47,6 +47,9 @@ packaging/launcher/build/
 *.zip
 # 拼多多浏览器 profile（含登录态 Cookie，绝不提交）
 gofu-client-local/tools/pdd_browser_profile/
+# 补发 ERP 浏览器 profile（含快麦ERP登录态,机器相关,绝不提交）
+erp_reship_profile/
+gofu-client-local/erp_reship_profile/
 # ERP 拉取的白底图 / 生成的 SKU 图（运行时产物）
 erp-white/
 # 多店铺运行时数据（stores.json 含店铺名映射，stores/ 含每店独立 cookie/profile，绝不提交）
