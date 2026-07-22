@@ -67,7 +67,7 @@ function rowType(r) {
       <div v-if="reship.done" class="downloads">
         <el-alert v-if="reship.redCount > 0" type="warning" :closable="false" style="margin-bottom:10px"
           :title="`有 ${reship.redCount} 单无法在快麦补发,已在补发表中标红——需人工去拼多多补发。`" />
-        <el-button type="success" @click="reship.downloadResult('source')">下载补发表(标红版)</el-button>
+        <el-button type="success" @click="reship.downloadResult('source')">下载补发表(标红版,含无法补发行)</el-button>
         <el-button @click="reship.downloadResult('target')">下载 GOFU补发表(迁移后)</el-button>
       </div>
     </el-card>
