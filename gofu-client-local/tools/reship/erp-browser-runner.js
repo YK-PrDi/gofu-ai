@@ -254,35 +254,48 @@ export async function fillOrderAndClickSearch(page, orderNo) {
     throw new Error("订单号未正确写入查询输入框");
   }
 
+  // 触发查询:先按人工操作——在输入框回车确认(用户亲述第3步);找不到 /trade/search 响应再兜底点查询按钮。
+  // 统一等 POST /trade/search 响应 + loading 消失,拿结果条数。
+  const searchResponseMatcher = (response) => {
+    try {
+      return response.request().method() === "POST"
+        && new URL(response.url()).pathname === "/trade/search";
+    } catch { return false; }
+  };
+  const awaitSearchResult = async (responsePromise) => {
+    const response = await responsePromise;
+    if (!response.ok()) throw new Error(`ERP 订单查询请求失败：HTTP ${response.status()}`);
+    const payload = await response.json().catch(() => null);
+    const expectedRowCount = Array.isArray(payload?.data?.list) ? payload.data.list.length : 0;
+    await inputContext.frame
+      .locator("#tradeNew_manage .el-loading-mask")
+      .first()
+      .waitFor({ state: "hidden", timeout: 30_000 }).catch(() => {});
+    return { ...inputContext, expectedRowCount };
+  };
+
+  // 路径1:回车触发(人工操作方式)。输入框已 fill,按 Enter。
+  try {
+    const responsePromise = page.waitForResponse(searchResponseMatcher, { timeout: 12_000 });
+    await inputContext.locator.press("Enter");
+    return await awaitSearchResult(responsePromise);
+  } catch (enterErr) {
+    // 回车没触发查询请求,回退到点击查询按钮
+  }
+
+  // 路径2兜底:点 a.btn.btn-search 且文字="查询"的按钮
   const searches = inputContext.frame.locator("a.btn.btn-search");
   const count = await searches.count();
   for (let index = 0; index < count; index += 1) {
     const search = searches.nth(index);
     if (!await search.isVisible().catch(() => false)) continue;
     if ((await search.innerText()).replace(/\s+/g, "") !== "查询") continue;
-    const responsePromise = page.waitForResponse((response) => {
-      try {
-        return response.request().method() === "POST"
-          && new URL(response.url()).pathname === "/trade/search";
-      } catch {
-        return false;
-      }
-    }, { timeout: 30_000 });
+    const responsePromise = page.waitForResponse(searchResponseMatcher, { timeout: 30_000 });
     await search.click();
-    const response = await responsePromise;
-    if (!response.ok()) {
-      throw new Error(`ERP 订单查询请求失败：HTTP ${response.status()}`);
-    }
-    const payload = await response.json().catch(() => null);
-    const expectedRowCount = Array.isArray(payload?.data?.list) ? payload.data.list.length : 0;
-    await inputContext.frame
-      .locator("#tradeNew_manage .el-loading-mask")
-      .first()
-      .waitFor({ state: "hidden", timeout: 30_000 });
-    return { ...inputContext, expectedRowCount };
+    return await awaitSearchResult(responsePromise);
   }
 
-  throw new Error("无法在订单查询输入框所在区域定位查询按钮");
+  throw new Error("无法触发订单查询(回车无响应,且未找到查询按钮)");
 }
 
 export async function waitForOrderResultRows(frame, expectedRowCount, {
