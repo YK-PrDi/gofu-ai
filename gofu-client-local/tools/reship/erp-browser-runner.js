@@ -558,7 +558,12 @@ export class ErpBrowserRunner {
     const checkbox = await firstVisible(firstRow.locator(".el-checkbox"));
     if (!checkbox) throw new Error("商品第一行没有选择框");
     await checkbox.click();
-    const quantity = await firstVisible(firstRow.locator("input"));
+    // 数量框:排除复选框的隐藏 input(el-checkbox__original,不可见)。取可见的数量输入框——
+    // 优先 el-input 里的 input(数量列是 el-input),再兜底任意可见非checkbox input。
+    let quantity = await firstVisible(firstRow.locator(".el-input__inner"));
+    if (!quantity) {
+      quantity = await firstVisible(firstRow.locator("input:not(.el-checkbox__original)"));
+    }
     if (!quantity) throw new Error("商品第一行没有数量输入框");
     await quantity.fill("1");
 
