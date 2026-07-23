@@ -234,6 +234,12 @@ async function uploadImagesToArea(page, areaIndex, imgDir, label = '图片') {
             log(`${label}诊断: 已传第 ${i + 1}/${files.length} 张，页面当前缩略图约 ${thumbCnt} 个`);
         } catch (_) {}
     }
+    // 沉降等待:最后一张 setInputFiles 后没有"下一张的间隔"缓冲,直接 return 会让调用方紧接下一步、
+    // 最后一张来不及上传完就被推进(实测 6 张只落 5 张)。多传的图多等,给末张留网络上传+缩略图生成时间。
+    if (files.length > 0) {
+        await page.waitForTimeout(3500);
+        log(`${label}上传沉降等待完成(${files.length} 张)`);
+    }
     return files.length;
 }
 
