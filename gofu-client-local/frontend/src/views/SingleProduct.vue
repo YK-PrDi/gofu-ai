@@ -15,7 +15,10 @@ const entry = useEntryStore()
 const ctxStore = useContextStore()
 const settings = useSettingsStore()
 const storesStore = useStoresStore()
-const { gen, runLayout, runSkuImages, runOneClick, stopGen, recalcPrice } = useGen()
+const { gen, runLayout, runSkuImages, runOneClick, stopGen, recalcPrice, regenImage } = useGen()
+
+// 图片URL(预览缩略+点开大图共用):COS key/本地路径/URL 统一走云端 gen/img 代理
+const imgUrl = (ref) => '/api/gen/img?ref=' + encodeURIComponent(ref)
 
 const pickerOpen = ref(false)
 const styleOptions = [
@@ -334,28 +337,38 @@ onMounted(() => {
 
           <template v-if="pageCtx">
             <div v-if="pageCtx.visual?.title" class="ptitle">{{ pageCtx.visual.title }}</div>
-            <!-- 主图(过滤流式生成中的null占位槽) -->
+            <!-- 主图(过滤流式生成中的null占位槽);点开看大图(el-image preview) + hover 重生 -->
             <div v-if="mainImagesShown.length" class="psec">
-              <div class="psec-t">主图（{{ mainImagesShown.length }}）</div>
+              <div class="psec-t">主图（{{ mainImagesShown.length }}）· 点击看大图，悬停可重生</div>
               <div class="pgrid">
-                <img v-for="(m, i) in mainImagesShown" :key="'m' + i"
-                  :src="'/api/gen/img?ref=' + encodeURIComponent(m)" />
+                <div v-for="(m, i) in mainImagesShown" :key="'m' + i" class="pcell">
+                  <el-image :src="imgUrl(m)" :preview-src-list="mainImagesShown.map(imgUrl)" :initial-index="i"
+                    fit="contain" preview-teleported hide-on-click-modal />
+                  <el-button class="regen-btn" size="small" type="primary" :loading="gen.imgBusy"
+                    @click="regenImage('main', i)">重生</el-button>
+                </div>
               </div>
             </div>
             <!-- 详情图 -->
             <div v-if="detailImagesShown.length" class="psec">
-              <div class="psec-t">详情图（{{ detailImagesShown.length }}）</div>
+              <div class="psec-t">详情图（{{ detailImagesShown.length }}）· 点击看大图，悬停可重生</div>
               <div class="pgrid">
-                <img v-for="(d, i) in detailImagesShown" :key="'d' + i"
-                  :src="'/api/gen/img?ref=' + encodeURIComponent(d)" />
+                <div v-for="(d, i) in detailImagesShown" :key="'d' + i" class="pcell">
+                  <el-image :src="imgUrl(d)" :preview-src-list="detailImagesShown.map(imgUrl)" :initial-index="i"
+                    fit="contain" preview-teleported hide-on-click-modal />
+                  <el-button class="regen-btn" size="small" type="primary" :loading="gen.imgBusy"
+                    @click="regenImage('detail', i)">重生</el-button>
+                </div>
               </div>
             </div>
-            <!-- SKU图(当前方案各item的成品图) -->
+            <!-- SKU图(当前方案各item的成品图);点开看大图 -->
             <div v-if="currentItems.some((it) => it.imgDir)" class="psec">
-              <div class="psec-t">SKU 图（方案{{ selectedPlan + 1 }}）</div>
+              <div class="psec-t">SKU 图（方案{{ selectedPlan + 1 }}）· 点击看大图</div>
               <div class="pgrid">
                 <template v-for="(it, i) in currentItems" :key="'s' + i">
-                  <img v-if="it.imgDir" :src="'/api/gen/img?ref=' + encodeURIComponent(it.imgDir)" :title="it.skuDisplayName || it.name" />
+                  <el-image v-if="it.imgDir" :src="imgUrl(it.imgDir)"
+                    :preview-src-list="currentItems.filter((x) => x.imgDir).map((x) => imgUrl(x.imgDir))"
+                    fit="contain" preview-teleported hide-on-click-modal :title="it.skuDisplayName || it.name" />
                 </template>
               </div>
             </div>
@@ -371,8 +384,11 @@ onMounted(() => {
 <style scoped>
 .single { max-width: 1400px; }
 .cols { display: flex; gap: 16px; align-items: flex-start; }
-.left { flex: 0 0 620px; display: flex; flex-direction: column; gap: 12px; }
-.right { flex: 1; position: sticky; top: 16px; }
+/* min-width:0 关键:否则左栏内 el-table 固有宽度会撑破 620px 把右栏预览压到极窄(flex+表格经典塌陷) */
+.left { flex: 0 0 620px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.right { flex: 1; min-width: 0; position: sticky; top: 16px; }
+/* SKU 方案表限宽在左栏内,超出滚动而非撑破布局 */
+.left :deep(.el-table) { max-width: 100%; }
 .step :deep(.el-card__header) { font-weight: 600; }
 .chips, .missing { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .chip { margin: 0; }
@@ -398,6 +414,11 @@ onMounted(() => {
 .psec-t { font-size: 13px; color: #909399; margin-bottom: 8px; }
 .pgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .pgrid img { width: 100%; border: 1px solid #ebeef5; border-radius: 4px; }
+.pgrid :deep(.el-image) { width: 100%; border: 1px solid #ebeef5; border-radius: 4px; cursor: zoom-in; display: block; }
+/* 预览格:相对定位,重生按钮悬停浮现在右上角 */
+.pcell { position: relative; }
+.regen-btn { position: absolute; top: 4px; right: 4px; opacity: 0; transition: opacity .15s; padding: 4px 8px; }
+.pcell:hover .regen-btn { opacity: 1; }
 .pgrid-sm { grid-template-columns: repeat(4, 1fr); }
 .pgrid-sm img { aspect-ratio: 1; object-fit: contain; background: #fff; }
 </style>
