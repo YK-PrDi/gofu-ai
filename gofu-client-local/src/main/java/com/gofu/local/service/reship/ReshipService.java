@@ -36,19 +36,32 @@ public class ReshipService {
         this.appProperties = appProperties;
     }
 
-    /** 定位 tools/reship/reship-cli.js(参照 resolvePlaywrightScript 多候选)。 */
+    /**
+     * 定位 tools/reship/reship-cli.js。与上新 resolvePlaywrightScript 对齐,并复用它已跑通的
+     * 脚本目录做锚点(上新脚本在 tools/pdd_listing.js,补发在 tools/reship/reship-cli.js,同一个 tools 根)——
+     * 这样只要上新脚本能定位,补发就能靠它的父目录 tools/ 拼出来,不受打包态 user.dir 差异影响。
+     */
     public File resolveReshipScript() {
+        java.util.List<File> candidates = new java.util.ArrayList<>();
         String resourcesPath = System.getProperty("app.resources-path");
-        if (resourcesPath != null && !resourcesPath.isBlank()) {
-            File f = new File(resourcesPath, "tools/reship/reship-cli.js");
-            if (f.exists()) return f;
+        if (resourcesPath != null && !resourcesPath.isBlank())
+            candidates.add(new File(resourcesPath, "tools/reship/reship-cli.js"));
+        // 关键锚点:借上新脚本(打包态已跑通)的 tools 目录,拼 reship 子目录。
+        File listingScript = listingService.resolvePlaywrightScript();
+        if (listingScript != null) {
+            File toolsDir = listingScript.getParentFile();   // .../tools
+            if (toolsDir != null) candidates.add(new File(toolsDir, "reship/reship-cli.js"));
         }
         String userDir = System.getProperty("user.dir");
-        File[] candidates = {
-                new File(userDir, "tools/reship/reship-cli.js"),
-                new File(userDir, "gofu-client-local/tools/reship/reship-cli.js"),
-        };
+        candidates.add(new File(userDir, "tools/reship/reship-cli.js"));
+        candidates.add(new File(userDir, "gofu-client-local/tools/reship/reship-cli.js"));
+
         for (File f : candidates) if (f.exists()) return f;
+        // 诊断:打包态报"找不到"时,把试过的绝对路径全打出来,一眼看出是路径没锚对还是脚本真没打进包。
+        log.warn("[诊断·reship脚本] 未找到 reship-cli.js。app.resources-path={} user.dir={} 上新脚本={} 试过: {}",
+                resourcesPath, userDir,
+                listingScript != null ? listingScript.getAbsolutePath() : "(null)",
+                candidates.stream().map(File::getAbsolutePath).toList());
         return null;
     }
 

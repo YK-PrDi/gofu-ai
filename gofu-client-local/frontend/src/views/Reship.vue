@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useReshipStore } from '@/stores/reship.js'
 
@@ -10,8 +10,12 @@ const reship = useReshipStore()
 const mode = ref('local') // local本地文件 / wps云表
 const sourceFile = ref(null)
 const targetFile = ref(null)
-const sourceUrl = ref('') // WPS 补发表云文档URL
-const targetUrl = ref('') // WPS GOFU补发表云文档URL
+// WPS 云文档URL:两个链接常固定复用,持久化到 localStorage 免得每次重填。
+// 机器相关(不上云),localStorage 正合适。初始值从上次输入恢复。
+const sourceUrl = ref(localStorage.getItem('reship.wps.sourceUrl') || '') // WPS 补发表云文档URL
+const targetUrl = ref(localStorage.getItem('reship.wps.targetUrl') || '') // WPS GOFU补发表云文档URL
+watch(sourceUrl, (v) => localStorage.setItem('reship.wps.sourceUrl', v || ''))
+watch(targetUrl, (v) => localStorage.setItem('reship.wps.targetUrl', v || ''))
 
 function pickFile(role) {
   const inp = document.createElement('input')

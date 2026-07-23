@@ -76,6 +76,9 @@ echo "拷贝 pdd_listing.js + node + node_modules（解引用软链接，cp -rL�
 cp -L "$TOOLS_SRC/pdd_listing.js" "$TOOLS_DST/pdd_listing.js"
 cp -rL "$TOOLS_SRC/node"          "$TOOLS_DST/node"
 cp -rL "$TOOLS_SRC/node_modules"  "$TOOLS_DST/node_modules"
+# 补发运行时(0722新增):ReshipService 找 app/tools/reship/reship-cli.js,依赖同目录多个模块+共用 node_modules。
+# 整目录拷,别只拷单文件(reship-cli.js require 了 order-workbook/erp-browser-runner/wps-cloud-gateway 等)。
+[ -d "$TOOLS_SRC/reship" ] && cp -rL "$TOOLS_SRC/reship" "$TOOLS_DST/reship" && echo "拷贝 reship/（$(ls "$TOOLS_SRC/reship" | wc -l) 个文件）"
 echo "拷贝 browsers（只要 chromium+ffmpeg+winldd，砍冗余 headless_shell 省268M）…"
 mkdir -p "$TOOLS_DST/browsers"
 for d in "$TOOLS_SRC"/browsers/chromium-* "$TOOLS_SRC"/browsers/ffmpeg-* "$TOOLS_SRC"/browsers/winldd-* "$TOOLS_SRC"/browsers/.links; do

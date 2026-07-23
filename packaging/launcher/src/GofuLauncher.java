@@ -95,8 +95,23 @@ public class GofuLauncher {
         log("  关闭浏览器不会停止服务；彻底退出请右键系统托盘图标→彻底退出。");
         log("====================================");
 
-        // 主线程驻留，保持子进程存活；子进程异常退出则本进程也退出
-        for (Process p : children) p.waitFor();
+        // 主线程驻留：任一子进程退出即视为该停机(local 被前端看门狗关掉→连带停 cloud/node/chrome)。
+        // 原来顺序 waitFor(cloud) 会一直阻塞在 cloud 上，local 先退也感知不到 → 托盘不消失。
+        // 改为任一子进程退出即 stopAll + System.exit，托盘随进程结束消失。
+        waitAnyChildExit();
+        log("检测到服务进程退出，停止全部服务并退出…");
+        stopAll();
+        System.exit(0);
+    }
+
+    /** 阻塞直到任一子进程退出。 */
+    private static void waitAnyChildExit() {
+        while (true) {
+            for (Process p : children) {
+                if (!p.isAlive()) return;
+            }
+            sleep(500);
+        }
     }
 
     /**
@@ -119,10 +134,17 @@ public class GofuLauncher {
             g.drawString("G", 3, sz - 3);
             g.dispose();
 
+            // jpackage 内嵌精简 JRE 常缺中文字体，AWT 菜单默认字体渲染中文→豆腐块(□□□)。
+            // 显式指定 Windows 一定有的中文字体(微软雅黑,退而宋体),让菜单中文正常显示。
+            java.awt.Font cnFont = pickChineseFont();
+
             java.awt.PopupMenu menu = new java.awt.PopupMenu();
+            if (cnFont != null) menu.setFont(cnFont);
             java.awt.MenuItem openItem = new java.awt.MenuItem("打开工作台");
+            if (cnFont != null) openItem.setFont(cnFont);
             openItem.addActionListener(e -> openBrowser(WORKBENCH));
             java.awt.MenuItem exitItem = new java.awt.MenuItem("彻底退出（停止所有服务）");
+            if (cnFont != null) exitItem.setFont(cnFont);
             exitItem.addActionListener(e -> {
                 log("用户从托盘选择彻底退出，停止所有服务…");
                 stopAll();
@@ -140,6 +162,21 @@ public class GofuLauncher {
         } catch (Exception e) {
             log("系统托盘初始化失败(不影响服务): " + e.getMessage());
         }
+    }
+
+    /** 挑一个系统可用的中文字体给 AWT 托盘菜单用(避免精简 JRE 默认字体渲染中文成豆腐块)。都没有则返回 null。 */
+    private static java.awt.Font pickChineseFont() {
+        String[] prefer = {"Microsoft YaHei", "微软雅黑", "SimSun", "宋体", "SimHei", "Dialog"};
+        java.util.Set<String> avail = new java.util.HashSet<>(java.util.Arrays.asList(
+                java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().getAvailableFontFamilyNames()));
+        for (String name : prefer) {
+            if (avail.contains(name)) {
+                java.awt.Font f = new java.awt.Font(name, java.awt.Font.PLAIN, 12);
+                // 确认真能显示中文(能渲染"退"字即认为可用)。
+                if (f.canDisplay('退')) return f;
+            }
+        }
+        return null;
     }
 
     /** 用内嵌 JRE 起一个 fat jar，stdout/stderr 重定向到 data/logs/<tag>.log。 */

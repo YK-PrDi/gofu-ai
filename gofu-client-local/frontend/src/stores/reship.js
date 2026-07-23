@@ -46,6 +46,8 @@ export const useReshipStore = defineStore('reship', {
       }
     },
     // 先登录 WPS 云文档(与补发分开,首次登录慢不会撞补发超时)。轮询到就绪。
+    // 注意:这是【登录】动作,不是补发任务。完成后只报"登录态已录入",不能报"补发流程完成"、
+    // 也不能置 done=true(否则会亮出下载结果表区、误导用户以为补发跑完了)。
     async wpsLogin(docUrl) {
       this.running = true; this.logs = []; this.done = false; this.mode = 'wps'
       this.setMsg('打开 WPS 云文档,请在弹出浏览器里登录…', '')
@@ -53,7 +55,12 @@ export const useReshipStore = defineStore('reship', {
         const d = await api.post('/api/reship/wps-login', { docUrl })
         if (d.error) throw new Error(d.error)
         if (!d.taskId) throw new Error('未返回 taskId')
-        await this.poll(d.taskId)
+        await this.poll(d.taskId, 0, {
+          isLogin: true,
+          okMsg: '✓ WPS 登录态已录入,现在可点「开始补发」',
+          failMsg: '✗ WPS 登录未完成,请重试(在弹出浏览器里登完 kdocs.cn)',
+          runningMsg: '登录中… 请在弹出浏览器里登录 kdocs.cn',
+        })
       } catch (e) {
         this.setMsg('WPS 登录失败：' + e.message, 'err'); this.running = false
       }
@@ -80,18 +87,29 @@ export const useReshipStore = defineStore('reship', {
       a.download = ''
       a.click()
     },
-    async poll(taskId, tries = 0) {
-      if (tries > 1600) { this.setMsg('补发轮询超时', 'err'); this.running = false; return }
+    // opts:{isLogin,okMsg,failMsg,runningMsg} 供登录动作复用轮询但用登录文案、不亮补发完成/下载区。
+    // 不传 opts = 补发任务(原行为):完成报"补发流程完成"、置 done、本地模式自动下载。
+    async poll(taskId, tries = 0, opts = null) {
+      if (tries > 1600) { this.setMsg(opts?.isLogin ? '登录轮询超时' : '补发轮询超时', 'err'); this.running = false; return }
       try {
         const t = await api.get('/api/task/' + taskId)
         const results = t.results || []
-        this.logs = results
-        // 失败标红计数(code 含 NOT_FOUND / 或 type=error 且非中断)
-        this.redCount = results.filter((x) => x.type === 'error' || (x.code && /NOT_FOUND|EMPTY|FAILED/i.test(x.code))).length
-        this.setMsg(`补发中… ${t.status} ${t.progress}/${t.total}`, '')
-        if (t.status === 'running') { setTimeout(() => this.poll(taskId, tries + 1), 1500); return }
-        this.running = false; this.done = true
+        // 登录动作不灌补发进度日志/标红(那是补发专用),避免"处理进度 N 条"误导成正在补发。
+        if (!opts?.isLogin) {
+          this.logs = results
+          // 失败标红计数(code 含 NOT_FOUND / 或 type=error 且非中断)
+          this.redCount = results.filter((x) => x.type === 'error' || (x.code && /NOT_FOUND|EMPTY|FAILED/i.test(x.code))).length
+        }
+        this.setMsg(opts?.runningMsg || `补发中… ${t.status} ${t.progress}/${t.total}`, '')
+        if (t.status === 'running') { setTimeout(() => this.poll(taskId, tries + 1, opts), 1500); return }
+        this.running = false
         const ok = t.status === 'done'
+        // 登录动作:只报登录文案,不置 done(不亮"补发完成"下载区)、不自动下载。
+        if (opts?.isLogin) {
+          this.setMsg(ok ? opts.okMsg : opts.failMsg, ok ? 'ok' : 'err')
+          return
+        }
+        this.done = true
         this.setMsg(ok ? '✓ 补发流程完成' : '✗ 补发未完全成功,见下方日志', ok ? 'ok' : 'err')
         // 本地模式且设置开(默认)才自动下载结果表;WPS模式结果就地写回云表,无本地文件可下。
         if (this.mode === 'local' && ok && useSettingsStore().settings.reshipAutoDownload) {
