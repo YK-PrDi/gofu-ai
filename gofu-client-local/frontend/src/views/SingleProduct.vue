@@ -331,11 +331,29 @@ onMounted(() => {
 
           <template v-if="pageCtx">
             <div v-if="pageCtx.visual?.title" class="ptitle">{{ pageCtx.visual.title }}</div>
+            <!-- 主图 -->
             <div v-if="(pageCtx.visual?.mainImages || []).length" class="psec">
               <div class="psec-t">主图（{{ pageCtx.visual.mainImages.length }}）</div>
               <div class="pgrid">
                 <img v-for="(m, i) in pageCtx.visual.mainImages" :key="'m' + i"
                   :src="'/api/gen/img?ref=' + encodeURIComponent(m)" />
+              </div>
+            </div>
+            <!-- 详情图 -->
+            <div v-if="(pageCtx.visual?.detailImages || []).length" class="psec">
+              <div class="psec-t">详情图（{{ pageCtx.visual.detailImages.length }}）</div>
+              <div class="pgrid">
+                <img v-for="(d, i) in pageCtx.visual.detailImages" :key="'d' + i"
+                  :src="'/api/gen/img?ref=' + encodeURIComponent(d)" />
+              </div>
+            </div>
+            <!-- SKU图(当前方案各item的成品图) -->
+            <div v-if="currentItems.some((it) => it.imgDir)" class="psec">
+              <div class="psec-t">SKU 图（方案{{ selectedPlan + 1 }}）</div>
+              <div class="pgrid">
+                <template v-for="(it, i) in currentItems" :key="'s' + i">
+                  <img v-if="it.imgDir" :src="'/api/gen/img?ref=' + encodeURIComponent(it.imgDir)" :title="it.skuDisplayName || it.name" />
+                </template>
               </div>
             </div>
           </template>
