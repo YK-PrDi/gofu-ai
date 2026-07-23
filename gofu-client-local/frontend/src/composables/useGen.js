@@ -228,6 +228,31 @@ export function useGen() {
     finally { style.running = false }
   }
 
+  // ── 局部重绘(inpaint):框选/涂抹选区 + 指令 → /api/gen/inpaint(带mask),原地替换第 i 张 ──
+  // maskBlob/imageBlob 由 InpaintDialog 从 canvas 导出(mask透明区=重绘区,OpenAI edits语义)。
+  async function inpaintImage(kind, i, imageBlob, maskBlob, prompt, aspect = 'auto') {
+    const ctx = ctxStore.current
+    if (!ctx) return
+    gen.imgBusy = true
+    try {
+      const fd = new FormData()
+      fd.append('image', imageBlob, 'image.png')
+      fd.append('mask', maskBlob, 'mask.png')
+      fd.append('prompt', prompt || '')
+      fd.append('aspect', aspect || 'auto')
+      const d = await api.post('/api/gen/inpaint', fd)   // api.js 对 FormData 自动 multipart
+      if (d.error) throw new Error(d.error)
+      if (!d.imageRef) throw new Error('未返回 imageRef')
+      // 原地替换第 i 张(同 regenImage 模式)
+      const arr = kind === 'detail' ? ctx.visual?.detailImages : ctx.visual?.mainImages
+      if (arr && i < arr.length) arr[i] = d.imageRef
+      await ctxStore.save?.()
+      await ctxStore.load(ctxStore.contextId)
+      gen.msg = `第 ${i + 1} 张已局部重绘`
+    } catch (e) { gen.msg = '局部重绘失败：' + e.message; throw e }
+    finally { gen.imgBusy = false }
+  }
+
   // ── 单张重生(源 regenImage):走 regen-main,原地替换第 i 张 ──
   async function regenImage(kind, i) {
     const ctx = ctxStore.current
@@ -292,5 +317,5 @@ export function useGen() {
     await runStepAll(antipriceTemplates)
   }
 
-  return { gen, style, pollFlowTask, stopGen, runLayout, runSkuImages, runStepAll, runOneClick, runStyleTransfer, regenImage, fillCostAndPrice, genTitle, recalcPrice, resolveTemplateId }
+  return { gen, style, pollFlowTask, stopGen, runLayout, runSkuImages, runStepAll, runOneClick, runStyleTransfer, regenImage, inpaintImage, fillCostAndPrice, genTitle, recalcPrice, resolveTemplateId }
 }

@@ -9,6 +9,7 @@ import { useStoresStore } from '@/stores/stores-mgmt.js'
 import { useGen } from '@/composables/useGen.js'
 import CascadeCategory from '@/components/CascadeCategory.vue'
 import SkuPicker from '@/components/SkuPicker.vue'
+import InpaintDialog from '@/components/InpaintDialog.vue'
 
 // P2-e:单品上新工作台。整合品类/选品/白底图/生成/SKU定价/标题/上新全流程。
 const entry = useEntryStore()
@@ -21,6 +22,9 @@ const { gen, runLayout, runSkuImages, runOneClick, stopGen, recalcPrice, regenIm
 const imgUrl = (ref) => '/api/gen/img?ref=' + encodeURIComponent(ref)
 
 const pickerOpen = ref(false)
+// 局部重绘弹框
+const inpaint = ref({ open: false, imgRef: '', kind: 'main', index: 0 })
+function openInpaint(kind, i, ref) { inpaint.value = { open: true, imgRef: ref, kind, index: i } }
 const styleOptions = [
   { id: 'random', name: '随机' }, { id: 'original', name: '原图延展' }, { id: 'tech-blue', name: '科技蓝' },
   { id: 'girl-pink', name: '少女粉' }, { id: 'premium-gray', name: '高级灰' }, { id: 'natural-green', name: '自然绿' },
@@ -344,8 +348,10 @@ onMounted(() => {
                 <div v-for="(m, i) in mainImagesShown" :key="'m' + i" class="pcell">
                   <el-image :src="imgUrl(m)" :preview-src-list="mainImagesShown.map(imgUrl)" :initial-index="i"
                     fit="contain" preview-teleported hide-on-click-modal />
-                  <el-button class="regen-btn" size="small" type="primary" :loading="gen.imgBusy"
-                    @click="regenImage('main', i)">重生</el-button>
+                  <div class="img-btns">
+                    <el-button size="small" type="primary" :loading="gen.imgBusy" @click="regenImage('main', i)">重生</el-button>
+                    <el-button size="small" @click="openInpaint('main', i, m)">重绘</el-button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -356,8 +362,10 @@ onMounted(() => {
                 <div v-for="(d, i) in detailImagesShown" :key="'d' + i" class="pcell">
                   <el-image :src="imgUrl(d)" :preview-src-list="detailImagesShown.map(imgUrl)" :initial-index="i"
                     fit="contain" preview-teleported hide-on-click-modal />
-                  <el-button class="regen-btn" size="small" type="primary" :loading="gen.imgBusy"
-                    @click="regenImage('detail', i)">重生</el-button>
+                  <div class="img-btns">
+                    <el-button size="small" type="primary" :loading="gen.imgBusy" @click="regenImage('detail', i)">重生</el-button>
+                    <el-button size="small" @click="openInpaint('detail', i, d)">重绘</el-button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -378,6 +386,9 @@ onMounted(() => {
     </div>
 
     <SkuPicker v-model="pickerOpen" @picked="afterPick" />
+    <InpaintDialog v-model="inpaint.open" :img-ref="inpaint.imgRef" :kind="inpaint.kind"
+      :index="inpaint.index" :aspect="entry.genOpts.mainAspect"
+      @done="ctxStore.load(ctxStore.contextId)" />
   </div>
 </template>
 
@@ -415,10 +426,11 @@ onMounted(() => {
 .pgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .pgrid img { width: 100%; border: 1px solid #ebeef5; border-radius: 4px; }
 .pgrid :deep(.el-image) { width: 100%; border: 1px solid #ebeef5; border-radius: 4px; cursor: zoom-in; display: block; }
-/* 预览格:相对定位,重生按钮悬停浮现在右上角 */
+/* 预览格:相对定位,重生/重绘按钮悬停浮现在右上角 */
 .pcell { position: relative; }
-.regen-btn { position: absolute; top: 4px; right: 4px; opacity: 0; transition: opacity .15s; padding: 4px 8px; }
-.pcell:hover .regen-btn { opacity: 1; }
+.img-btns { position: absolute; top: 4px; right: 4px; display: flex; gap: 4px; opacity: 0; transition: opacity .15s; }
+.pcell:hover .img-btns { opacity: 1; }
+.img-btns :deep(.el-button) { padding: 4px 8px; margin: 0; }
 .pgrid-sm { grid-template-columns: repeat(4, 1fr); }
 .pgrid-sm img { aspect-ratio: 1; object-fit: contain; background: #fff; }
 </style>
