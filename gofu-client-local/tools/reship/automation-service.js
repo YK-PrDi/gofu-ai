@@ -118,11 +118,15 @@ export class AutomationService {
             summary: { ...summary },
           }));
         } catch (error) {
-          return {
+          // 单行处理抛异常 → 不再 abort 整个流程(原设计:任一行抛错就 return,导致"能补发的没补发、该行也没标红")。
+          // 改为:该行当失败处理(下方标红+继续下一行),把错误信息带出便于定位。真正的致命错(如浏览器崩)
+          // 会在下一行的 runner 调用继续抛,循环自然推进到底;整体不因单行异常静默停摆。
+          // 诊断:把该行异常 stack 打到 stderr(不含密码),便于定位是哪个 throw(明细/数量/确定按钮/弹窗时序等)。
+          console.error(`[补发诊断] 第 ${order.row} 行处理异常:`, error?.stack || error?.message || error);
+          result = {
             ok: false,
-            code: "AUTOMATION_ABORTED",
-            message: error.message,
-            summary,
+            code: "ORDER_PROCESS_ERROR",
+            message: `处理异常(已跳过继续): ${error.message}`,
           };
         }
       }

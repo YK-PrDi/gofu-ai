@@ -20,7 +20,9 @@ const results = computed(() => {
     const t = String(r.title || '').toLowerCase(), o = String(r.outerId || '').toLowerCase()
     return t.includes(k) || o.includes(k)
   })
-  return base.slice(0, 200)
+  // 有白底图预览的编码排前面(省得往下翻找),稳定排序(仅按有无图分组、组内原序)
+  const sorted = base.slice().sort((a, b) => (rowImg(b) ? 1 : 0) - (rowImg(a) ? 1 : 0))
+  return sorted.slice(0, 200)
 })
 
 async function loadAll() {

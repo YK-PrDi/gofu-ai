@@ -55,46 +55,29 @@ function isResultRefreshError(error) {
     .test(String(error?.message ?? error));
 }
 
-export async function findStrictMatchingRow(rows, expected, {
-  pause = delay,
-  attempts = 3,
-  textTimeout = 5_000,
-} = {}) {
-  let lastRefreshError = null;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const count = await rows.count();
-    let interrupted = false;
-    for (let index = count - 1; index >= 0; index -= 1) {
-      const row = rows.nth(index);
-      let trigger = null;
-      let expanded = false;
-      let matched = false;
-      try {
-        trigger = row.locator(".J_Trigger_Show_Orders").first();
-        if (await trigger.count()) {
-          await trigger.click();
-          expanded = true;
-        }
-        await pause(250);
-        const candidates = await readPlatformOrderCandidates(row, textTimeout);
-        matched = candidates.includes(normalizeOrderNo(expected));
-        if (matched) return row;
-      } catch (error) {
-        if (!isResultRefreshError(error)) throw error;
-        lastRefreshError = error;
-        interrupted = true;
-        break;
-      } finally {
-        if (expanded && !matched) await trigger?.click().catch(() => {});
-      }
-    }
-    if (!interrupted) lastRefreshError = null;
-    if (attempt < attempts) await pause(600);
+// 可补发的订单状态(ERP 只允许这几种状态补发;其余点补发会弹"请选择…的订单进行补发")。
+const RESHIPPABLE_STATUSES = ["交易成功", "卖家已发货", "交易关闭"];
+
+/**
+ * 挑可补发行(提速版):按一个平台单号搜出的多行【全是同一订单的拆分显示】(用户确认),故无需逐行展开核对单号,
+ * 也不靠位置(不一定最后一行),唯一判据=【订单状态】。遍历所有行读状态单元格(.trade-tradeStatus,可见即读,
+ * 不展开),挑状态属于可补发(交易成功/卖家已发货/交易关闭)的行,取最后一个。
+ * 都无可补发状态→返回 null(processOrder 判 ORDER_NOT_FOUND 标红跳过);另有 ERP 弹窗兜底双保险。
+ */
+export async function pickReshipableRow(rows, { textTimeout = 5_000 } = {}) {
+  const count = await rows.count();
+  if (count === 0) return null;
+  let picked = null;
+  for (let index = 0; index < count; index += 1) {
+    const row = rows.nth(index);
+    try {
+      const statusCell = row.locator(".trade-tradeStatus").first();
+      if (!(await statusCell.count())) continue;
+      const statusText = (await statusCell.innerText({ timeout: textTimeout })).replace(/\s+/g, "");
+      if (RESHIPPABLE_STATUSES.some((s) => statusText.includes(s))) picked = row;   // 取最后一个可补发行
+    } catch (_) { /* 读该行状态失败,跳过 */ }
   }
-  if (lastRefreshError) {
-    throw new Error("订单查询结果列表持续刷新，请重新执行当前订单", { cause: lastRefreshError });
-  }
-  return null;
+  return picked;
 }
 
 async function firstVisible(locator) {
@@ -267,6 +250,11 @@ export async function fillOrderAndClickSearch(page, orderNo) {
     if (!response.ok()) throw new Error(`ERP 订单查询请求失败：HTTP ${response.status()}`);
     const payload = await response.json().catch(() => null);
     const expectedRowCount = Array.isArray(payload?.data?.list) ? payload.data.list.length : 0;
+    // 诊断:定位"脚本搜0条但手动能搜到"的脏单号问题。JSON.stringify 显性化转义字符,codes 是每字符十六进制码。
+    // 若 len 比肉眼多、或 codes 里出现 200b/feff 等 → Excel单元格带零宽字符,order-workbook 读时只trim没剥掉。
+    const codes = [...orderNo].map((c) => c.charCodeAt(0).toString(16)).join(" ");
+    console.error(`[补发诊断·订单搜索] 单号=${JSON.stringify(orderNo)} len=${orderNo.length} → data.list 条数=${expectedRowCount}`);
+    if (expectedRowCount === 0) console.error(`[补发诊断·订单搜索] 搜到0条,单号字符码: ${codes}`);
     await inputContext.frame
       .locator("#tradeNew_manage .el-loading-mask")
       .first()
@@ -307,18 +295,48 @@ export async function fillOrderAndClickSearch(page, orderNo) {
   throw new Error("无法触发订单查询(回车无响应,且未找到查询按钮)");
 }
 
+/**
+ * 等结果行渲染齐。原来死等 `行数===expectedRowCount`(API总条数),但页面懒渲染/虚拟滚动下 DOM 行数
+ * 常不等于 API 总数(如 API 说17、当前只渲染16)→ 永远不相等抛错。改为:滚动结果表到底触发全部渲染,
+ * 等【行数稳定】(连续两次 count 相同且>0)即返回,不强求等于 expectedRowCount(该值仅作日志参考)。
+ */
 export async function waitForOrderResultRows(frame, expectedRowCount, {
   attempts = 75,
   pause = () => delay(400),
 } = {}) {
   const rows = frame.locator(".module-trade-list-item.module-list-item-inpage.js-checkbox-row");
-  let actualRowCount = -1;
+  // 滚动结果表容器到底,触发懒加载行全部渲染(每页可容纳很多行,目标行可能未渲染)
+  const scrollToBottom = async () => {
+    await frame.evaluate(() => {
+      const sels = [".module-trade-list", ".el-table__body-wrapper", ".trade-list-body", ".module-list-inpage"];
+      for (const s of sels) {
+        for (const el of document.querySelectorAll(s)) {
+          if (el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight;
+        }
+      }
+      window.scrollTo(0, document.body.scrollHeight);
+    }).catch(() => {});
+  };
+  let prev = -1, stable = 0;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    actualRowCount = await rows.count();
-    if (actualRowCount === expectedRowCount) return rows;
+    await scrollToBottom();
+    const count = await rows.count();
+    if (count > 0 && count === prev) {
+      stable += 1;
+      if (stable >= 2) {   // 连续两次一致 = 渲染稳定
+        if (count !== expectedRowCount) {
+          console.error(`[补发诊断·结果行] API 报 ${expectedRowCount} 条,页面渲染 ${count} 行(以页面为准)`);
+        }
+        return rows;
+      }
+    } else {
+      stable = 0;
+    }
+    prev = count;
     if (attempt < attempts - 1) await pause();
   }
-  throw new Error(`订单查询返回 ${expectedRowCount} 条，但页面显示 ${actualRowCount} 条`);
+  if (prev > 0) return rows;   // 到底了没完全稳定也放行(有行即可,匹配靠状态)
+  throw new Error(`订单查询无结果行(API 报 ${expectedRowCount} 条)`);
 }
 
 async function waitUntil(check, timeout, message) {
@@ -353,6 +371,20 @@ export async function openResendMenu(page, matchingRow) {
 }
 
 const DUPLICATE_RESEND_MESSAGE = "已经补发过了，确定要补发吗？";
+// 优化1弹窗兜底:选了不可补发状态的行点补发时,ERP 弹此提示。检测到即判该单不可补发(标红跳过)。
+const NOT_RESHIPPABLE_MESSAGE = "请选择卖家已发货或交易成功或交易关闭的订单进行补发";
+
+// 检测"不可补发状态"提示弹窗(仿 findDuplicateResendDialog)。返回 {frame,dialog} 或 null。
+async function findNotReshippableDialog(page) {
+  for (const frame of page.frames()) {
+    const dialogs = frame
+      .locator(".el-message-box, .el-dialog, .el-message")
+      .filter({ hasText: NOT_RESHIPPABLE_MESSAGE });
+    const dialog = await firstVisible(dialogs);
+    if (dialog) return { frame, dialog };
+  }
+  return null;
+}
 
 async function findDuplicateResendDialog(page) {
   for (const frame of page.frames()) {
@@ -527,13 +559,13 @@ export class ErpBrowserRunner {
     const rows = await waitForOrderResultRows(queryContext.frame, queryContext.expectedRowCount);
     const resultContext = { frame: queryContext.frame, rows };
 
-    report(progress, "match", "正在从下往上严格匹配平台单号");
-    const matchingRow = await findStrictMatchingRow(resultContext.rows, order.orderNo);
+    report(progress, "match", "正在按订单状态挑选可补发行(交易成功/已发货/交易关闭)");
+    const matchingRow = await pickReshipableRow(resultContext.rows);
     if (!matchingRow) {
-      return { ok: false, code: "ORDER_NOT_FOUND", message: "没有找到完全匹配的订单" };
+      return { ok: false, code: "ORDER_NOT_RESHIPPABLE", message: "结果行中无可补发状态(交易成功/已发货/交易关闭)的订单" };
     }
 
-    report(progress, "resend", "已严格匹配订单，正在右键该行商品明细");
+    report(progress, "resend", "已挑中可补发行，正在右键该行商品明细");
     const createResend = await openResendMenu(this.page, matchingRow);
     report(progress, "resend", "匹配行右键菜单已出现，正在点击批量创建补发单");
     await createResend.locator.click();
@@ -541,20 +573,56 @@ export class ErpBrowserRunner {
       throw new Error("批量创建补发单菜单点击后没有关闭");
     });
 
+    // 优化1弹窗兜底:若挑中的行状态不可补发,ERP 弹"请选择…的订单进行补发"。检测到即标红跳过(不抛错、不中止)。
+    const notReshippable = await findNotReshippableDialog(this.page);
+    if (notReshippable) {
+      await notReshippable.dialog.getByText("确定", { exact: true }).first().click().catch(() => {});
+      await this.page.keyboard.press("Escape").catch(() => {});
+      return { ok: false, code: "ORDER_NOT_RESHIPPABLE", message: "订单状态不可补发(非交易成功/已发货/交易关闭)，已跳过" };
+    }
+
     const next = await waitForAddProductDialog(this.page);
 
     report(progress, "product", "正在查询并选择补发商品");
     const merchantCode = await firstVisible(next.dialog.getByPlaceholder("主商家编码"));
     if (!merchantCode) throw new Error("添加商品弹窗中没有主商家编码输入框");
-    await merchantCode.fill(order.merchantCode);
     const productSearch = await firstVisible(next.dialog.getByText("查询", { exact: true }));
     if (!productSearch) throw new Error("添加商品弹窗中没有查询按钮");
-    await productSearch.click();
+    // 用给定编码填搜索框+点查询,拿到首个结果行(短等待);无结果返回 null(不抛错)。带诊断:打出搜到几行。
+    const searchProduct = async (code) => {
+      await merchantCode.fill("");
+      await merchantCode.fill(code);
+      await productSearch.click();
+      let row = null;
+      try {
+        row = await waitUntil(async () => {
+          const rows = next.dialog.locator(".el-table__body-wrapper tbody tr");
+          return (await rows.count()) ? rows.first() : null;
+        }, 12_000, "无结果");
+      } catch (_) { row = null; }
+      const cnt = await next.dialog.locator(".el-table__body-wrapper tbody tr").count().catch(() => -1);
+      console.error(`[补发诊断·商品搜索] 编码「${code}」→ 结果行数=${cnt}`);
+      return row;
+    };
 
-    const firstRow = await waitUntil(async () => {
-      const rows = next.dialog.locator(".el-table__body-wrapper tbody tr");
-      return (await rows.count()) ? rows.first() : null;
-    }, 30_000, "主商家编码没有查询到商品");
+    // 优化2a(先精确·再降级):快麦编码里 *N 有两义——可能是编码固有部分(如"001白单手喷+001滤芯*5"整体是一个编码),
+    // 也可能是数量后缀(如"红球*2")。故【先用整串精确搜】——命中即用它(数量1),这是最常见且正确的情形;
+    // 只有整串搜不到、且形如"<编码>*<纯数字>"时,才拆 * 降级(用 * 前编码搜、数量填 * 后数字)。
+    const raw = (order.merchantCode || "").trim();
+    const starMatch = /^(.*?)\s*\*\s*(\d+)\s*$/.exec(raw);
+    let firstRow = await searchProduct(raw);
+    let qty = "1";
+    if (!firstRow && starMatch) {
+      report(progress, "product", `完整编码「${raw}」未命中,拆 * 降级搜「${starMatch[1].trim()}」数量 ${starMatch[2]}`);
+      console.error(`[补发诊断·2a降级] 整串未命中,降级搜 * 前编码「${starMatch[1].trim()}」`);
+      firstRow = await searchProduct(starMatch[1].trim());
+      qty = starMatch[2];
+    }
+    // 优化2b:两种搜法都无结果→不抛错(原来抛错→整体中止)。返回 ok:false 让上层标红该行、继续下一行。
+    if (!firstRow) {
+      await this.page.keyboard.press("Escape").catch(() => {});
+      return { ok: false, code: "MERCHANT_CODE_NOT_FOUND", message: `快麦无此编码「${raw}」，已跳过` };
+    }
     const checkbox = await firstVisible(firstRow.locator(".el-checkbox"));
     if (!checkbox) throw new Error("商品第一行没有选择框");
     await checkbox.click();
@@ -565,7 +633,7 @@ export class ErpBrowserRunner {
       quantity = await firstVisible(firstRow.locator("input:not(.el-checkbox__original)"));
     }
     if (!quantity) throw new Error("商品第一行没有数量输入框");
-    await quantity.fill("1");
+    await quantity.fill(qty);   // 优化2a:填解析出的数量(默认1)
 
     const footer = next.dialog.locator(".el-dialog__footer");
     const confirm = await firstVisible(footer.getByText("确定", { exact: true }));
