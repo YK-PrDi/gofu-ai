@@ -113,6 +113,9 @@ const selectedPlan = computed({
   set: (i) => { if (pageCtx.value?.structure) pageCtx.value.structure.selectedPlanIndex = i },
 })
 const currentItems = computed(() => plans.value[selectedPlan.value]?.items || [])
+// 8d流式:后端生成中 mainImages/detailImages 含 null 占位槽,渲染前过滤掉(否则碎图)
+const mainImagesShown = computed(() => (pageCtx.value?.visual?.mainImages || []).filter(Boolean))
+const detailImagesShown = computed(() => (pageCtx.value?.visual?.detailImages || []).filter(Boolean))
 
 function onPriceEdit(it, idx) {
   it.__edited = true
@@ -331,19 +334,19 @@ onMounted(() => {
 
           <template v-if="pageCtx">
             <div v-if="pageCtx.visual?.title" class="ptitle">{{ pageCtx.visual.title }}</div>
-            <!-- 主图 -->
-            <div v-if="(pageCtx.visual?.mainImages || []).length" class="psec">
-              <div class="psec-t">主图（{{ pageCtx.visual.mainImages.length }}）</div>
+            <!-- 主图(过滤流式生成中的null占位槽) -->
+            <div v-if="mainImagesShown.length" class="psec">
+              <div class="psec-t">主图（{{ mainImagesShown.length }}）</div>
               <div class="pgrid">
-                <img v-for="(m, i) in pageCtx.visual.mainImages" :key="'m' + i"
+                <img v-for="(m, i) in mainImagesShown" :key="'m' + i"
                   :src="'/api/gen/img?ref=' + encodeURIComponent(m)" />
               </div>
             </div>
             <!-- 详情图 -->
-            <div v-if="(pageCtx.visual?.detailImages || []).length" class="psec">
-              <div class="psec-t">详情图（{{ pageCtx.visual.detailImages.length }}）</div>
+            <div v-if="detailImagesShown.length" class="psec">
+              <div class="psec-t">详情图（{{ detailImagesShown.length }}）</div>
               <div class="pgrid">
-                <img v-for="(d, i) in pageCtx.visual.detailImages" :key="'d' + i"
+                <img v-for="(d, i) in detailImagesShown" :key="'d' + i"
                   :src="'/api/gen/img?ref=' + encodeURIComponent(d)" />
               </div>
             </div>

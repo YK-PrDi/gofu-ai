@@ -236,6 +236,13 @@ public class FlowController {
         // M14 并发：首图串行定基调（2~N 参考它），第 2~N 张并发生成（限流 GEN_CONC）。
         // 结果按 index 收集保序（主图顺序=详情配对顺序，不能靠 add 顺序）。
         String[] keys = new String[mainTotal];
+        // 8d 流式：预填 mainTotal 个 null 占位,每张完成即按 index 写槽位+save,前端轮询逐张可见(不再等全部齐)。
+        //   保序靠固定槽位;前端渲染跳过 null/空。末尾统一 compact 掉未出的 null。
+        synchronized (ctx) {
+            List<String> mi = ctx.getVisual().getMainImages();
+            mi.clear();
+            for (int i = 0; i < mainTotal; i++) mi.add(null);
+        }
 
         // Phase 1：首图串行（i=0）——出来后作 firstRef 供 2~N 参考
         String firstRef = null;
@@ -247,6 +254,7 @@ public class FlowController {
             if (genWithRetry(prompt, List.of(white), white, out, aspect, 2)) {
                 keys[0] = uploadIfCos(out);
                 firstRef = localizeWhite(keys[0]);
+                streamMainSlot(ctx, 0, keys[0]);   // 首图立刻写槽位+save,第1张即可见
             } else {
                 // P0-A：单张失败要可见（原来静默），前端能看到"某张没出"
                 task.addResult(Map.of("message", "主图 #1 生成失败"));
@@ -275,6 +283,7 @@ public class FlowController {
                         if (fFirstRef != null) refs.add(fFirstRef);
                         if (genWithRetry(prompt, refs, white, out, aspect, 2)) {
                             keys[idx] = uploadIfCos(out);
+                            streamMainSlot(ctx, idx, keys[idx]);   // 8d:完成即写槽位+save,前端逐张可见
                         } else {
                             task.addResult(Map.of("message", "主图 #" + (idx + 1) + " 生成失败"));
                             log.warn("主图 #{} 生成失败(重试用尽)", idx + 1);
@@ -290,10 +299,12 @@ public class FlowController {
         }
         java.util.concurrent.CompletableFuture.allOf(futures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
 
-        // 按 index 顺序回填（跳过失败的 null），保证主图顺序稳定
+        // 8d:各张已流式写入槽位。这里 compact 掉未出的 null 占位(失败/取消的),保序不变。
         int okCount = 0;
         synchronized (ctx) {
-            for (String k : keys) if (k != null) { ctx.getVisual().getMainImages().add(k); okCount++; }
+            List<String> mi = ctx.getVisual().getMainImages();
+            mi.removeIf(java.util.Objects::isNull);
+            okCount = mi.size();
         }
         contextService.save(ctx);
         // 诊断：存主图后打印 contextId + 主图数，便于测试后从日志直接定位该 context 是否存住图。
@@ -304,6 +315,24 @@ public class FlowController {
             throw new RuntimeException("主图全部生成失败（共 " + mainTotal + " 张，成功 0 张）——请查生图服务返回");
         }
         log.info("主图生成完成：{}/{} 张成功", okCount, mainTotal);
+    }
+
+    /**
+     * 8d 流式:把第 idx 张主图 key 写进预分配的槽位并 save,让前端轮询逐张拿到(不必等全部生成完)。
+     * mainImages 已在 genAllMains 开头预填 mainTotal 个 null;这里按 index 定位覆盖,保序。
+     */
+    private void streamMainSlot(ProductContext ctx, int idx, String key) {
+        if (key == null) return;
+        try {
+            synchronized (ctx) {
+                List<String> mi = ctx.getVisual().getMainImages();
+                if (idx >= 0 && idx < mi.size()) mi.set(idx, key);
+                else mi.add(key);
+                contextService.save(ctx);
+            }
+        } catch (Exception e) {
+            log.warn("[8d流式] 写主图槽位 {} 失败(不阻断): {}", idx, e.getMessage());
+        }
     }
 
     /** 自动生成"生图要求"（M11：零人工——按品类/卖点/主件名拼一句喂给视觉分析）。 */

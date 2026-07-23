@@ -184,7 +184,9 @@ const selPlan = computed({
   set: (i) => { if (ctxStore.current?.structure) ctxStore.current.structure.selectedPlanIndex = i },
 })
 const curItems = computed(() => plans.value[selPlan.value]?.items || [])
-const detailImages = computed(() => ctxStore.current?.visual?.detailImages || [])
+// 8d流式:过滤生成中的null占位槽
+const mainImages = computed(() => (ctxStore.current?.visual?.mainImages || []).filter(Boolean))
+const detailImages = computed(() => (ctxStore.current?.visual?.detailImages || []).filter(Boolean))
 function skuImg(it) { return it.imgDir ? imgUrl(it.imgDir) : '' }
 
 // 上新(dryRun=false 正式)。源 submitListing。二次确认由全局设置 confirmBeforeListing 统一管。
@@ -296,9 +298,9 @@ onMounted(() => { settings.init(); storesStore.loadStores() })
             </div>
 
             <!-- 主图 -->
-            <div v-if="(ctxStore.current.visual?.mainImages || []).length" class="psec">
-              <div class="psec-t">主图（{{ ctxStore.current.visual.mainImages.length }}）</div>
-              <div class="pgrid"><img v-for="(m, i) in ctxStore.current.visual.mainImages" :key="i" :src="imgUrl(m)" /></div>
+            <div v-if="mainImages.length" class="psec">
+              <div class="psec-t">主图（{{ mainImages.length }}）</div>
+              <div class="pgrid"><img v-for="(m, i) in mainImages" :key="i" :src="imgUrl(m)" /></div>
             </div>
             <!-- 详情图 -->
             <div v-if="detailImages.length" class="psec">
