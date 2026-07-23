@@ -257,6 +257,101 @@ public class PromptTemplateService {
         }
     }
 
+    /**
+     * 主图卖点库选择（0a 防同质化·卖点侧）：按品类从 main-sellpoints.json 取 N 个【跨分组不重复】卖点词，
+     * 每张主图分配一个不同维度的卖点做画面文案主标题（安装/承重/收纳/材质…各取，防每张卖点雷同）。
+     *  · 保留分组层级：先按组打散，各组轮流取一个，取满 N 个（组数<N 时组内再取，仍跨组优先）。
+     *  · 架类子品类专属段（锅盖架/刀架/挂钩…）：skuHint/leaf 命中子品类时，把该子品类专属卖点并入候选池优先。
+     *  · 冒泡匹配 key（末段==leaf 或整名相等），与 pickMainCompositions 同款品类解析。
+     *  命中不到返回空列表（调用方回退：让 GPT 现编或按 sellingPoints）。
+     * @return N 个卖点短词（长度尽量=count；空=未命中）。
+     */
+    @SuppressWarnings("unchecked")
+    public List<String> pickSellPoints(String category, String skuHint, int count) {
+        if (category == null || category.isBlank() || count <= 0) return List.of();
+        try {
+            Map<String, Object> node = sellPointNode(category);
+            if (node == null) return List.of();
+            // 候选池：各分组的词，按组分桶（保留分组层级，抽时跨组轮询）
+            List<List<String>> buckets = new java.util.ArrayList<>();
+            Object groups = node.get("groups");
+            if (groups instanceof Map) {
+                for (Object v : ((Map<String, Object>) groups).values())
+                    if (v instanceof List && !((List<?>) v).isEmpty())
+                        buckets.add(new java.util.ArrayList<>((List<String>) v));
+            }
+            // 架类子品类专属段：skuHint 命中某子品类名 → 该段作为额外一个高优先桶（插到最前，先被取）
+            Object sub = node.get("sub");
+            if (sub instanceof Map && skuHint != null && !skuHint.isBlank()) {
+                for (Map.Entry<String, Object> e : ((Map<String, Object>) sub).entrySet()) {
+                    if (skuHint.contains(e.getKey()) && e.getValue() instanceof List && !((List<?>) e.getValue()).isEmpty())
+                        buckets.add(0, new java.util.ArrayList<>((List<String>) e.getValue()));
+                }
+            }
+            if (buckets.isEmpty()) return List.of();
+            for (List<String> b : buckets) java.util.Collections.shuffle(b);
+            java.util.Collections.shuffle(buckets);
+            // 跨组轮询取词：一轮各组取一个，直到取满 count 或池空
+            List<String> out = new java.util.ArrayList<>();
+            java.util.Set<String> seen = new java.util.HashSet<>();
+            int[] ptr = new int[buckets.size()];
+            boolean progressed = true;
+            while (out.size() < count && progressed) {
+                progressed = false;
+                for (int i = 0; i < buckets.size() && out.size() < count; i++) {
+                    List<String> b = buckets.get(i);
+                    if (ptr[i] < b.size()) {
+                        String w = b.get(ptr[i]++);
+                        progressed = true;
+                        if (seen.add(w)) out.add(w);
+                    }
+                }
+            }
+            return out;
+        } catch (Exception e) {
+            log.warn("主图卖点库选择失败(category={}): {}", category, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * 首图高转化主标题（0a 卖点侧）：从品类 hiConv 整句池随机取一句（运营精选的主图主标题，如"强劲增压畅快洗"）。
+     * 命中不到返回空串（调用方回退 pickSellPoints 首个或 GPT 现编）。
+     */
+    @SuppressWarnings("unchecked")
+    public String pickHiConvHeadline(String category) {
+        if (category == null || category.isBlank()) return "";
+        try {
+            Map<String, Object> node = sellPointNode(category);
+            if (node == null) return "";
+            Object hi = node.get("hiConv");
+            if (hi instanceof List && !((List<?>) hi).isEmpty()) {
+                List<String> pool = (List<String>) hi;
+                return pool.get((int) (Math.random() * pool.size()));
+            }
+        } catch (Exception e) { log.warn("首图高转化句选择失败(category={}): {}", category, e.getMessage()); }
+        return "";
+    }
+
+    /** 卖点库品类节点解析（冒泡匹配叶子类目 key），供 pickSellPoints/pickHiConvHeadline 共用。 */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> sellPointNode(String category) throws Exception {
+        Map<String, Object> root = om.readValue(PromptLoader.load("prompt/main-sellpoints.json"), Map.class);
+        Map<String, Object> byCat = (Map<String, Object>) root.getOrDefault("byCategory", Map.of());
+        String leaf = category.replace('＞', '>').replace('›', '>');
+        leaf = leaf.contains(">") ? leaf.substring(leaf.lastIndexOf('>') + 1).trim() : leaf.trim();
+        // 1) 叶子精确命中
+        for (Map.Entry<String, Object> e : byCat.entrySet())
+            if (e.getKey().equals(leaf) && e.getValue() instanceof Map) return (Map<String, Object>) e.getValue();
+        // 2) 架类兜底：叶子含"架/挂钩"等 → 归入"架类"库（覆盖锅盖架/刀架/置物架等所有末级架类）
+        boolean shelfLike = leaf.contains("架") || leaf.contains("挂钩") || leaf.contains("挂件");
+        if (shelfLike && byCat.get("架类") instanceof Map) return (Map<String, Object>) byCat.get("架类");
+        // 3) 花洒兜底
+        if ((leaf.contains("花洒") || leaf.contains("喷头") || leaf.contains("淋浴")) && byCat.get("花洒喷头") instanceof Map)
+            return (Map<String, Object>) byCat.get("花洒喷头");
+        return null;
+    }
+
     /** 架类参考图落地：classpath assets/shelf-ref/<leaf>/<group>/<ref> → 用户目录。找不到返回 null。 */
     public File shelfRefFile(String leaf, String group, String ref) {
         if (ref == null || ref.isBlank()) return null;
