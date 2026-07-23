@@ -335,6 +335,27 @@ public class FlowController {
         }
     }
 
+    /** 8d 流式:详情图逐张写槽位+save(同 streamMainSlot,detailImages 已预填 null 占位)。 */
+    private void streamDetailSlot(ProductContext ctx, int idx, String key) {
+        if (key == null) return;
+        try {
+            synchronized (ctx) {
+                List<String> di = ctx.getVisual().getDetailImages();
+                if (idx >= 0 && idx < di.size()) di.set(idx, key);
+                else di.add(key);
+                contextService.save(ctx);
+            }
+        } catch (Exception e) {
+            log.warn("[8d流式] 写详情槽位 {} 失败(不阻断): {}", idx, e.getMessage());
+        }
+    }
+
+    /** 8d 流式:SKU 图 item 自身已隔离(setImgDir),完成即 save 让前端逐个显示。 */
+    private void streamSkuSave(ProductContext ctx) {
+        try { synchronized (ctx) { contextService.save(ctx); } }
+        catch (Exception e) { log.warn("[8d流式] SKU save 失败(不阻断): {}", e.getMessage()); }
+    }
+
     /** 自动生成"生图要求"（M11：零人工——按品类/卖点/主件名拼一句喂给视觉分析）。 */
     /** 0a：该商品方案里是否带滤芯配件(花洒喷头才据此纳入滤芯构图)。看方案 items 的名称/型号/配件码含"滤芯"。 */
     private boolean detectFilterInPlans(ProductContext ctx) {
@@ -627,12 +648,15 @@ public class FlowController {
 
         // 详情图：配对生成——每张主图转一张 9:16 竖版，第 i 张详情以第 i 张主图为参考（内容一一对应）
         if (genDetail) {
-            // B1：重新生成前清空旧详情图，覆盖而非追加。
-            ctx.getVisual().getDetailImages().clear();
-            // M14 并发：每张详情只依赖对应主图、彼此独立→全并发（限流 GEN_CONC）。
-            // 结果按 index 收集保序（详情[i] 必须配对主图[i]），并发结束后统一回填+存一次。
             int dTotal = mainImgs.size();
             String[] dKeys = new String[dTotal];
+            // B1覆盖+8d流式：清空旧详情后预填 dTotal 个 null 占位,每张完成即按 index 写槽位+save,前端逐张可见。
+            synchronized (ctx) {
+                List<String> di = ctx.getVisual().getDetailImages();
+                di.clear();
+                for (int i = 0; i < dTotal; i++) di.add(null);
+            }
+            // M14 并发：每张详情只依赖对应主图、彼此独立→全并发（限流 GEN_CONC）。保序靠固定槽位。
             List<java.util.concurrent.CompletableFuture<Void>> dFutures = new ArrayList<>();
             for (int i = 0; i < dTotal; i++) {
                 final int idx = i;
@@ -651,6 +675,7 @@ public class FlowController {
                                     + "产品主体、颜色、角度与该主图保持一致，纵向铺陈场景与卖点信息，适合详情页竖版展示。";
                             if (baseForDetail != null && genWithRetry(dp, refs, baseForDetail, out, "9:16", 2)) {
                                 dKeys[idx] = uploadIfCos(out);
+                                streamDetailSlot(ctx, idx, dKeys[idx]);   // 8d:完成即写槽位+save,前端逐张可见
                             }
                         } finally { GEN_CONC.release(); }
                     } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
@@ -659,10 +684,14 @@ public class FlowController {
                 }, imageGen.getExecutor()));
             }
             java.util.concurrent.CompletableFuture.allOf(dFutures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
-            int dOk = 0;
-            for (String k : dKeys) if (k != null) { ctx.getVisual().getDetailImages().add(k); dOk++; }
+            // 8d:各张已流式写槽位。compact 掉未出的 null 占位,保序不变。
+            int dOk;
+            synchronized (ctx) {
+                ctx.getVisual().getDetailImages().removeIf(java.util.Objects::isNull);
+                dOk = ctx.getVisual().getDetailImages().size();
+            }
             contextService.save(ctx);
-            log.info("[诊断] step2 存详情图完成 contextId={} 详情生成={}/{} 累计详情={}", ctx.getId(), dOk, dTotal, ctx.getVisual().getDetailImages().size());
+            log.info("[诊断] step2 存详情图完成 contextId={} 详情={}/{}", ctx.getId(), dOk, dTotal);
         }
 
         // SKU 图：乐羽成熟 generateSkuImage，对【选定方案】生。
@@ -738,6 +767,7 @@ public class FlowController {
                             if (path != null) {
                                 // COS 上传走 uploadIfCos：失败(如账户欠费451)时回退本地路径，图不丢弃(07.08修)。
                                 it.setImgDir(uploadIfCos(path));
+                                streamSkuSave(ctx);   // 8d:该SKU完成即save,前端逐个显示(item已隔离)
                             }
                         } finally { GEN_CONC.release(); }
                     } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
