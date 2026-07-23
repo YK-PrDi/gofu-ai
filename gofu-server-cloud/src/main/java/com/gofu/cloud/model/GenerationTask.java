@@ -29,6 +29,8 @@ public class GenerationTask {
     public int getProgress() { return progress.get(); }
     public void incrementProgress() { this.progress.incrementAndGet(); }
     public int getTotal() { return total; }
+    /** 8c 交叉并行:SKU 数要等布局完成才知道,进度总数运行中追加(单线程 layout 回调调,volatile 够用)。 */
+    public void addTotal(int delta) { this.total += delta; }
     public boolean isCancelled() { return cancelled; }
     public void cancel() { this.cancelled = true; }
     public String getCurrentProduct() { return currentProduct; }

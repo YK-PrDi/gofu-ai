@@ -177,7 +177,118 @@ public class FlowController {
         log.info("主图组装: aspect={}, subjectLock={}字, negative={}字, style={}", aspect,
                 subjectLock.length(), negative.length(), styleReq == null ? "" : styleReq);
 
-        // M11：视觉分析白底图 → 产品专属多段 prompt。请求词优先用前端传入(customRequest)，否则自动生成。
+        // M11：视觉分析白底图 → 产品专属多段 prompt。8c：抽成 analyzeMainSegPrompts 供 step1/step-all 共用(行为不变)。
+        MainAnalysis ma = analyzeMainSegPrompts(ctx, white, mainTotal, customRequest);
+        List<String> segPrompts = ma.segPrompts();
+        boolean fromLib = ma.fromLib();
+        String seriesPlan = ma.seriesPlan();
+        final String fSeriesPlan = seriesPlan;
+        final boolean fFromLib = fromLib;   // 供 2~N 并发 lambda 用
+        final List<String> fLibSell = ma.libSellPoints();   // 0a卖点侧:每张分配的库卖点(空=走原逻辑)
+        final String fHiConv = ma.hiConvHeadline();          // 首图高转化整句
+
+        // B1：重新生成前清空旧主图，实现"覆盖而非追加"（重复点/一键重生都靠这里）。
+        synchronized (ctx) { ctx.getVisual().getMainImages().clear(); }
+        contextService.save(ctx);
+
+        // M14 并发：首图串行定基调（2~N 参考它），第 2~N 张并发生成（限流 GEN_CONC）。
+        // 结果按 index 收集保序（主图顺序=详情配对顺序，不能靠 add 顺序）。
+        String[] keys = new String[mainTotal];
+        // 8d 流式：预填 mainTotal 个 null 占位,每张完成即按 index 写槽位+save,前端轮询逐张可见(不再等全部齐)。
+        //   保序靠固定槽位;前端渲染跳过 null/空。末尾统一 compact 掉未出的 null。
+        synchronized (ctx) {
+            List<String> mi = ctx.getVisual().getMainImages();
+            mi.clear();
+            for (int i = 0; i < mainTotal; i++) mi.add(null);
+        }
+
+        // Phase 1：首图串行（i=0）——出来后作 firstRef 供 2~N 参考
+        String firstRef = null;
+        {
+            task.setCurrentProduct("主图 1/" + mainTotal);
+            String out = new File(tmpOut, "main-0.jpg").getAbsolutePath();
+            String base = !segPrompts.isEmpty() ? segPrompts.get(0) : buildMainPrompt(ctx, 1, fSeriesPlan);
+            String prompt = buildSeriesPrompt(base, 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true, structLock, isShower, fromLib, sellPointFor(0, fLibSell, fHiConv));
+            if (genWithRetry(prompt, List.of(white), white, out, aspect, 2)) {
+                keys[0] = uploadIfCos(out);
+                firstRef = localizeWhite(keys[0]);
+                streamMainSlot(ctx, 0, keys[0]);   // 首图立刻写槽位+save,第1张即可见
+            } else {
+                // P0-A：单张失败要可见（原来静默），前端能看到"某张没出"
+                task.addResult(Map.of("message", "主图 #1 生成失败"));
+                log.warn("主图 #1(首图) 生成失败");
+            }
+            task.incrementProgress();
+        }
+
+        // Phase 2：第 2~N 张并发（refs=白底图+首图，双锚定）；首图失败则降级仅用白底图
+        final String fFirstRef = firstRef;
+        List<java.util.concurrent.CompletableFuture<Void>> futures = new ArrayList<>();
+        for (int i = 1; i < mainTotal; i++) {
+            final int idx = i;
+            futures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try {
+                    if (task.isCancelled()) return; // #15 已停止：跳过剩余主图（finally 仍 incrementProgress）
+                    GEN_CONC.acquire();
+                    try {
+                        if (task.isCancelled()) return;
+                        task.setCurrentProduct("主图 " + (idx + 1) + "/" + mainTotal);
+                        String out = new File(tmpOut, "main-" + idx + ".jpg").getAbsolutePath();
+                        String base = idx < segPrompts.size() ? segPrompts.get(idx) : buildMainPrompt(ctx, idx + 1, fSeriesPlan);
+                        String prompt = buildSeriesPrompt(base, idx + 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true, structLock, isShower, fFromLib, sellPointFor(idx, fLibSell, fHiConv));
+                        List<String> refs = new ArrayList<>();
+                        refs.add(white);
+                        if (fFirstRef != null) refs.add(fFirstRef);
+                        if (genWithRetry(prompt, refs, white, out, aspect, 2)) {
+                            keys[idx] = uploadIfCos(out);
+                            streamMainSlot(ctx, idx, keys[idx]);   // 8d:完成即写槽位+save,前端逐张可见
+                        } else {
+                            task.addResult(Map.of("message", "主图 #" + (idx + 1) + " 生成失败"));
+                            log.warn("主图 #{} 生成失败(重试用尽)", idx + 1);
+                        }
+                    } finally { GEN_CONC.release(); }
+                } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                catch (Exception e) {
+                    task.addResult(Map.of("message", "主图 #" + (idx + 1) + " 异常: " + e.getMessage()));
+                    log.warn("主图 #{} 并发生成失败(跳过): {}", idx + 1, e.getMessage());
+                }
+                finally { task.incrementProgress(); }
+            }, imageGen.getExecutor()));
+        }
+        java.util.concurrent.CompletableFuture.allOf(futures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
+
+        // 8d:各张已流式写入槽位。这里 compact 掉未出的 null 占位(失败/取消的),保序不变。
+        int okCount = 0;
+        synchronized (ctx) {
+            List<String> mi = ctx.getVisual().getMainImages();
+            mi.removeIf(java.util.Objects::isNull);
+            okCount = mi.size();
+        }
+        contextService.save(ctx);
+        // 诊断：存主图后打印 contextId + 主图数，便于测试后从日志直接定位该 context 是否存住图。
+        log.info("[诊断] step1 存主图完成 contextId={} 主图数={}", ctx.getId(), ctx.getVisual().getMainImages().size());
+        // P0-A：有白底图却一张主图都没出 = 真失败，必须抛出让 step1 置 task=error，
+        // 而不是静默标 done 让前端误以为成功（"图没生成还假装完成"的黑洞根因）。
+        if (okCount == 0) {
+            throw new RuntimeException("主图全部生成失败（共 " + mainTotal + " 张，成功 0 张）——请查生图服务返回");
+        }
+        log.info("主图生成完成：{}/{} 张成功", okCount, mainTotal);
+    }
+
+    /**
+     * 8c：主图分析结果(库/GPT 现编产出的多段 prompt + 是否命中库 + 全局总分析)，供 step1/step-all 共用。
+     * 0a卖点侧：库命中时附带卖点库产物——libSellPoints(每张一个跨组不同卖点,防同质化) + hiConvHeadline(首图高转化整句)。
+     * 库未命中(GPT现编)时 libSellPoints 为空,卖点仍由 GPT 现编/seriesPlan 分配(原逻辑)。
+     */
+    private record MainAnalysis(List<String> segPrompts, boolean fromLib, String seriesPlan,
+                                List<String> libSellPoints, String hiConvHeadline) {}
+
+    /**
+     * 8c：主图多段 prompt 分析(从 genAllMains 原样抽出,行为不变)。
+     * 先查【主图构图库】(0a 防同质化,库为主),未命中才走 GPT 看白底图现编分析。
+     * @param white 已本地化的首张白底图路径  @param mainTotal 主图张数  @param customRequest 手输生图要求(可空)
+     */
+    private MainAnalysis analyzeMainSegPrompts(ProductContext ctx, String white, int mainTotal, String customRequest) {
         List<String> segPrompts = new ArrayList<>();
         boolean fromLib = false;   // 主图构图库是否命中(命中则 buildSeriesPrompt 弱化连贯性+跳角度约束)
         String seriesPlan = "";   // 07.10#1 保留【总分析/系列文案规划】作全局共享上下文(原来被丢弃)
@@ -226,95 +337,22 @@ public class FlowController {
         } catch (Exception e) {
             log.warn("M11 自定义分析失败，降级静态模板: {}", e.getMessage());
         }
-        final String fSeriesPlan = seriesPlan;
-        final boolean fFromLib = fromLib;   // 供 2~N 并发 lambda 用
-
-        // B1：重新生成前清空旧主图，实现"覆盖而非追加"（重复点/一键重生都靠这里）。
-        synchronized (ctx) { ctx.getVisual().getMainImages().clear(); }
-        contextService.save(ctx);
-
-        // M14 并发：首图串行定基调（2~N 参考它），第 2~N 张并发生成（限流 GEN_CONC）。
-        // 结果按 index 收集保序（主图顺序=详情配对顺序，不能靠 add 顺序）。
-        String[] keys = new String[mainTotal];
-        // 8d 流式：预填 mainTotal 个 null 占位,每张完成即按 index 写槽位+save,前端轮询逐张可见(不再等全部齐)。
-        //   保序靠固定槽位;前端渲染跳过 null/空。末尾统一 compact 掉未出的 null。
-        synchronized (ctx) {
-            List<String> mi = ctx.getVisual().getMainImages();
-            mi.clear();
-            for (int i = 0; i < mainTotal; i++) mi.add(null);
+        // 0a 卖点侧防同质化：库命中构图时，同步从【卖点库】按品类抽 N 个跨分组不重复卖点(每张一个不同维度)，
+        //   首图另抽一句高转化整句(运营精选主标题)。卖点定内容、构图库定版式——注入 buildSeriesPrompt 的【画面文案】。
+        //   库未命中(GPT现编)时不抽，卖点仍由 GPT 现编/seriesPlan 分配(原逻辑不变)。
+        List<String> libSellPoints = List.of();
+        String hiConvHeadline = "";
+        if (fromLib) {
+            try {
+                String skuHint = (ctx.getMainItem() == null ? "" : ctx.getMainItem());
+                libSellPoints = templateService.pickSellPoints(ctx.getCategory(), skuHint, mainTotal);
+                hiConvHeadline = templateService.pickHiConvHeadline(ctx.getCategory());
+                if (!libSellPoints.isEmpty())
+                    log.info("0a 卖点库命中 {} 个跨组卖点(品类={}) 首图高转化句=[{}] → 注入画面文案,防卖点同质化",
+                            libSellPoints.size(), ctx.getCategory(), hiConvHeadline);
+            } catch (Exception e) { log.warn("0a 卖点库抽取失败(回退GPT现编卖点): {}", e.getMessage()); }
         }
-
-        // Phase 1：首图串行（i=0）——出来后作 firstRef 供 2~N 参考
-        String firstRef = null;
-        {
-            task.setCurrentProduct("主图 1/" + mainTotal);
-            String out = new File(tmpOut, "main-0.jpg").getAbsolutePath();
-            String base = !segPrompts.isEmpty() ? segPrompts.get(0) : buildMainPrompt(ctx, 1, fSeriesPlan);
-            String prompt = buildSeriesPrompt(base, 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true, structLock, isShower, fromLib);
-            if (genWithRetry(prompt, List.of(white), white, out, aspect, 2)) {
-                keys[0] = uploadIfCos(out);
-                firstRef = localizeWhite(keys[0]);
-                streamMainSlot(ctx, 0, keys[0]);   // 首图立刻写槽位+save,第1张即可见
-            } else {
-                // P0-A：单张失败要可见（原来静默），前端能看到"某张没出"
-                task.addResult(Map.of("message", "主图 #1 生成失败"));
-                log.warn("主图 #1(首图) 生成失败");
-            }
-            task.incrementProgress();
-        }
-
-        // Phase 2：第 2~N 张并发（refs=白底图+首图，双锚定）；首图失败则降级仅用白底图
-        final String fFirstRef = firstRef;
-        List<java.util.concurrent.CompletableFuture<Void>> futures = new ArrayList<>();
-        for (int i = 1; i < mainTotal; i++) {
-            final int idx = i;
-            futures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
-                try {
-                    if (task.isCancelled()) return; // #15 已停止：跳过剩余主图（finally 仍 incrementProgress）
-                    GEN_CONC.acquire();
-                    try {
-                        if (task.isCancelled()) return;
-                        task.setCurrentProduct("主图 " + (idx + 1) + "/" + mainTotal);
-                        String out = new File(tmpOut, "main-" + idx + ".jpg").getAbsolutePath();
-                        String base = idx < segPrompts.size() ? segPrompts.get(idx) : buildMainPrompt(ctx, idx + 1, fSeriesPlan);
-                        String prompt = buildSeriesPrompt(base, idx + 1, mainTotal, fSeriesPlan, subjectLock, negative, fStyleReq, true, structLock, isShower, fFromLib);
-                        List<String> refs = new ArrayList<>();
-                        refs.add(white);
-                        if (fFirstRef != null) refs.add(fFirstRef);
-                        if (genWithRetry(prompt, refs, white, out, aspect, 2)) {
-                            keys[idx] = uploadIfCos(out);
-                            streamMainSlot(ctx, idx, keys[idx]);   // 8d:完成即写槽位+save,前端逐张可见
-                        } else {
-                            task.addResult(Map.of("message", "主图 #" + (idx + 1) + " 生成失败"));
-                            log.warn("主图 #{} 生成失败(重试用尽)", idx + 1);
-                        }
-                    } finally { GEN_CONC.release(); }
-                } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                catch (Exception e) {
-                    task.addResult(Map.of("message", "主图 #" + (idx + 1) + " 异常: " + e.getMessage()));
-                    log.warn("主图 #{} 并发生成失败(跳过): {}", idx + 1, e.getMessage());
-                }
-                finally { task.incrementProgress(); }
-            }, imageGen.getExecutor()));
-        }
-        java.util.concurrent.CompletableFuture.allOf(futures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
-
-        // 8d:各张已流式写入槽位。这里 compact 掉未出的 null 占位(失败/取消的),保序不变。
-        int okCount = 0;
-        synchronized (ctx) {
-            List<String> mi = ctx.getVisual().getMainImages();
-            mi.removeIf(java.util.Objects::isNull);
-            okCount = mi.size();
-        }
-        contextService.save(ctx);
-        // 诊断：存主图后打印 contextId + 主图数，便于测试后从日志直接定位该 context 是否存住图。
-        log.info("[诊断] step1 存主图完成 contextId={} 主图数={}", ctx.getId(), ctx.getVisual().getMainImages().size());
-        // P0-A：有白底图却一张主图都没出 = 真失败，必须抛出让 step1 置 task=error，
-        // 而不是静默标 done 让前端误以为成功（"图没生成还假装完成"的黑洞根因）。
-        if (okCount == 0) {
-            throw new RuntimeException("主图全部生成失败（共 " + mainTotal + " 张，成功 0 张）——请查生图服务返回");
-        }
-        log.info("主图生成完成：{}/{} 张成功", okCount, mainTotal);
+        return new MainAnalysis(segPrompts, fromLib, seriesPlan, libSellPoints, hiConvHeadline);
     }
 
     /**
@@ -631,6 +669,320 @@ public class FlowController {
         }
         java.util.concurrent.CompletableFuture.allOf(fs.toArray(new java.util.concurrent.CompletableFuture[0])).join();
         return out;
+    }
+
+    /**
+     * 8c 交叉并行融合端点。专供"一键/不需人工选方案"路径(固定方案0)——主图/SKU/详情【交叉并行】,
+     * 不必"全主图→全SKU→全详情"。手选方案仍走 step1+step2(SKU 依赖 planIndex,无法与主图交叉)。
+     *
+     * <p>时序:①布局(layout)与主图分析并起 → ②首图串行定基调 → ③首图一出即触发详情图0 →
+     * ④主图2~N并发,每张完成 thenRun 链对应详情图 → ⑤SKU 等 layout就绪+首图refMain,即开生,与剩余主图/详情交叉。
+     * <p>全程非阻塞 CompletableFuture 组合,仅最外层 join 一次(规避 executor 任务内部互等死锁)。
+     * <p>入参 = step1 ∪ step2:{whiteImages,category,mainItem,skus,mainCount,mainAspect,customRequest,styleId,planCount,
+     * accWhiteImages,templateId,genDetail,genSku}。立即返回 {taskId,total,contextId},前端轮询 /task/{id}。
+     */
+    @PostMapping("/step-all")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<Map<String, Object>> stepAll(@RequestBody Map<String, Object> body) {
+        try {
+            ProductContext ctx = resolveContext(body);
+            List<String> rawWhites = (List<String>) body.getOrDefault("whiteImages", List.of());
+            List<String> localWhites = new ArrayList<>();
+            for (String w : rawWhites) {
+                if (w == null || w.isBlank()) continue;
+                if (w.startsWith("data:")) {
+                    String local = localizeWhite(w);
+                    if (local != null) localWhites.add(local);
+                    else log.warn("[step-all] 白底图 data URL 本地化失败，已丢弃");
+                } else localWhites.add(w);
+            }
+            ctx.getVisual().getWhiteImages().clear();
+            ctx.getVisual().getWhiteImages().addAll(localWhites);
+            contextService.save(ctx);
+
+            int mainTotal = body.get("mainCount") instanceof Number n ? Math.max(1, n.intValue()) : 6;
+            String mainAspect = normalizeAspect(body.get("mainAspect"));
+            String customRequest = body.get("customRequest") instanceof String s ? s.trim() : "";
+            String styleReq = resolveStylePrompt(body.get("styleId"));
+            if (!styleReq.isBlank()) customRequest = (customRequest + "\n" + styleReq).trim();
+            boolean genDetail = !Boolean.FALSE.equals(body.get("genDetail"));
+            boolean genSku = !Boolean.FALSE.equals(body.get("genSku"));
+            String templateId = body.get("templateId") instanceof String s && !s.isBlank() ? s : "sticker-leftcard";
+            List<String> accWhiteRefs = body.get("accWhiteImages") instanceof List<?> l ? (List<String>) l : List.of();
+            Map<String, Object> planReq = new LinkedHashMap<>(body);
+
+            // 进度总数初始 = 主图 + 详情(预估=主图数);SKU 数等布局完成后 addTotal 追加。
+            int initTotal = mainTotal + (genDetail ? mainTotal : 0);
+            String taskId = "flowAll-" + System.nanoTime();
+            GenerationTask task = new GenerationTask(taskId, initTotal);
+            task.setStatus("running");
+            flowTasks.put(taskId, task);
+
+            final int fMainTotal = mainTotal;
+            final String fMainAspect = mainAspect, fCustomReq = customRequest, fStyleReq = styleReq, fTemplateId = templateId;
+            final boolean fGenDetail = genDetail, fGenSku = genSku;
+            final List<String> fAccRefs = accWhiteRefs, fWhites = localWhites;
+            imageGen.getExecutor().submit(() ->
+                    runStepAll(ctx, task, planReq, fWhites, fMainTotal, fMainAspect, fCustomReq, fStyleReq,
+                            fGenDetail, fGenSku, fTemplateId, fAccRefs));
+
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("taskId", taskId);
+            resp.put("total", initTotal);
+            resp.put("contextId", ctx.getId());
+            resp.put("whiteImageCount", ctx.getVisual().getWhiteImages().size());
+            return ResponseEntity.ok(resp);
+        } catch (Exception e) {
+            log.error("step-all 编排失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body(Map.of("error", "step-all 失败：" + e.getMessage()));
+        }
+    }
+
+    /**
+     * 8c 交叉并行主编排(在 executor 单线程内运行,是唯一 join 的线程)。
+     * 见 stepAll javadoc 的时序说明。全程非阻塞组合,拿 GEN_CONC 令牌的任务都已在 executor 线程内运行、
+     * 跑完即释放令牌+线程,无"等新线程"循环依赖 → 不死锁(executor=20 > GEN_CONC=8 有余量)。
+     */
+    private void runStepAll(ProductContext ctx, GenerationTask task, Map<String, Object> planReq,
+                            List<String> whiteImages, int mainTotal, String mainAspect,
+                            String customRequest, String styleReq,
+                            boolean genDetail, boolean genSku, String templateId, List<String> accWhiteRefs) {
+        var executor = imageGen.getExecutor();
+        try {
+            // ── A. 布局(千问出方案,SKU 依赖它;详情不依赖)──
+            var layoutF = java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try {
+                    var planResult = lyTextService.generateSkuPlans(planReq);
+                    var plans = lyTextService.flattenPlans(planResult);
+                    synchronized (ctx) {
+                        ctx.getStructure().setPlans(plans);
+                        ctx.getStructure().setSelectedPlanIndex(0);   // 8c:一键固定方案0
+                    }
+                } catch (Exception e) { log.warn("[step-all] SKU 布局生成失败(不阻断SKU外的图): {}", e.getMessage()); }
+            }, executor);
+
+            if (whiteImages == null || whiteImages.isEmpty()) {
+                log.info("[step-all] 无白底图,跳过主图/详情/SKU,仅等布局");
+                layoutF.join();
+                ctx.setStage(FlowStage.LAYOUT_DONE); contextService.save(ctx); task.setStatus("done");
+                return;
+            }
+            String white = localizeWhite(whiteImages.get(0));
+            if (white == null) {
+                log.info("[step-all] 白底图无法本地化,跳过主图");
+                layoutF.join();
+                ctx.setStage(FlowStage.LAYOUT_DONE); contextService.save(ctx); task.setStatus("done");
+                return;
+            }
+            File tmpOut = new File(appProperties.getPaths().getTempOutputDir(), "flowAll-" + System.nanoTime());
+            tmpOut.mkdirs();
+
+            // ── B. 主图分析(库/GPT 现编,复用 step1 同款 helper,阻塞可接受:是管线起点)──
+            String subjectLock = lyImageGen.ecSubjectLock(ctx.getCategory());
+            String negative = lyImageGen.ecNegative(ctx.getCategory());
+            String aspect = resolveAutoAspect(mainAspect, white);
+            boolean structLock = isStructuralRigidCategory(ctx.getCategory());
+            boolean isShower = isShowerCategory(ctx.getCategory());
+            MainAnalysis ma = analyzeMainSegPrompts(ctx, white, mainTotal, customRequest);
+            List<String> segPrompts = ma.segPrompts();
+            final boolean fFromLib = ma.fromLib();
+            final String fSeriesPlan = ma.seriesPlan();
+            final List<String> fLibSell = ma.libSellPoints();   // 0a卖点侧
+            final String fHiConv = ma.hiConvHeadline();
+
+            // 预填主图/详情 null 槽位(8d 流式,保序)
+            synchronized (ctx) {
+                List<String> mi = ctx.getVisual().getMainImages(); mi.clear();
+                for (int i = 0; i < mainTotal; i++) mi.add(null);
+                if (genDetail) {
+                    List<String> di = ctx.getVisual().getDetailImages(); di.clear();
+                    for (int i = 0; i < mainTotal; i++) di.add(null);
+                }
+            }
+            contextService.save(ctx);
+            String[] mainKeys = new String[mainTotal];
+
+            // ── C. 首图串行(i=0)→ firstRef 定基调 ──
+            String firstRef = null;
+            task.setCurrentProduct("主图 1/" + mainTotal);
+            {
+                String out = new File(tmpOut, "main-0.jpg").getAbsolutePath();
+                String base = !segPrompts.isEmpty() ? segPrompts.get(0) : buildMainPrompt(ctx, 1, fSeriesPlan);
+                String prompt = buildSeriesPrompt(base, 1, mainTotal, fSeriesPlan, subjectLock, negative, styleReq, true, structLock, isShower, fFromLib, sellPointFor(0, fLibSell, fHiConv));
+                if (genWithRetry(prompt, List.of(white), white, out, aspect, 2)) {
+                    mainKeys[0] = uploadIfCos(out);
+                    firstRef = localizeWhite(mainKeys[0]);
+                    streamMainSlot(ctx, 0, mainKeys[0]);
+                } else { task.addResult(Map.of("message", "主图 #1 生成失败")); log.warn("[step-all] 主图 #1(首图) 失败"); }
+                task.incrementProgress();
+            }
+            final String fFirstRef = firstRef;
+            final String fWhite = white, fAspect = aspect, fStyleReq2 = styleReq;
+            final String fSubjectLock = subjectLock, fNegative = negative;
+            final boolean fStructLock = structLock, fIsShower = isShower;
+            final File fTmpOut = tmpOut;
+
+            // ── D+E. 详情图0(配对首图) + 主图2~N并发,每张完成 thenRun 链对应详情图 ──
+            List<java.util.concurrent.CompletableFuture<Void>> crossFs = new ArrayList<>();
+            if (genDetail && fFirstRef != null)
+                crossFs.add(java.util.concurrent.CompletableFuture.runAsync(
+                        () -> genOneDetail(ctx, task, 0, fFirstRef, fWhite, fTmpOut), executor));
+            for (int i = 1; i < mainTotal; i++) {
+                final int idx = i;
+                var mainF = java.util.concurrent.CompletableFuture.runAsync(() -> {
+                    try {
+                        if (task.isCancelled()) return;
+                        GEN_CONC.acquire();
+                        try {
+                            if (task.isCancelled()) return;
+                            task.setCurrentProduct("主图 " + (idx + 1) + "/" + mainTotal);
+                            String out = new File(fTmpOut, "main-" + idx + ".jpg").getAbsolutePath();
+                            String base = idx < segPrompts.size() ? segPrompts.get(idx) : buildMainPrompt(ctx, idx + 1, fSeriesPlan);
+                            String prompt = buildSeriesPrompt(base, idx + 1, mainTotal, fSeriesPlan, fSubjectLock, fNegative, fStyleReq2, true, fStructLock, fIsShower, fFromLib, sellPointFor(idx, fLibSell, fHiConv));
+                            List<String> refs = new ArrayList<>();
+                            refs.add(fWhite);
+                            if (fFirstRef != null) refs.add(fFirstRef);
+                            if (genWithRetry(prompt, refs, fWhite, out, fAspect, 2)) {
+                                mainKeys[idx] = uploadIfCos(out);
+                                streamMainSlot(ctx, idx, mainKeys[idx]);
+                            } else { task.addResult(Map.of("message", "主图 #" + (idx + 1) + " 生成失败")); log.warn("[step-all] 主图 #{} 失败", idx + 1); }
+                        } finally { GEN_CONC.release(); }
+                    } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                    catch (Exception e) { task.addResult(Map.of("message", "主图 #" + (idx + 1) + " 异常: " + e.getMessage())); log.warn("[step-all] 主图 #{} 异常: {}", idx + 1, e.getMessage()); }
+                    finally { task.incrementProgress(); }
+                }, executor);
+                // 8c 交叉:该主图完成即链对应详情图(出一张主图生一张详情,不等全主图)
+                if (genDetail) {
+                    crossFs.add(mainF.thenRunAsync(() -> {
+                        String mainLocal = mainKeys[idx] != null ? localizeWhite(mainKeys[idx]) : null;
+                        if (mainLocal != null) genOneDetail(ctx, task, idx, mainLocal, fWhite, fTmpOut);
+                        else task.incrementProgress();   // 主图没出→对应详情跳过,但进度要补(初始 total 已含它)
+                    }, executor));
+                } else {
+                    crossFs.add(mainF);
+                }
+            }
+
+            // ── F. SKU:等 layout 就绪(拿方案0 items)+ 首图 refMain,即开生,与剩余主图/详情交叉 ──
+            final String fRefMain = fFirstRef;
+            var skuF = layoutF.thenComposeAsync((v) -> {
+                if (!genSku || ctx.getStructure().getPlans().isEmpty()) return java.util.concurrent.CompletableFuture.completedFuture(null);
+                return runSkuCross(ctx, task, 0, templateId, accWhiteRefs, fRefMain, fWhite, whiteImages);
+            }, executor);
+
+            // ── G. 唯一 join:等全部交叉任务 + SKU ──
+            List<java.util.concurrent.CompletableFuture<?>> all = new ArrayList<>(crossFs);
+            all.add(skuF);
+            java.util.concurrent.CompletableFuture.allOf(all.toArray(new java.util.concurrent.CompletableFuture[0])).join();
+
+            // compact 掉主图/详情未出的 null 占位(失败/取消),保序不变
+            synchronized (ctx) {
+                ctx.getVisual().getMainImages().removeIf(java.util.Objects::isNull);
+                ctx.getVisual().getDetailImages().removeIf(java.util.Objects::isNull);
+            }
+            ctx.setStage(FlowStage.SKU_DONE);
+            contextService.save(ctx);
+            task.setStatus("done");
+            log.info("[step-all 完成] contextId={} 主图={} 详情={} 方案={}",
+                    ctx.getId(), ctx.getVisual().getMainImages().size(), ctx.getVisual().getDetailImages().size(),
+                    ctx.getStructure().getPlans().isEmpty() ? 0 : ctx.getStructure().getPlans().get(0).getItems().size());
+        } catch (Exception e) {
+            log.error("[step-all] 异步编排失败: {}", e.getMessage(), e);
+            task.addResult(Map.of("message", "step-all 失败：" + e.getMessage()));
+            task.setStatus("error");
+        }
+    }
+
+    /**
+     * 8c：单张详情图(每张主图转一张 9:16 竖版,以对应主图为参考)。与 runStep2 详情段逻辑等价,
+     * 抽出供 step-all 交叉调用(runStep2 保持内联不动,隔离手选方案路径风险)。
+     * @param mainLocal 已本地化的对应主图路径(作 ref+base)  @param white 兜底白底
+     */
+    private void genOneDetail(ProductContext ctx, GenerationTask task, int idx, String mainLocal, String white, File tmpOut) {
+        try {
+            if (task.isCancelled()) return;
+            GEN_CONC.acquire();
+            try {
+                if (task.isCancelled()) return;
+                task.setCurrentProduct("详情图 " + (idx + 1));
+                List<String> refs = mainLocal != null ? List.of(mainLocal) : List.of();
+                String baseForDetail = mainLocal != null ? mainLocal : white;
+                String out = new File(tmpOut, "detail-" + idx + ".jpg").getAbsolutePath();
+                String dp = "将所给的第 " + (idx + 1) + " 张主图重新排版为 9:16 竖版电商详情图，"
+                        + "产品主体、颜色、角度与该主图保持一致，纵向铺陈场景与卖点信息，适合详情页竖版展示。";
+                if (baseForDetail != null && genWithRetry(dp, refs, baseForDetail, out, "9:16", 2))
+                    streamDetailSlot(ctx, idx, uploadIfCos(out));
+            } finally { GEN_CONC.release(); }
+        } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+        catch (Exception e) { log.warn("[step-all] 详情图 #{} 失败(跳过): {}", idx, e.getMessage()); }
+        finally { task.incrementProgress(); }
+    }
+
+    /**
+     * 8c：SKU 图交叉生成(对方案 planIndex 的每个 SKU 并发生图)。返回组合 CF 供上层非阻塞等待。
+     * 与 runStep2 的 SKU 段逻辑等价(白底名次配对/背景一次分析/写各 item 隔离),抽出供 step-all 交叉调用。
+     */
+    private java.util.concurrent.CompletableFuture<Void> runSkuCross(
+            ProductContext ctx, GenerationTask task, int planIndex, String templateId,
+            List<String> accWhiteRefs, String refMain, String white, List<String> whiteImages) {
+        var executor = imageGen.getExecutor();
+        var plansList = ctx.getStructure().getPlans();
+        int pIdx = Math.min(Math.max(0, planIndex), plansList.size() - 1);
+        var plan = plansList.get(pIdx);
+        var items = plan.getItems();
+        task.addTotal(items.size());   // SKU 数此刻才知,追加进度总数
+        String productType = deriveProductTypeForGen(ctx.getCategory(), ctx.getMainItem());
+        String batch = String.valueOf(System.nanoTime());
+
+        List<String> accImagePaths = new ArrayList<>();
+        for (String r : accWhiteRefs) { String lp = localizeWhite(r); if (lp != null) accImagePaths.add(lp); }
+        String bgStyle = "";
+        if (refMain != null && !refMain.isBlank()) {
+            try { bgStyle = lyImageGen.analyzeBackgroundStyleOnce(refMain); }
+            catch (Exception e) { log.warn("[step-all] 背景分析失败(降级空): {}", e.getMessage()); }
+        }
+        if (bgStyle == null) bgStyle = "";
+
+        final String fBgStyle = bgStyle, fProductType = productType, fBatch = batch, fRefMain = refMain == null ? "" : refMain;
+        final List<String> fAccImagePaths = accImagePaths;
+        Map<Integer, String> rankWhiteByItem = rankPairWhites(items, whiteImages);
+        List<java.util.concurrent.CompletableFuture<Void>> sFutures = new ArrayList<>();
+        for (int i = 0; i < items.size(); i++) {
+            final int idx = i;
+            final var it = items.get(i);
+            String name = it.getSkuDisplayName() != null ? it.getSkuDisplayName() : it.getName();
+            String matched = matchWhiteForItem(whiteImages, it.getItemCode(), it.getSpec1());
+            if (matched == null) matched = rankWhiteByItem.get(i);
+            String skuWhite = (it.getWhiteImgDir() != null && !it.getWhiteImgDir().isBlank())
+                    ? localizeWhite(it.getWhiteImgDir()) : localizeWhite(matched);
+            if (skuWhite == null) skuWhite = white;
+            if (skuWhite == null) { log.info("[step-all] SKU「{}」无可用白底图,跳过", name); task.incrementProgress(); continue; }
+            final String fName = name, fSkuWhite = skuWhite;
+            List<Map<String, Object>> accParts = new ArrayList<>();
+            if (it.getAccParts() != null)
+                for (var ap : it.getAccParts()) {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("code", ap.getCode()); m.put("qty", ap.getQty());
+                    accParts.add(m);
+                }
+            final List<Map<String, Object>> fAccParts = accParts;
+            sFutures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try {
+                    if (task.isCancelled()) return;
+                    GEN_CONC.acquire();
+                    try {
+                        if (task.isCancelled()) return;
+                        task.setCurrentProduct("SKU：" + fName);
+                        String path = lyImageGen.generateSkuImage(fRefMain, fName, it.getSpec2(), fProductType,
+                                fBatch, idx + 1, "", fSkuWhite, fAccImagePaths, "", fBgStyle, it.getItemCode(), fAccParts, templateId, it.getMainQty());
+                        if (path != null) { it.setImgDir(uploadIfCos(path)); streamSkuSave(ctx); }
+                    } finally { GEN_CONC.release(); }
+                } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                catch (Exception e) { log.warn("[step-all] SKU「{}」生图失败(跳过): {}", fName, e.getMessage()); }
+                finally { task.incrementProgress(); }
+            }, executor));
+        }
+        return java.util.concurrent.CompletableFuture.allOf(sFutures.toArray(new java.util.concurrent.CompletableFuture[0]));
     }
 
     private void runStep2(ProductContext ctx, GenerationTask task,
@@ -1196,9 +1548,31 @@ public class FlowController {
      * @param negative 品类禁止项  @param styleReq 改图风格文案  @param withText 是否渲染画面文案
      * @param structLock M19：刚性细杆/框架类品类——强制正面系角度 + 白底图强锁结构（防旋转臆造变形）
      */
+    /**
+     * 0a卖点侧：取第 idx 张(0-based)主图分配的库卖点。首图(idx=0)优先用高转化整句(运营精选主标题)，
+     * 无高转化句则退回卖点池首个；其余张取 libSellPoints[idx]。库未命中(列表空)返回空串→buildSeriesPrompt 不注入。
+     */
+    private String sellPointFor(int idx, List<String> libSellPoints, String hiConvHeadline) {
+        if (libSellPoints == null || libSellPoints.isEmpty()) return "";
+        if (idx == 0 && hiConvHeadline != null && !hiConvHeadline.isBlank()) return hiConvHeadline;
+        return idx < libSellPoints.size() ? libSellPoints.get(idx) : "";
+    }
+
+    /** 旧签名重载(单图重生等不注入库卖点的调用走这里，libSellPoint=空)。 */
     private String buildSeriesPrompt(String basePrompt, int currentIndex, int totalCount, String seriesPlan,
                                      String subjectLock, String negative, String styleReq, boolean withText,
                                      boolean structLock, boolean isShower, boolean fromLib) {
+        return buildSeriesPrompt(basePrompt, currentIndex, totalCount, seriesPlan, subjectLock, negative,
+                styleReq, withText, structLock, isShower, fromLib, "");
+    }
+
+    /**
+     * @param libSellPoint 0a卖点侧：本张分配的库卖点(库命中时非空)。非空→作为【画面文案】主标题内容注入，
+     *   替代 GPT 现编/泛词，实现卖点防同质化(每张不同维度)。构图库定版式，此卖点定文字内容。空→不注入(原逻辑)。
+     */
+    private String buildSeriesPrompt(String basePrompt, int currentIndex, int totalCount, String seriesPlan,
+                                     String subjectLock, String negative, String styleReq, boolean withText,
+                                     boolean structLock, boolean isShower, boolean fromLib, String libSellPoint) {
         String base = basePrompt == null ? "" : basePrompt.trim();
         StringBuilder sb = new StringBuilder();
         // R5：品类主体一致性约束前置（最高优先级锚点，锁产品结构/材质/logo/物理合理性）
@@ -1218,6 +1592,13 @@ public class FlowController {
             sb.append("【总分析·产品与系列规划】\n").append(seriesPlan.trim()).append("\n\n");
         // 本张分析方案（含本图卖点、画面文案、场景构图）
         sb.append("【第 ").append(currentIndex).append(" 张方案】\n").append(base).append("\n");
+        // 0a 卖点侧：库卖点定本张【画面文案】主标题内容（每张不同维度卖点，防同质化）；构图库 base 只定版式/位置。
+        //   首图(第1张)用高转化整句作主标题，其余用分配到的单个卖点词。空则不注入(走 base 里 GPT 现编/泛词)。
+        if (libSellPoint != null && !libSellPoint.isBlank())
+            sb.append("\n【本图卖点·库指定·必须渲染】本图画面文案的主标题严格围绕这一个卖点：【")
+              .append(libSellPoint.trim())
+              .append("】。把它做成醒目主标题(≤10字)+一句副标题解释，只强调这个卖点，禁止与其他张的卖点重复或混用；"
+                    + "文字位置/字号/色块版式以上方【第 ").append(currentIndex).append(" 张方案】(构图库)指定的文字区为准。\n");
         // R5：改图风格直拼进生图 prompt（原来只喂分析）
         if (styleReq != null && !styleReq.isBlank()) sb.append("\n【画面风格】").append(styleReq.trim()).append("\n");
         // 系列连贯性 + 角度约束（R2 恢复多角度+防变形）

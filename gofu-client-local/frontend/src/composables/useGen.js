@@ -245,14 +245,52 @@ export function useGen() {
     finally { gen.imgBusy = false }
   }
 
-  // 一键生成:布局+主图 → 接着生选定方案(默认方案1)的 SKU图+详情图。
-  // 注:当前后端 step1/step2 是两个独立接口(step1 出完全部主图才 return),故这里只能串接两步;
-  // "SKU只等第1张主图、详情随主图逐张生"的交叉并行需后端把两步融合成流式管线(见文档,后端优化项)。
-  async function runOneClick(antipriceTemplates) {
-    await runLayout()
-    if (!gen.layoutDone) return // 布局失败则不续跑SKU
-    await runSkuImages(antipriceTemplates)
+  // 8c 交叉并行:一次调 /api/flow/step-all,后端把主图/SKU/详情融成一条交叉管线
+  // (首图串行定基调→主图2~N并发,每张链对应详情;SKU等首图refMain+布局就绪即开生),固定方案0。
+  // 单次轮询到底,前端不再串接两步。step1/step2(runLayout/runSkuImages)保留给手选方案页。
+  async function runStepAll(antipriceTemplates) {
+    if (!entry.whites.length) { gen.msg = '请先加白底图'; return }
+    if ((ctxStore.current?.visual?.mainImages || []).length && !confirm('已有主图，重新生成将【覆盖】现有所有主图/详情/SKU图，是否继续？')) return
+    gen.running = true; gen.done = false; gen.layoutDone = false; gen.progress = 5
+    try {
+      let skus = entry.skus.slice()
+      const isShower = entry.categoryStr.includes('花洒') || entry.categoryStr.includes('淋浴')
+      const hasAcc = skus.some((s) => s.role === 'accessory' || s.role === 'batch')
+      if (isShower && entry.mainCodes.length && !hasAcc) {
+        gen.msg = '按规则库自动搭配配件…'
+        const acc = await autoResolveAccessories()
+        if (acc.length) { skus = skus.concat(acc); entry.skus = skus }
+      }
+      gen.msg = '拉取配件白底图…'
+      await entry.fetchAccWhites(skus)
+      gen.progress = 12; gen.msg = '交叉并行生成（主图/SKU/详情，异步）…'
+      const d = await api.post('/api/flow/step-all', {
+        contextId: ctxStore.contextId || undefined,
+        category: entry.categoryStr, mainItem: entry.mainItemName, productName: entry.mainItemName,
+        whiteImages: entry.whites, skus, agentId: entry.agentId,
+        mainCount: entry.genOpts.mainCount, planCount: entry.genOpts.planCount,
+        mainAspect: entry.genOpts.mainAspect, customRequest: entry.genOpts.customRequest, styleId: entry.genOpts.styleId,
+        accWhiteImages: entry.accWhites, templateId: resolveTemplateId(antipriceTemplates),
+      })
+      if (d.error) throw new Error(d.error)
+      if (!d.taskId) throw new Error('step-all 未返回 taskId')
+      ctxStore.contextId = d.contextId
+      ctxStore.origin = 'single' // 生成一开始就标single,否则轮询期预览空白(流式渲染失效),同 runLayout
+      await pollFlowTask(d.taskId, d.total || 0, 12, 98)
+      await ctxStore.load(d.contextId, 'single')
+      await fillCostAndPrice()
+      gen.msg = '生成标题…'; await genTitle()
+      await ctxStore.save?.(); await ctxStore.load(d.contextId)
+      gen.progress = 100; gen.done = true; gen.layoutDone = true
+      gen.msg = `完成：${(ctxStore.current?.structure?.plans || []).length} 套方案，主图 ${(ctxStore.current?.visual?.mainImages || []).length} 张，详情 ${(ctxStore.current?.visual?.detailImages || []).length} 张。`
+    } catch (e) { gen.msg = '一键生成失败：' + e.message }
+    finally { gen.running = false }
   }
 
-  return { gen, style, pollFlowTask, stopGen, runLayout, runSkuImages, runOneClick, runStyleTransfer, regenImage, fillCostAndPrice, genTitle, recalcPrice, resolveTemplateId }
+  // 一键生成:走 8c 交叉并行融合端点(固定方案0)。用户想换方案再手动走 runSkuImages(step2)重生。
+  async function runOneClick(antipriceTemplates) {
+    await runStepAll(antipriceTemplates)
+  }
+
+  return { gen, style, pollFlowTask, stopGen, runLayout, runSkuImages, runStepAll, runOneClick, runStyleTransfer, regenImage, fillCostAndPrice, genTitle, recalcPrice, resolveTemplateId }
 }
