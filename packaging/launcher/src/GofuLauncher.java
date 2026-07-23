@@ -1,5 +1,7 @@
 import java.awt.Desktop;
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
@@ -68,6 +70,11 @@ public class GofuLauncher {
         // 本地上新要找 tools/(pdd_listing.js + 便携node + chromium)：注入 app.resources-path=app/ 目录，
         // ListingService.resolvePlaywrightScript/resolveNodeExe 据此定位（打包态机制）。
         String resourcesArg = "-Dapp.resources-path=" + appDir.getAbsolutePath();
+
+        // 启动前先清掉上一次残留、仍占着 5020/5021 的旧实例(否则新实例"Port already in use"崩→白屏)。
+        // 只清真正 LISTENING 在这两个端口上的 PID,不误伤 IDE 等其它 java。
+        freePortOrKill(CLOUD_PORT);
+        freePortOrKill(LOCAL_PORT);
 
         // 云端在本机跑，本地经 GOFU_CLOUD_URL 调它（默认就是 localhost:5020，此处显式稳一手）
         children.add(start(java, cloudJar, List.of(dataArg), dataDir, "cloud", null));
@@ -203,6 +210,53 @@ public class GofuLauncher {
         }
         log("启动 " + tag + " → 日志: " + logFile.getAbsolutePath());
         return pb.start();
+    }
+
+    /**
+     * 清掉真正 LISTENING 在指定端口上的残留进程(上次没退干净的旧 cloud/local)，再等端口空出。
+     * 只按端口精确定位 PID(netstat LISTENING 行)，不误伤其它 java 进程(如 IDE 编译器)。
+     */
+    private static void freePortOrKill(int port) {
+        for (long pid : listeningPids(port)) {
+            log("端口 " + port + " 被残留进程 PID " + pid + " 占用，清理…");
+            try { new ProcessBuilder("taskkill", "/T", "/F", "/PID", String.valueOf(pid)).start().waitFor(); }
+            catch (Exception e) { log("清理 PID " + pid + " 失败: " + e.getMessage()); }
+        }
+        // 等端口能被绑定(能 bind=空闲，可穿过 TIME_WAIT)。最多等 10s。
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            try (java.net.ServerSocket s = new java.net.ServerSocket()) {
+                s.setReuseAddress(true);
+                s.bind(new java.net.InetSocketAddress("0.0.0.0", port));
+                return;
+            } catch (Exception busy) { sleep(500); }
+        }
+    }
+
+    /** netstat 找出处于 LISTENING 且本地端口=port 的 PID 集合。 */
+    private static java.util.Set<Long> listeningPids(int port) {
+        java.util.Set<Long> pids = new java.util.HashSet<>();
+        try {
+            Process p = new ProcessBuilder("netstat", "-ano", "-p", "tcp").start();
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    if (!line.contains("LISTENING")) continue;
+                    // 形如: TCP  0.0.0.0:5021  0.0.0.0:0  LISTENING  12345
+                    String[] tok = line.trim().split("\\s+");
+                    if (tok.length < 5) continue;
+                    String local = tok[1];
+                    int c = local.lastIndexOf(':');
+                    if (c < 0) continue;
+                    try {
+                        if (Integer.parseInt(local.substring(c + 1)) == port)
+                            pids.add(Long.parseLong(tok[tok.length - 1]));
+                    } catch (NumberFormatException ignore) {}
+                }
+            }
+            p.waitFor();
+        } catch (Exception e) { log("netstat 查端口 " + port + " 失败(跳过清理): " + e.getMessage()); }
+        return pids;
     }
 
     /** 轮询 TCP 端口，最多等 timeoutSec 秒。 */
