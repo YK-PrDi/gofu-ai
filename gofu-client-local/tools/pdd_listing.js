@@ -183,8 +183,8 @@ async function exposeFileInput(page, index) {
     await page.waitForTimeout(300);
 }
 
-/** 上传图片到指定的图片区域（按区域索引，只计图片类型 file input）*/
-async function uploadImagesToArea(page, areaIndex, imgDir) {
+/** 上传图片到指定的图片区域（按区域索引，只计图片类型 file input）。label 仅用于诊断日志（主图/详情图）。*/
+async function uploadImagesToArea(page, areaIndex, imgDir, label = '图片') {
     if (!imgDir || !fs.existsSync(imgDir)) {
         log(`图片目录不存在，跳过：${imgDir}`);
         return 0;
@@ -231,7 +231,7 @@ async function uploadImagesToArea(page, areaIndex, imgDir) {
                 for (const s of sels) { const n = document.querySelectorAll(s).length; if (n > byClass) byClass = n; }
                 return Math.max(blobImgs, byClass);
             });
-            log(`详情图诊断: 已传第 ${i + 1}/${files.length} 张，页面当前缩略图约 ${thumbCnt} 个`);
+            log(`${label}诊断: 已传第 ${i + 1}/${files.length} 张，页面当前缩略图约 ${thumbCnt} 个`);
         } catch (_) {}
     }
     return files.length;
@@ -640,7 +640,7 @@ async function main() {
             try {
                 // 1) 先传主图
                 if (config.mainImgDir) {
-                    const n = await uploadImagesToArea(page, 0, config.mainImgDir);
+                    const n = await uploadImagesToArea(page, 0, config.mainImgDir, "主图");
                     log(`v3 主图上传完成，共 ${n} 张`);
                     await page.waitForTimeout(2000);
                     await closePddPopups();
@@ -892,7 +892,7 @@ async function main() {
         // ── STEP 2：上传主图（v3 已在前置步骤传过，跳过不重传）────────────────────────
         progress(15, '上传主图');
         if (config.mainImgDir && !v3Done) {
-            const count = await uploadImagesToArea(page, 0, config.mainImgDir);
+            const count = await uploadImagesToArea(page, 0, config.mainImgDir, "主图");
             log(`主图上传完成，共 ${count} 张`);
             await closePddPopups();
         } else if (v3Done) {
@@ -1121,7 +1121,7 @@ async function main() {
         // ── STEP 6：上传详情图 ──────────────────────────────────────────
         progress(50, '上传详情图');
         if (config.detailImgDir) {
-            const count = await uploadImagesToArea(page, 1, config.detailImgDir);
+            const count = await uploadImagesToArea(page, 1, config.detailImgDir, "详情图");
             log(`详情图上传完成，共 ${count} 张`);
             await closePddPopups();
         }
