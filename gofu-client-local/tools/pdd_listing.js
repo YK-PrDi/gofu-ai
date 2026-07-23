@@ -906,25 +906,24 @@ async function main() {
         if (config.title) {
             // v2 标题框 placeholder 是「商品标题组成：商品描述+规格...」，放宽匹配；等它出现再填
             const titleSel = 'input[placeholder*="商品标题"], textarea[placeholder*="商品标题"], input[placeholder*="标题"], textarea[placeholder*="标题"]';
-            let titleInput = await page.$(titleSel);
-            if (!titleInput) {
-                await page.waitForSelector(titleSel, { timeout: 8000 }).catch(() => {});
-                titleInput = await page.$(titleSel);
-            }
-            if (titleInput) {
-                // 先等 init-loading 遮罩消失再点：慢机/弱网下页面进表单时 init-loading 的 .contain 会拦截点击，
-                // 导致「intercepts pointer events / Element is not attached to the DOM」。复用别处(如1255行)同款等待。
-                await page.waitForFunction(
-                    () => !document.querySelector('.init-loading, [class*="init-loading"]'),
-                    { timeout: 15000 }
-                ).catch(() => {});
-                await titleInput.click();
-                await titleInput.fill('');
-                await titleInput.type(config.title, { delay: 30 });
+            // 先等 init-loading 遮罩消失(这期间页面会重渲染)。放在取元素之前——原来先取 handle 再等遮罩,
+            // 等待期间 DOM 重渲染使旧 elementHandle 脱离 → 「Element is not attached to the DOM」。
+            await page.waitForFunction(
+                () => !document.querySelector('.init-loading, [class*="init-loading"]'),
+                { timeout: 15000 }
+            ).catch(() => {});
+            // 用 locator(每次操作自动重新定位+自带可见/稳定重试),不用陈旧 elementHandle。
+            const titleLoc = page.locator(titleSel).first();
+            let hasTitle = false;
+            try { await titleLoc.waitFor({ state: 'visible', timeout: 8000 }); hasTitle = true; } catch (_) {}
+            if (hasTitle) {
+                await titleLoc.click();
+                await titleLoc.fill('');
+                await titleLoc.type(config.title, { delay: 30 });
                 await page.waitForTimeout(500);
                 // 实测:标题框失焦后,页面才渲染出"商品分类(平台自动推荐)"区+「手动选择商品分类」按钮。
                 //   Enter 无效,必须让标题框 blur。点标题外的空白区(表单标题旁)触发失焦,再等分类区渲染。
-                try { await titleInput.evaluate(el => el.blur()); } catch (_) {}
+                try { await titleLoc.evaluate(el => el.blur()); } catch (_) {}
                 try { await page.mouse.click(60, 120); } catch (_) {}   // 点左上空白,确保焦点离开输入框
                 await page.waitForTimeout(1200);
                 log('标题已填写');
