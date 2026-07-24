@@ -34,6 +34,8 @@ public class StyleImportService {
     private final SemiAutoService semiAutoService;
     private final KuaimaiService kuaimaiService;
     private final AccessoryRuleService accessoryRuleService;
+    private final CostService costService;
+    private final PricingService pricingService;
     private final ObjectMapper om = new ObjectMapper();
     private final OkHttpClient http = new OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
@@ -42,11 +44,14 @@ public class StyleImportService {
 
     public StyleImportService(@Value("${gofu.cloud.base-url:http://127.0.0.1:5020}") String cloudBase,
                               SemiAutoService semiAutoService, KuaimaiService kuaimaiService,
-                              AccessoryRuleService accessoryRuleService) {
+                              AccessoryRuleService accessoryRuleService,
+                              CostService costService, PricingService pricingService) {
         this.cloudBase = cloudBase != null ? cloudBase.replace("localhost", "127.0.0.1") : "http://127.0.0.1:5020";
         this.semiAutoService = semiAutoService;
         this.kuaimaiService = kuaimaiService;
         this.accessoryRuleService = accessoryRuleService;
+        this.costService = costService;
+        this.pricingService = pricingService;
     }
 
     // ── 异步导入进度：导入是单次阻塞调用(上传16张+反推刷ERP缓存+云端出21个SKU方案+AI标题≈90秒)，
@@ -66,17 +71,42 @@ public class StyleImportService {
         void set(String ph, int p) { this.phase = ph; this.pct = p; }
     }
 
-    /** 起一次异步导入，立即返回。前端拿 importId 轮询 getProgress。 */
-    public void importAsync(String importId, String folderName, List<UpImg> mainImgs, List<UpImg> detailImgs,
-                            List<UpImg> whiteImgs, List<UpImg> skuImgs, int planCount) {
+    /**
+     * 异步识别段：只跑 上传→反推SKU→配件→白底兜底→建context，立即返回。前端拿 importId 轮询 getProgress。
+     * 识别/生成分离：result 带 {contextId, category, productName, skus, warnings}，供前端确认后回传 generate-layout。
+     */
+    public void recognizeAsync(String importId, String folderName, List<UpImg> mainImgs, List<UpImg> detailImgs,
+                               List<UpImg> whiteImgs, List<UpImg> skuImgs) {
         Progress pg = new Progress();
         importProgress.put(importId, pg);
         importPool.submit(() -> {
             try {
-                Map<String, Object> out = importToContext(folderName, mainImgs, detailImgs, whiteImgs, skuImgs, pg, planCount);
+                Map<String, Object> out = recognizeToContext(folderName, mainImgs, detailImgs, whiteImgs, skuImgs, pg);
+                pg.result = out; pg.set("识别完成", 100); pg.done = true;
+            } catch (Exception e) {
+                log.warn("[导入·识别异步] 失败: {}", e.getMessage(), e);
+                pg.error = e.getMessage() == null ? e.toString() : e.getMessage();
+                pg.done = true;
+            }
+        });
+    }
+
+    /**
+     * 异步生成段：用户确认识别结果后调，跑 出方案→AI标题→挂SKU图→后端算价回填。
+     * @param skus 识别段返回、用户确认后回传的主件+配件清单(itemCode/name/role)
+     * @param profitRate 前端利润率(&lt;=0 回退 PricingService 默认)
+     */
+    public void generateLayoutAsync(String genId, String contextId, String category, String productName,
+                                    List<Map<String, Object>> skus, List<UpImg> skuImgs, int planCount, double profitRate) {
+        Progress pg = new Progress();
+        pg.contextId = contextId;   // 生成段一开始即知 contextId,前端可实时刷预览
+        importProgress.put(genId, pg);
+        importPool.submit(() -> {
+            try {
+                Map<String, Object> out = generateLayout(contextId, category, productName, skus, skuImgs, pg, planCount, profitRate);
                 pg.result = out; pg.set("完成", 100); pg.done = true;
             } catch (Exception e) {
-                log.warn("[导入异步] 失败: {}", e.getMessage(), e);
+                log.warn("[导入·生成异步] 失败: {}", e.getMessage(), e);
                 pg.error = e.getMessage() == null ? e.toString() : e.getMessage();
                 pg.done = true;
             }
@@ -90,6 +120,7 @@ public class StyleImportService {
      * 目的:批量流"缺图·可AI生成"按钮复用已验证的导入补生逻辑，不重写生图。读本地图→base64→转 importAsync。
      * @param folderPath 商品文件夹绝对路径(内含 主图/详情/白底图/sku 子目录)；folderName 取其目录名(供品类/主件解析)
      */
+    @SuppressWarnings("unchecked")
     public void importAsyncFromFolder(String importId, String folderPath) {
         File dir = new File(folderPath);
         String folderName = dir.getName();
@@ -97,7 +128,32 @@ public class StyleImportService {
         List<UpImg> detail = readDirImgs(dir, "详情", "detail");
         List<UpImg> white = readDirImgs(dir, "白底", "white");
         List<UpImg> sku = readDirImgs(dir, "sku", "款式", "颜色");
-        importAsync(importId, folderName, main, detail, white, sku, 3); // 批量流复用路径:套数默认3(不受单品导入设置影响)
+        // 批量流复用路径:识别+生成一步到底(不停在确认页)，套数默认3、利润率默认。顺带获得后端算价。
+        Progress pg = new Progress();
+        importProgress.put(importId, pg);
+        importPool.submit(() -> {
+            try {
+                Map<String, Object> rec = recognizeToContext(folderName, main, detail, white, sku, pg);
+                String contextId = String.valueOf(rec.get("contextId"));
+                String category = String.valueOf(rec.getOrDefault("category", ""));
+                String productName = String.valueOf(rec.getOrDefault("productName", ""));
+                List<Map<String, Object>> skus = (List<Map<String, Object>>) rec.getOrDefault("skus", List.of());
+                Map<String, Object> out = generateLayout(contextId, category, productName, skus, sku, pg, 3,
+                        PricingService.DEFAULT_PROFIT_RATE);
+                // 识别段告警并入生成段结果，前端一次看全
+                List<Object> recWarns = (List<Object>) rec.getOrDefault("warnings", List.of());
+                if (!recWarns.isEmpty()) {
+                    List<Object> merged = new ArrayList<>((List<Object>) out.getOrDefault("warnings", List.of()));
+                    merged.addAll(0, recWarns);
+                    out.put("warnings", merged);
+                }
+                pg.result = out; pg.set("完成", 100); pg.done = true;
+            } catch (Exception e) {
+                log.warn("[批量补生] 失败: {}", e.getMessage(), e);
+                pg.error = e.getMessage() == null ? e.toString() : e.getMessage();
+                pg.done = true;
+            }
+        });
     }
 
     /** 读商品文件夹下匹配任一关键词的子目录里的图，转 UpImg(base64)。找不到子目录返回空。 */
@@ -127,22 +183,17 @@ public class StyleImportService {
     public record UpImg(String name, String b64, String ext) {}
 
     /**
-     * 重构版导入(webkitdirectory 前端上传模型)：前端选文件夹→按子目录分组读 base64 上传，
-     * 后端不再扫盘。文件夹名按「品类-主件名」解析(与批量上新一致)，白底图名反推快麦建主件，
-     * 调云端出 SKU 方案 + AI 标题，sku 图按尺寸名次挂到方案。返回 contextId + 计数。
+     * 识别段(webkitdirectory 上传模型)：前端选文件夹→按子目录分组读 base64 上传，后端不再扫盘。
+     * 文件夹名按「品类-主件名」解析，白底图名反推快麦建主件清单+配件搭配+白底兜底，建云端 context。
+     * <b>不出方案/不算价</b>——生成段(generateLayout)在用户确认识别结果后单独跑。
      *
      * @param folderName 顶层文件夹名，如「锅盖架-圣诞树收纳架」
      * @param mainImgs/detailImgs/whiteImgs/skuImgs 各子目录图片(name+base64)
+     * @return {contextId, category, productName, skus(主件+配件清单), warnings, mainCount, detailCount, whiteCount}
      */
-    /** 同步导入(保留供直接调用)：内部转发到带进度版，进度写到一个丢弃的 Progress。planCount 默认3(批量流复用路径)。 */
-    public Map<String, Object> importToContext(String folderName, List<UpImg> mainImgs, List<UpImg> detailImgs,
-                                               List<UpImg> whiteImgs, List<UpImg> skuImgs) throws Exception {
-        return importToContext(folderName, mainImgs, detailImgs, whiteImgs, skuImgs, new Progress(), 3);
-    }
-
     @SuppressWarnings("unchecked")
-    public Map<String, Object> importToContext(String folderName, List<UpImg> mainImgs, List<UpImg> detailImgs,
-                                               List<UpImg> whiteImgs, List<UpImg> skuImgs, Progress pg, int planCount) throws Exception {
+    public Map<String, Object> recognizeToContext(String folderName, List<UpImg> mainImgs, List<UpImg> detailImgs,
+                                                  List<UpImg> whiteImgs, List<UpImg> skuImgs, Progress pg) throws Exception {
         if ((mainImgs == null || mainImgs.isEmpty()) && (detailImgs == null || detailImgs.isEmpty())
                 && (whiteImgs == null || whiteImgs.isEmpty()))
             throw new IllegalStateException("没找到主图/详情图/白底图（文件夹需含 主图/ 详情/ 白底图/ 子目录）");
@@ -286,19 +337,49 @@ public class StyleImportService {
         pg.set("创建商品档案…", 42);
         Map<String, Object> saved = postJson("/api/context", ctx);
         String contextId = String.valueOf(saved.get("id"));
-        pg.contextId = contextId;   // 建完context即暴露:前端可中途载入,主图/详情实时出图,不必等方案生成完
+        pg.contextId = contextId;   // 建完context即暴露:前端可中途载入,主图/详情实时出图,不必等生成段完
 
-        // 4) 云端出 SKU 方案(默认3套)+AI标题，再把 sku 图按尺寸名次挂到方案(与自动上新同一条链)
-        int planItemCount = generatePlansAndTitle(contextId, category, productName, mainSkus, skuImgs, pg, planCount);
-
-        log.info("[导入重构] 文件夹={} → contextId={} 主图{} 详情{} 白底{} 主件{} 方案SKU{}",
-                folderName, contextId, mainKeys.size(), detailKeys.size(), whiteKeys.size(), mainSkus.size(), planItemCount);
+        log.info("[导入·识别] 文件夹={} → contextId={} 主图{} 详情{} 白底{} 主件+配件{}",
+                folderName, contextId, mainKeys.size(), detailKeys.size(), whiteKeys.size(), mainSkus.size());
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("contextId", contextId);
         out.put("mainCount", mainKeys.size()); out.put("detailCount", detailKeys.size());
-        out.put("whiteCount", whiteKeys.size()); out.put("skuPlanCount", planItemCount);
+        out.put("whiteCount", whiteKeys.size());
         out.put("category", category == null ? "" : category); out.put("productName", productName);
+        out.put("skus", mainSkus);   // 主件+配件清单,前端确认后回传 generateLayout
         out.put("warnings", unmatchedHints);
+        return out;
+    }
+
+    /**
+     * 生成段：用户确认识别结果后跑。云端出 SKU 方案(planCount 套)+AI标题+挂SKU图，再<b>后端算价回填</b>
+     * cost/groupPrice/singlePrice(复刻前端 fillCostAndPrice,取代前端补算兜底)。
+     * @return {contextId, skuPlanCount, warnings}
+     */
+    public Map<String, Object> generateLayout(String contextId, String category, String productName,
+                                              List<Map<String, Object>> skus, List<UpImg> skuImgs,
+                                              Progress pg, int planCount, double profitRate) throws Exception {
+        List<Map<String, Object>> mainSkus = skus == null ? new ArrayList<>() : skus;
+        List<String> warnings = new ArrayList<>();
+        // 4) 云端出方案+AI标题+挂SKU图(与自动上新同一条链)
+        int planItemCount = generatePlansAndTitle(contextId, category, productName, mainSkus, skuImgs, pg, planCount);
+        // 5) 后端算价回填(根治:导入方案价原为0,靠前端接管才补算)。方案落库后就地读全量→改价→覆盖。
+        if (planItemCount > 0) {
+            pg.set("计算成本 / 定价…", 96);
+            try {
+                List<String> zeroCostSkus = fillCostAndPriceBackend(contextId, category, profitRate);
+                if (!zeroCostSkus.isEmpty())
+                    warnings.add("以下 SKU 快麦无进价,定不出价(拼单价按0成本算,请手动核价): " + String.join("、", zeroCostSkus));
+            } catch (Exception e) {
+                log.warn("[导入·后端算价] 失败(不阻断,价可能为0): {}", e.getMessage(), e);
+                warnings.add("后端自动算价失败(价可能为0),可在单品页「按此重算」: " + e.getMessage());
+            }
+        }
+        log.info("[导入·生成] contextId={} 方案SKU{} 已算价", contextId, planItemCount);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("contextId", contextId);
+        out.put("skuPlanCount", planItemCount);
+        out.put("warnings", warnings);
         return out;
     }
 
@@ -344,15 +425,9 @@ public class StyleImportService {
         return ns;
     }
 
-    /** 主件名按「+」拆成候选编码段(全角＋归一化)，如 A+B+C → [A,B,C]；空段丢弃。用作反推兜底源。 */
+    /** 主件名展开成候选编码段(+拼接、/枚举笛卡尔积)。委托 SemiAutoService 单一真相源。 */
     private static List<String> splitCodeSegments(String productName) {
-        List<String> segs = new ArrayList<>();
-        if (productName == null || productName.isBlank()) return segs;
-        for (String p : productName.replace('＋', '+').split("\\+")) {
-            String t = p.trim();
-            if (!t.isEmpty()) segs.add(t);
-        }
-        return segs;
+        return SemiAutoService.expandCodeSegments(productName);
     }
     /**
      * 云端出 SKU 方案(默认3套) + AI标题，再把 sku 图按尺寸名次挂到方案 item.imgDir。
@@ -411,6 +486,142 @@ public class StyleImportService {
         }
         if (uploaded.isEmpty()) return;
         postJson("/api/gen/attach-sku-images", Map.of("contextId", contextId, "skuImages", uploaded));
+    }
+
+    /**
+     * 后端算价回填(复刻前端 useGen.fillCostAndPrice/fillOnePlan)：读云端 context 全量 → 每套方案按
+     * CostService.calcCost(单件成本) → calcComboCost(组合成本) → PricingService.calculate(拼单价) 算 →
+     * 就地改 items 的 cost/groupPrice/singlePrice → POST 覆盖回云端。
+     *
+     * <p>约束(见 plan)：云端无字段级更新，必须读全量→改→覆盖；且这是生成段<b>最后一次写</b>
+     * (在 sku-plans/title/attach 之后)，避免覆盖掉标题/imgDir。
+     * @return 组合成本≤0 的 SKU 名字清单(快麦无进价,前端据此提示手动核价)
+     */
+    @SuppressWarnings("unchecked")
+    private List<String> fillCostAndPriceBackend(String contextId, String category, double profitRate) throws Exception {
+        double rate = profitRate > 0 ? profitRate : PricingService.DEFAULT_PROFIT_RATE;
+        // 品类→productType(与前端 fillCostAndPrice 同款判定)
+        String cp = category == null ? "" : category;
+        String productType = cp.contains("花洒") ? "花洒" : cp.contains("代发") ? "代发" : "架类";
+
+        Map<String, Object> ctx = getJson("/api/context/" + contextId);
+        Map<String, Object> structure = (Map<String, Object>) ctx.get("structure");
+        if (structure == null) return List.of();
+        List<Map<String, Object>> plans = (List<Map<String, Object>>) structure.get("plans");
+        if (plans == null || plans.isEmpty()) return List.of();
+
+        List<String> zeroCost = new ArrayList<>();
+        for (Map<String, Object> plan : plans) {
+            List<Map<String, Object>> items = (List<Map<String, Object>>) plan.get("items");
+            if (items == null || items.isEmpty()) continue;
+
+            // a) 收集主件码(itemCode 取 + 前第一段)+配件码 → calcCost 拿单件成本/重量
+            LinkedHashSet<String> codes = new LinkedHashSet<>();
+            for (Map<String, Object> it : items) {
+                String mc = mainCodeOf(it);
+                if (!mc.isBlank()) codes.add(mc);
+                for (Map<String, Object> a : accPartsOf(it)) {
+                    String ac = String.valueOf(a.getOrDefault("code", ""));
+                    if (!ac.isBlank()) codes.add(ac);
+                }
+            }
+            Map<String, double[]> costMap = new HashMap<>();   // code → [cost, weight]
+            if (!codes.isEmpty()) {
+                Map<String, Object> cd = costService.calcCost(new ArrayList<>(codes), productType);
+                for (Map<String, Object> x : (List<Map<String, Object>>) cd.getOrDefault("items", List.of())) {
+                    costMap.put(String.valueOf(x.get("skuOuterId")),
+                            new double[]{toD(x.get("cost")), toD(x.get("weight"))});
+                }
+            }
+
+            // b) 组每个 SKU 的组件清单 → calcComboCost 拿组合成本
+            List<Map<String, Object>> comboSkus = new ArrayList<>();
+            for (Map<String, Object> it : items) {
+                List<Map<String, Object>> comps = new ArrayList<>();
+                String mc = mainCodeOf(it);
+                if (!mc.isBlank()) {
+                    double[] cw = costMap.getOrDefault(mc, new double[]{0, 0});
+                    Map<String, Object> c = new LinkedHashMap<>();
+                    c.put("itemCode", mc); c.put("qty", 1); c.put("name", it.get("spec1"));
+                    c.put("cost", cw[0]); c.put("weight", cw[1]);
+                    comps.add(c);
+                }
+                for (Map<String, Object> a : accPartsOf(it)) {
+                    String ac = String.valueOf(a.getOrDefault("code", ""));
+                    double[] cw = costMap.getOrDefault(ac, new double[]{0, 0});
+                    Map<String, Object> c = new LinkedHashMap<>();
+                    c.put("itemCode", ac); c.put("qty", a.getOrDefault("qty", 1));
+                    c.put("cost", cw[0]); c.put("weight", cw[1]);
+                    comps.add(c);
+                }
+                Map<String, Object> cs = new LinkedHashMap<>();
+                cs.put("name", skuName(it)); cs.put("components", comps);
+                comboSkus.add(cs);
+            }
+            Map<String, Object> combo = costService.calcComboCost(productType, List.of(), comboSkus);
+            List<Map<String, Object>> comboOut = (List<Map<String, Object>>) combo.getOrDefault("skus", List.of());
+            for (int i = 0; i < items.size() && i < comboOut.size(); i++) {
+                double cost = toD(comboOut.get(i).get("cost"));
+                items.get(i).put("cost", cost);
+                if (cost <= 0) zeroCost.add(skuName(items.get(i)));
+            }
+
+            // c) 定价：pinPrice→groupPrice(行级)，singlePrice(顶层,全表统一)
+            List<Map<String, Object>> priceIn = new ArrayList<>();
+            for (Map<String, Object> it : items) {
+                Map<String, Object> p = new LinkedHashMap<>();
+                p.put("itemCode", it.getOrDefault("itemCode", "")); p.put("name", skuName(it));
+                p.put("cost", toD(it.get("cost")));
+                priceIn.add(p);
+            }
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("profitRate", rate); body.put("skus", priceIn);
+            Map<String, Object> pd = pricingService.calculate(body);
+            List<Map<String, Object>> pdSkus = (List<Map<String, Object>>) pd.getOrDefault("skus", List.of());
+            double singlePrice = toD(pd.get("singlePrice"));
+            for (int i = 0; i < items.size() && i < pdSkus.size(); i++) {
+                items.get(i).put("groupPrice", toD(pdSkus.get(i).get("pinPrice")));
+                items.get(i).put("singlePrice", singlePrice);
+            }
+        }
+
+        // 读全量→改价→POST 覆盖回云端(生成段最后一次写,保住标题/imgDir)
+        postJson("/api/context", ctx);
+        return zeroCost;
+    }
+
+    /** itemCode 取 + 前第一段作主件码(与前端 mainCodeOf 同款)。 */
+    private static String mainCodeOf(Map<String, Object> it) {
+        return String.valueOf(it.getOrDefault("itemCode", "")).split("\\+")[0].trim();
+    }
+
+    /** 取 item 的展示名(skuDisplayName 优先,回退 name),与前端一致。 */
+    private static String skuName(Map<String, Object> it) {
+        Object d = it.get("skuDisplayName");
+        String s = d == null ? "" : String.valueOf(d);
+        return s.isBlank() ? String.valueOf(it.getOrDefault("name", "")) : s;
+    }
+
+    /** 取 item 的配件清单 accParts:[{code,qty}]，无则空。 */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> accPartsOf(Map<String, Object> it) {
+        Object a = it.get("accParts");
+        return a instanceof List ? (List<Map<String, Object>>) a : List.of();
+    }
+
+    private static double toD(Object v) {
+        if (v instanceof Number n) return n.doubleValue();
+        try { return v == null ? 0 : Double.parseDouble(v.toString()); } catch (Exception e) { return 0; }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> getJson(String path) throws Exception {
+        Request req = new Request.Builder().url(cloudBase + path).get().build();
+        try (Response resp = http.newCall(req).execute()) {
+            String s = resp.body() != null ? resp.body().string() : "";
+            if (!resp.isSuccessful()) throw new RuntimeException("云端 " + path + " HTTP " + resp.code() + ": " + s);
+            return om.readValue(s, Map.class);
+        }
     }
 
     @SuppressWarnings("unchecked")

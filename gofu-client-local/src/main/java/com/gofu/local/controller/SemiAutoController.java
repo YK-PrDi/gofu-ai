@@ -47,17 +47,40 @@ public class SemiAutoController {
      */
     @PostMapping("/import-to-context")
     public ResponseEntity<?> importToContext(@RequestBody Map<String, Object> body) {
-        // 重构(webkitdirectory 上传模型)：入参 { folderName, main/detail/white/sku:[{name,b64,ext}] }。
-        // 异步：上传16张+反推+云端出方案≈90秒，同步会让前端像卡死。这里起后台任务立即返回 importId，前端轮询进度。
+        // 识别/生成分离：本端点只跑识别段(上传→反推→配件→白底→建context)，立即返回 importId。
+        // 前端轮询 /import-progress 拿识别结果 {contextId,category,productName,skus,warnings}，
+        // 用户确认后再调 /generate-layout 出方案+算价。入参 { folderName, main/detail/white/sku:[{name,b64,ext}] }。
         String folderName = String.valueOf(body.getOrDefault("folderName", ""));
         if (folderName.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "folderName 不能为空"));
+        String importId = java.util.UUID.randomUUID().toString();
+        styleImportService.recognizeAsync(importId, folderName,
+                toUpImgs(body.get("main")), toUpImgs(body.get("detail")),
+                toUpImgs(body.get("white")), toUpImgs(body.get("sku")));
+        return ResponseEntity.ok(Map.of("importId", importId));
+    }
+
+    /**
+     * 生成段：用户确认识别结果后调，云端出 SKU 方案+AI标题+挂图+后端算价回填。异步，返回 genId 复用 /import-progress 轮询。
+     * 入参 { contextId, category, productName, skus:[{itemCode,name,role}], sku:[{name,b64,ext}], planCount, profitRate }。
+     * skus=识别段返回、用户确认后回传的主件+配件清单；sku=前端重发的 SKU 成品图(挂方案用)。
+     */
+    @PostMapping("/generate-layout")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<?> generateLayout(@RequestBody Map<String, Object> body) {
+        String contextId = String.valueOf(body.getOrDefault("contextId", ""));
+        if (contextId.isBlank()) return ResponseEntity.badRequest().body(Map.of("error", "contextId 不能为空"));
+        String category = String.valueOf(body.getOrDefault("category", ""));
+        String productName = String.valueOf(body.getOrDefault("productName", ""));
+        List<Map<String, Object>> skus = body.get("skus") instanceof List
+                ? (List<Map<String, Object>>) body.get("skus") : List.of();
         // 方案套数:前端从设置传入(默认1,测试期省算力);缺省或非法回退1。
         int planCount = body.get("planCount") instanceof Number n ? Math.max(1, n.intValue()) : 1;
-        String importId = java.util.UUID.randomUUID().toString();
-        styleImportService.importAsync(importId, folderName,
-                toUpImgs(body.get("main")), toUpImgs(body.get("detail")),
-                toUpImgs(body.get("white")), toUpImgs(body.get("sku")), planCount);
-        return ResponseEntity.ok(Map.of("importId", importId));
+        // 利润率:前端透传(默认0.58);缺省/非法传0,service 回退 PricingService 默认。
+        double profitRate = body.get("profitRate") instanceof Number pr ? pr.doubleValue() : 0;
+        String genId = java.util.UUID.randomUUID().toString();
+        styleImportService.generateLayoutAsync(genId, contextId, category, productName,
+                skus, toUpImgs(body.get("sku")), planCount, profitRate);
+        return ResponseEntity.ok(Map.of("importId", genId));
     }
 
     /**
@@ -98,9 +121,8 @@ public class SemiAutoController {
             String pn = dir.getName();
             int dash = pn.replace('－', '-').indexOf('-');
             String mainSeg = dash >= 0 ? pn.substring(dash + 1) : pn;
-            for (String seg : mainSeg.replace('＋', '+').split("\\+")) {
-                String code = seg.trim();
-                if (code.isEmpty()) continue;
+            // 编码展开(+拼接、/枚举笛卡尔积)与反推同一真相源，白底预览也支持简写命名
+            for (String code : com.gofu.local.service.listing.SemiAutoService.expandCodeSegments(mainSeg)) {
                 try {
                     String url = kuaimaiService.findWhiteImageUrl(code);
                     if (url != null && !url.isBlank()) whiteErp.add(url);

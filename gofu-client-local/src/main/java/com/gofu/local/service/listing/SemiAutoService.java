@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -166,6 +167,47 @@ public class SemiAutoService {
         int sp = s.indexOf(' ');                                     // 空格后是配件描述，截主体
         if (sp > 0) s = s.substring(0, sp);
         return s.trim();
+    }
+
+    /**
+     * 把主件名展开成候选编码清单（反推兜底源，单一真相源，导入/批量/白底预览共用）。
+     * 两级分隔：
+     *   · 「+」拼接独立编码：A+B → [A, B]（原语义，保留）。
+     *   · 「/」在某个「-」字段内枚举取值，跨字段做笛卡尔积，省去重复敲整串：
+     *       GF-架-一层/二层-绿色        → GF-架-一层-绿色、GF-架-二层-绿色
+     *       GF-架-一层-绿色/红色        → GF-架-一层-绿色、GF-架-一层-红色
+     *       GF-架-一层/二层-绿色/红色   → 一层绿/一层红/二层绿/二层红（2×2=4）
+     * 全角＋／／归一化；空段/空取值丢弃；跨段去重保序。
+     */
+    public static List<String> expandCodeSegments(String productName) {
+        List<String> out = new ArrayList<>();
+        if (productName == null || productName.isBlank()) return out;
+        LinkedHashSet<String> seen = new LinkedHashSet<>();
+        String norm = productName.replace('＋', '+').replace('／', '/');
+        for (String plus : norm.split("\\+")) {
+            String seg = plus.trim();
+            if (seg.isEmpty()) continue;
+            // 每个「-」字段可能含「/」枚举 → 笛卡尔积展开
+            List<String> combos = new ArrayList<>();
+            combos.add("");
+            for (String field : seg.split("-", -1)) {
+                String[] alts = field.split("/");
+                List<String> next = new ArrayList<>();
+                for (String combo : combos) {
+                    for (String alt : alts) {
+                        String a = alt.trim();
+                        if (a.isEmpty()) continue;   // 空取值(如 "绿色/")丢弃该分支
+                        next.add(combo.isEmpty() ? a : combo + "-" + a);
+                    }
+                }
+                if (!next.isEmpty()) combos = next;   // 该字段全空则保留上一轮(容错)
+            }
+            for (String c : combos) {
+                String t = c.trim();
+                if (!t.isEmpty() && seen.add(t)) out.add(t);
+            }
+        }
+        return out;
     }
 
     /**

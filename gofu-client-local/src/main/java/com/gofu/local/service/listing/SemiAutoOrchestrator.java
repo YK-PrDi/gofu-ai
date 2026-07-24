@@ -260,14 +260,8 @@ public class SemiAutoOrchestrator {
         return new FolderMeta(cat, name);
     }
 
-    /** 主件名按「+」拆成候选编码段(全角＋归一化)：无 SKU 图目录时作反推兜底源。空段丢弃。 */
+    /** 主件名展开成候选编码段(+拼接、/枚举笛卡尔积)：无 SKU 图目录时作反推兜底源。委托 SemiAutoService 单一真相源。 */
     private static List<String> splitCodeSegments(String productName) {
-        List<String> segs = new ArrayList<>();
-        if (productName == null || productName.isBlank()) return segs;
-        for (String p : productName.replace('＋', '+').split("\\+")) {
-            String t = p.trim();
-            if (!t.isEmpty()) segs.add(t);
-        }
-        return segs;
+        return SemiAutoService.expandCodeSegments(productName);
     }
 }

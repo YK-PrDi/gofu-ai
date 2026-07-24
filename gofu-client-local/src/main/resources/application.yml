@@ -4,6 +4,12 @@ server:
 spring:
   application:
     name: gofu-client-local
+  servlet:
+    multipart:
+      # 本地 5021 只做转发、没有任何直接解析 multipart 的端点。关掉自动解析，
+      # 让 multipart/form-data(局部重绘 image+mask)原始字节流原样透传给 cloudgw 转发，
+      # 否则 Spring 会先消费流→@RequestBody 拿到空 body→云端报"not a multipart request"。
+      enabled: false
 
 # 云端生图服务地址：cloudgw 通过此地址调用 gofu-server-cloud
 gofu:

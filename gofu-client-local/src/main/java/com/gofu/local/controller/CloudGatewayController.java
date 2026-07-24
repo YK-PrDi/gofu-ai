@@ -48,7 +48,12 @@ public class CloudGatewayController {
         Request.Builder rb = new Request.Builder().url(url);
         String method = req.getMethod();
         if ("POST".equalsIgnoreCase(method) || "PUT".equalsIgnoreCase(method)) {
-            rb.method(method, okhttp3.RequestBody.create(body == null ? new byte[0] : body, JSON));
+            // 保留原请求 Content-Type(含 multipart 的 boundary)转发——不能一律写死 JSON。
+            // 局部重绘/生图是 multipart/form-data(image+mask+prompt)，写死 JSON 会让云端报
+            // "Current request is not a multipart request"(boundary 丢失)。缺失时回退 JSON。
+            String reqCt = req.getContentType();
+            MediaType mt = reqCt != null && !reqCt.isBlank() ? MediaType.parse(reqCt) : JSON;
+            rb.method(method, okhttp3.RequestBody.create(body == null ? new byte[0] : body, mt));
         } else {
             rb.method(method, null);
         }
