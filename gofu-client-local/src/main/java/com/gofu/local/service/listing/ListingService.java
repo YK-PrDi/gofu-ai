@@ -169,7 +169,9 @@ public class ListingService {
                 task.addResult(Map.of("type", "error", "message", "自动化异常: " + e.getMessage()));
                 throw new RuntimeException(e);
             } finally {
-                if (proc != null) try { proc.destroyForcibly(); } catch (Exception ignored) {}
+                // 杀进程树+等退出(不只杀 node 父进程),让 Chromium 释放 profile lock,再放闸。
+                // 否则下一个上新用同一 profile 启动会撞 singleton lock → page has been closed。
+                killProcessTree(proc);
                 browserBusy.set(false);
             }
         });
@@ -225,7 +227,7 @@ public class ListingService {
             log.warn("[保活] 异常(忽略): {}", e.getMessage());
             return false;
         } finally {
-            if (proc != null) try { proc.destroyForcibly(); } catch (Exception ignored) {}
+            killProcessTree(proc);   // 同上新:杀进程树+等退出,释放 profile lock 再放闸
             browserBusy.set(false);
         }
     }
@@ -300,11 +302,37 @@ public class ListingService {
             } catch (Exception e) {
                 task.addResult(Map.of("type", "error", "message", "登录失败: " + e.getMessage()));
             } finally {
-                if (proc != null) try { proc.destroyForcibly(); } catch (Exception ignored) {}
+                killProcessTree(proc);   // 同上新:杀进程树+等退出,释放 profile lock 再放闸
                 browserBusy.set(false);
             }
         });
         return task.getId();
+    }
+
+    /**
+     * 杀进程树 + 等待真正退出。node 父进程 destroyForcibly 只杀父,派生的 Chromium 子进程仍在、
+     * 继续持有 pdd_browser_profile 的 singleton lock;下一个上新用同一 profile 启动会撞 lock →
+     * 旧实例 page/context 被关(`Target page has been closed`)。这里先递归杀所有后代(含 Chromium),
+     * 再等父进程退出,给 profile lock 释放留时间,才释放 browserBusy。
+     */
+    private void killProcessTree(Process proc) {
+        if (proc == null) return;
+        try {
+            // 先收集后代句柄(destroy 父之后拿不到),逐个强杀
+            java.util.List<ProcessHandle> descendants = proc.toHandle().descendants().toList();
+            proc.destroyForcibly();
+            for (ProcessHandle h : descendants) {
+                try { h.destroyForcibly(); } catch (Exception ignore) {}
+            }
+            // 等父+后代退出(各最多2秒),确保 Chromium 释放 profile 目录 lock
+            try { proc.waitFor(2, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            for (ProcessHandle h : descendants) {
+                try { h.onExit().get(2, java.util.concurrent.TimeUnit.SECONDS); } catch (Exception ignore) {}
+            }
+        } catch (Exception e) {
+            log.warn("[进程清理] 杀进程树异常(不阻断): {}", e.getMessage());
+            try { proc.destroyForcibly(); } catch (Exception ignore) {}
+        }
     }
 
     public File resolvePlaywrightScript() {

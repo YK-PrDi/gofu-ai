@@ -87,6 +87,20 @@ public class ContextToListingMapper {
         // 图产物下载落地（COS key → 签名 URL → 本地目录）
         File root = new File(userDataDir(), "listing-tmp/" + safe(ctx.getId()));
         if (ctx.getVisual() != null) {
+            // 诊断(#3 白底混进轮播主图)：上传前打出主图/白底的实际 refs。代码各层 main/white 本应分离,
+            // 若日志里 mainImages 出现白底 ref(与 whiteImages 重叠、或含 erp-white/no_pic/快麦图床URL),
+            // 即定位到是哪个 ref 泄漏进主图。把这两行日志发我即可精确定位泄漏点。
+            List<String> mi = ctx.getVisual().getMainImages();
+            List<String> wi = ctx.getVisual().getWhiteImages();
+            log.info("[上新诊断·主图 refs] {} 张: {}", mi == null ? 0 : mi.size(), mi);
+            log.info("[上新诊断·白底 refs] {} 张: {}", wi == null ? 0 : wi.size(), wi);
+            if (mi != null && wi != null) {
+                List<String> overlap = new ArrayList<>(mi);
+                overlap.retainAll(wi);
+                if (!overlap.isEmpty()) log.warn("[上新诊断·白底混进主图] 主图与白底重叠 {} 张 → 将从主图剔除: {}", overlap.size(), overlap);
+                // 防御性剔除:主图里凡与白底 refs 重叠的一律去掉(白底该只进白底专区,不进轮播)。
+                mi.removeAll(wi);
+            }
             cfg.setMainImgDir(downloadImages(ctx.getVisual().getMainImages(), new File(root, "main")));
             cfg.setDetailImgDir(downloadImages(ctx.getVisual().getDetailImages(), new File(root, "detail")));
             // 白底图落地：脚本上传"商品素材/白底图"区用（可选，缺则脚本跳过不报错）

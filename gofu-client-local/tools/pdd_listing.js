@@ -2112,9 +2112,14 @@ async function main() {
         // 草稿信号：存草稿文案，或"提交并上架"按钮点完还在(=没真发布,停编辑页=草稿箱)。
         //   这是区分"真发布"vs"假成功(草稿)"的可靠判据——真发布后该按钮消失/页面变。
         const draftLike = signals.savedDraft || signals.stillSubmitBtn;
-        // 成功：无校验错误 且 非草稿态。(保留旧"停原页无错=成功"，但草稿态一票否决,修假成功)
-        //   有正向信号(okUrl/成功弹窗/成功文案)则更笃定，但不强制要求(防误伤旧机正常流程)。
-        const isSuccess = !hasRealError && !draftLike;
+        // #4 假成功修(07.24)：用户确认「真发布成功时页面必跳转(okUrl)或弹成功模态框(successModal)」。
+        //   之前 isSuccess=!hasRealError&&!draftLike 纯靠"无错兜底"，而存草稿也无校验错误、
+        //   stillSubmitBtn 又未必抓到 → 放行假成功(商品其实在草稿箱)。诊断行坐实:posOk=true 但
+        //   okUrl/成功弹窗全 false(存草稿的"提交成功"toast 骗过了 posOk)。
+        //   改为要求正向硬信号:必须 okUrl 或 成功弹窗为真(页面确实跳转/弹窗)才算真成功;
+        //   posOk 文案单独不算数(草稿也弹)。仍保留 !hasRealError && !draftLike 作前置否决。
+        const hardSuccess = okUrl || !!successModal;
+        const isSuccess = hardSuccess && !hasRealError && !draftLike;
 
         if (isSuccess) {
             progress(100, '商品发布成功');
@@ -2156,6 +2161,12 @@ async function main() {
                 // 无校验错误但是草稿态：提交没真正发布(常因二次确认弹窗没点/账号需资质)，商品留在草稿箱。
                 error('上架未成功：商品疑似只存入草稿箱未发布(提交按钮仍在=' + signals.stillSubmitBtn
                     + ', 存草稿信号=' + signals.savedDraft + ')。请看 submit_result.png 确认是否有未点的确认弹窗，日志把发布结果诊断行发回排查。');
+            } else if (!hasRealError && !draftLike && !hardSuccess) {
+                // #4 假成功修：无校验错误、无草稿信号,但也没有正向硬信号(未跳转、无成功弹窗)。
+                //   最常见就是"只弹了提交成功 toast 但实际存进草稿箱"——posOk 单独不可信。
+                error('上架未成功：未检测到发布成功的跳转/成功弹窗(仅有成功文案 posOk=' + signals.posOk
+                    + ', okUrl=' + okUrl + ', 成功弹窗=' + !!successModal + ')，商品疑似只存入草稿箱。'
+                    + '请到商家后台确认商品是否真在售;若真已发布成功,把 submit_result.png 和发布结果诊断行发回,调正向信号识别。');
             } else {
                 error('上架未成功：存在未处理的必填/校验项(' + submitResultUrl + ')。页面提示: ' + joined);
             }
