@@ -243,9 +243,15 @@ export function useGen() {
       const d = await api.post('/api/gen/inpaint', fd)   // api.js 对 FormData 自动 multipart
       if (d.error) throw new Error(d.error)
       if (!d.imageRef) throw new Error('未返回 imageRef')
-      // 原地替换第 i 张(同 regenImage 模式)
-      const arr = kind === 'detail' ? ctx.visual?.detailImages : ctx.visual?.mainImages
-      if (arr && i < arr.length) arr[i] = d.imageRef
+      // 原地替换第 i 张(同 regenImage 模式)。SKU 图存 plans.items.imgDir,主图/详情存 visual.*Images。
+      if (kind === 'sku') {
+        const st = ctx.structure
+        const it = st?.plans?.[st.selectedPlanIndex || 0]?.items?.[i]
+        if (it) it.imgDir = d.imageRef
+      } else {
+        const arr = kind === 'detail' ? ctx.visual?.detailImages : ctx.visual?.mainImages
+        if (arr && i < arr.length) arr[i] = d.imageRef
+      }
       await ctxStore.save?.()
       await ctxStore.load(ctxStore.contextId)
       gen.msg = `第 ${i + 1} 张已局部重绘`

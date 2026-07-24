@@ -369,14 +369,19 @@ onMounted(() => {
                 </div>
               </div>
             </div>
-            <!-- SKU图(当前方案各item的成品图);点开看大图 -->
+            <!-- SKU图(当前方案各item的成品图);点开看大图 + hover 重绘(回写 plans.items.imgDir) -->
             <div v-if="currentItems.some((it) => it.imgDir)" class="psec">
-              <div class="psec-t">SKU 图（方案{{ selectedPlan + 1 }}）· 点击看大图</div>
+              <div class="psec-t">SKU 图（方案{{ selectedPlan + 1 }}）· 点击看大图，悬停可重绘</div>
               <div class="pgrid">
                 <template v-for="(it, i) in currentItems" :key="'s' + i">
-                  <el-image v-if="it.imgDir" :src="imgUrl(it.imgDir)"
-                    :preview-src-list="currentItems.filter((x) => x.imgDir).map((x) => imgUrl(x.imgDir))"
-                    fit="contain" preview-teleported hide-on-click-modal :title="it.skuDisplayName || it.name" />
+                  <div v-if="it.imgDir" class="pcell">
+                    <el-image :src="imgUrl(it.imgDir)"
+                      :preview-src-list="currentItems.filter((x) => x.imgDir).map((x) => imgUrl(x.imgDir))"
+                      fit="contain" preview-teleported hide-on-click-modal :title="it.skuDisplayName || it.name" />
+                    <div class="img-btns">
+                      <el-button size="small" @click="openInpaint('sku', i, it.imgDir)">重绘</el-button>
+                    </div>
+                  </div>
                 </template>
               </div>
             </div>

@@ -13,6 +13,13 @@ export const useImportStore = defineStore('importFlow', {
     msgType: '',
     done: false,
     lastImportedFolder: '',
+    // 识别/生成分离：识别段完成后停在确认页,存识别结果供确认+回传生成段。
+    recognized: false, // 识别完成、等用户确认生成
+    recCategory: '', // 识别出的品类
+    recProductName: '', // 识别出的主件名
+    recSkus: [], // 识别出的主件+配件清单 [{itemCode,name,role}],确认后回传 /generate-layout
+    recWarnings: [], // 识别段告警
+    styled: false, // 是否已风格迁移:迁移前导入的原图不给重生/重绘,迁移后才给
   }),
   actions: {
     reset() {
@@ -23,6 +30,12 @@ export const useImportStore = defineStore('importFlow', {
       this.msg = ''
       this.msgType = ''
       this.done = false
+      this.recognized = false
+      this.recCategory = ''
+      this.recProductName = ''
+      this.recSkus = []
+      this.recWarnings = []
+      this.styled = false
     },
   },
 })
