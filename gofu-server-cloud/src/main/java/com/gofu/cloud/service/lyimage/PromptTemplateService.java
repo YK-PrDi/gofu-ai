@@ -241,14 +241,29 @@ public class PromptTemplateService {
                 }
             } else return List.of();
             if (entries.isEmpty()) return List.of();
-            // 打乱后取 count 套；不足则循环补（跨次随机→防同质化）
+            // 打乱后取 count 套；不足则循环补。#2 主图重复修(07.24)：库母题数 < count 时,
+            //   原来 pool.get(i%size) 直接循环重取同一套→主图肉眼可见重复。改:重复取的那几张(i>=size)
+            //   追加"换机位/角度/景别"微扰指令,让复用的构图母题至少在角度/景别上错开,减少雷同。
+            //   (治本仍需给该品类补够构图库母题,属长期数据活。)
             List<Map<String, Object>> pool = new java.util.ArrayList<>(entries);
             java.util.Collections.shuffle(pool);
+            // 微扰词库:重复复用构图时轮流追加,强制换视角(与母题正交,不改主体)。
+            String[] variations = {
+                "改用俯视/高角度机位", "改用低角度仰视机位", "改用 45° 侧前方机位",
+                "拉近成特写景别(突出细节)", "拉远成全景景别(带环境)", "换到画面另一侧构图、光从对侧打"
+            };
             List<String> out = new java.util.ArrayList<>();
+            int poolSize = pool.size();
             for (int i = 0; i < count; i++) {
-                Map<String, Object> e = pool.get(i % pool.size());
+                Map<String, Object> e = pool.get(i % poolSize);
                 String p = String.valueOf(e.getOrDefault("prompt", "")).trim();
-                if (!p.isBlank()) out.add(p);
+                if (p.isBlank()) continue;
+                // 第 2 轮起(i>=poolSize)复用了同一母题→追加微扰,避免与前面某张完全雷同
+                if (i >= poolSize) {
+                    String v = variations[(i - poolSize) % variations.length];
+                    p = p + "\n【防重复·本张换视角】" + v + "，与前面同构图的那张明显区分开，不得雷同。";
+                }
+                out.add(p);
             }
             return out;
         } catch (Exception e) {

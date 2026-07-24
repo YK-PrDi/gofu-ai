@@ -898,6 +898,32 @@ public class FlowController {
      * 抽出供 step-all 交叉调用(runStep2 保持内联不动,隔离手选方案路径风险)。
      * @param mainLocal 已本地化的对应主图路径(作 ref+base)  @param white 兜底白底
      */
+    /**
+     * 详情图 prompt（#1 卖点不对应修，07.24）。根因：原 prompt 只说"铺陈卖点信息"、没给具体文字，
+     * gpt-image 自己乱编 → 文字与画面/功能不符、还带错别字("工打磨"等)。
+     * 改：把 context 已提取的**真实卖点**显式传入,强约束"只渲染给定文字、逐字照抄、禁止自造/改写/编造功能"。
+     * 无卖点时退回原通用话术(不强塞)。这是 A 方案(prompt 层缓解);若中文渲染错别字仍严重再上 B(Canvas 合成)。
+     */
+    private String buildDetailPrompt(ProductContext ctx, int idx) {
+        List<String> sp = ctx.getVisual() != null ? ctx.getVisual().getSellingPoints() : null;
+        StringBuilder dp = new StringBuilder(
+            "将所给的第 " + (idx + 1) + " 张主图重新排版为 9:16 竖版电商详情图，"
+            + "产品主体、颜色、角度、结构与该主图严格保持一致，纵向铺陈，适合详情页竖版展示。");
+        if (sp != null && !sp.isEmpty()) {
+            // 每张详情轮取一个卖点作主标题(跨张不同),避免多张都堆同一句;全部卖点作可选文案池。
+            String primary = sp.get(idx % sp.size());
+            dp.append("\n【画面文案·硬性要求】图上的卖点文字【只能】从下面这几条里【逐字照抄】，")
+              .append("严禁自己编造、改写、缩写或臆造产品并不具备的功能；每个字都必须来自给定文案，")
+              .append("不认识的功能一律不写。本图主标题用：「").append(primary).append("」。")
+              .append("可选副文案（择需选用，同样逐字照抄，不要全堆上去）：")
+              .append(String.join("、", sp)).append("。")
+              .append("\n【严禁】出现给定文案之外的任何中文卖点词、错别字、生造词。");
+        } else {
+            dp.append("纵向铺陈场景，不要在图上编造任何具体功能卖点文字（宁可少写也不要写错）。");
+        }
+        return dp.toString();
+    }
+
     private void genOneDetail(ProductContext ctx, GenerationTask task, int idx, String mainLocal, String white, File tmpOut) {
         try {
             if (task.isCancelled()) return;
@@ -908,8 +934,7 @@ public class FlowController {
                 List<String> refs = mainLocal != null ? List.of(mainLocal) : List.of();
                 String baseForDetail = mainLocal != null ? mainLocal : white;
                 String out = new File(tmpOut, "detail-" + idx + ".jpg").getAbsolutePath();
-                String dp = "将所给的第 " + (idx + 1) + " 张主图重新排版为 9:16 竖版电商详情图，"
-                        + "产品主体、颜色、角度与该主图保持一致，纵向铺陈场景与卖点信息，适合详情页竖版展示。";
+                String dp = buildDetailPrompt(ctx, idx);
                 if (baseForDetail != null && genWithRetry(dp, refs, baseForDetail, out, "9:16", 2))
                     streamDetailSlot(ctx, idx, uploadIfCos(out));
             } finally { GEN_CONC.release(); }
@@ -1023,8 +1048,7 @@ public class FlowController {
                             List<String> refs = mainLocal != null ? List.of(mainLocal) : (refMain.isBlank() ? List.of() : List.of(refMain));
                             String baseForDetail = mainLocal != null ? mainLocal : white;   // 优先用对应主图,兜底白底
                             String out = new File(tmpOut, "detail-" + idx + ".jpg").getAbsolutePath();
-                            String dp = "将所给的第 " + (idx + 1) + " 张主图重新排版为 9:16 竖版电商详情图，"
-                                    + "产品主体、颜色、角度与该主图保持一致，纵向铺陈场景与卖点信息，适合详情页竖版展示。";
+                            String dp = buildDetailPrompt(ctx, idx);
                             if (baseForDetail != null && genWithRetry(dp, refs, baseForDetail, out, "9:16", 2)) {
                                 dKeys[idx] = uploadIfCos(out);
                                 streamDetailSlot(ctx, idx, dKeys[idx]);   // 8d:完成即写槽位+save,前端逐张可见
@@ -1193,7 +1217,7 @@ public class FlowController {
                 String mref = (index < mains.size()) ? localizeWhite(mains.get(index)) : null;
                 List<String> refs = mref != null ? List.of(mref) : List.of();
                 String base = mref != null ? mref : white;
-                String dp = "将所给主图重新排版为 9:16 竖版电商详情图，产品主体/颜色/角度与该主图一致，纵向铺陈卖点，适合详情页。";
+                String dp = buildDetailPrompt(ctx, index);
                 if (!genWithRetry(dp, refs, base, out, "9:16", 2)) return ResponseEntity.internalServerError().body(Map.of("error", "详情图重生失败"));
                 key = uploadIfCos(out);
                 if (index < ctx.getVisual().getDetailImages().size()) ctx.getVisual().getDetailImages().set(index, key);

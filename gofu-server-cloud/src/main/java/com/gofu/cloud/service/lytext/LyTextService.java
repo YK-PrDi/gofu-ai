@@ -105,6 +105,43 @@ public class LyTextService {
 
     // ── 标题生成 ─────────────────────────────────────────────────────────
 
+    /** 拼多多标题上限：60 个字符(汉字/全角=2，ascii=1)，即 30 个汉字。 */
+    private static final int PDD_TITLE_MAX_CHARS = 60;
+
+    /** 拼多多字符计法长度：汉字/全角字符算 2，其余算 1。 */
+    private static int pddCharLen(String s) {
+        if (s == null) return 0;
+        int n = 0;
+        for (int i = 0; i < s.length(); i++) n += s.charAt(i) > 0xFF ? 2 : 1;
+        return n;
+    }
+
+    /**
+     * 标题硬截断（#6 超长修，07.24）。根因：三个标题生成方法只在 prompt 里嘱咐"30汉字/60字符"，
+     * 但 LLM 常写超(实测 62 字符)，正常返回路径无硬校验 → 上架被拼多多"标题最多30汉字"拦下。
+     * 这里对 result.title 按拼多多字符计法(汉字=2)硬截断到 ≤60，且不截半个字符。
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> clampTitle(Map<String, Object> result) {
+        if (result == null) return result;
+        Object t = result.get("title");
+        if (!(t instanceof String s) || s.isBlank()) return result;
+        s = s.trim();
+        if (pddCharLen(s) <= PDD_TITLE_MAX_CHARS) return result;
+        int used = 0;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            int c = s.charAt(i) > 0xFF ? 2 : 1;
+            if (used + c > PDD_TITLE_MAX_CHARS) break;   // 不截半个字符
+            sb.append(s.charAt(i));
+            used += c;
+        }
+        String clamped = sb.toString().trim();
+        log.warn("[标题超长截断] {} 字符 → {} 字符: 「{}」→「{}」", pddCharLen(s), pddCharLen(clamped), s, clamped);
+        result.put("title", clamped);
+        return result;
+    }
+
     /** 纯文本生成标题+款式名（无图）。 */
     public Map<String, Object> prepareWithAI(String productType, String productName,
                                              String brand, List<String> skuColors) {
@@ -120,7 +157,7 @@ public class LyTextService {
             "{\"title\":\"商品标题\",\"skuNames\":{\"颜色1\":\"款式名1\",\"颜色2\":\"款式名2\"}}",
             productType, productName, brandStr, colorsStr);
         try {
-            return parseJsonObject(imageGenService.geminiText(prompt, null));
+            return clampTitle(parseJsonObject(imageGenService.geminiText(prompt, null)));
         } catch (Exception e) {
             log.error("AI 生成标题失败: {}", e.getMessage(), e);
             Map<String, Object> fallback = new LinkedHashMap<>();
@@ -167,7 +204,7 @@ public class LyTextService {
             "{\"title\":\"商品标题\",\"skuNames\":{\"SKU1\":\"款式名1\",\"SKU2\":\"款式名2\"}}",
             refBlock, catLeaf, materialStr, brandStr, skuStr, brandStr2);
         try {
-            return parseJsonObject(imageGenService.geminiText(prompt, imgPaths));
+            return clampTitle(parseJsonObject(imageGenService.geminiText(prompt, imgPaths)));
         } catch (Exception e) {
             log.error("看图生成标题失败: {}", e.getMessage(), e);
             Map<String, Object> fallback = prepareFromTitleLib(category, material, brand, skuNames);
@@ -198,7 +235,7 @@ public class LyTextService {
                 "2. " + brandRule + "\n3. 同时为每个 SKU 名生成一个 15 字以内的款式名，风格与标题一致。\n\n" +
                 "请严格按以下JSON格式返回，不要有其他内容：\n" +
                 "{\"title\":\"商品标题\",\"skuNames\":{\"SKU1\":\"款式名1\"}}";
-            return parseJsonObject(imageGenService.geminiText(prompt, null));
+            return clampTitle(parseJsonObject(imageGenService.geminiText(prompt, null)));
         } catch (Exception e) {
             log.error("标题库生成标题失败: {}", e.getMessage(), e);
             Map<String, Object> fallback = prepareWithAI(catLeaf, catLeaf, brand, skuNames);
@@ -294,7 +331,38 @@ public class LyTextService {
             planCount, mainCount, planCount, planCount, sellingBlock,
             category, productName, brand, material, mainLines, accLines, batchLines, namingSpec);
 
-        return parseJsonObject(imageGenService.geminiText(prompt, null));
+        Map<String, Object> result = parseJsonObject(imageGenService.geminiText(prompt, null));
+        // 权威真码带出:LLM 照抄长编码常篡改/截断(如 GF-喜人锅盖架-三层-白 → GF-喜人锅盖架-备)。
+        // flattenPlans 用这份原始清单把 LLM 回传的 itemCode 校正回真码,不信 LLM 的编码。
+        if (result != null) {
+            List<String> realMainCodes = new ArrayList<>();
+            List<String> realAllCodes = new ArrayList<>();
+            for (Map<String, Object> s : skus) {
+                String c = String.valueOf(s.getOrDefault("itemCode", "")).trim();
+                if (c.isEmpty()) continue;
+                realAllCodes.add(c);
+                if (!"accessory".equals(String.valueOf(s.getOrDefault("role", "main")))
+                        && !"batch".equals(String.valueOf(s.getOrDefault("role", "main")))) realMainCodes.add(c);
+            }
+            result.put("__mainCodes", realMainCodes);
+            result.put("__allCodes", realAllCodes);
+        }
+        return result;
+    }
+
+    /**
+     * 把 LLM 回传的编码校正回权威真码：完全相等直接用；否则找"真码以 LLM 码为前缀"或"LLM 码以真码为前缀"
+     * 的唯一匹配(应对 LLM 截断/补尾);仍无唯一匹配则原样返回(不瞎改)。
+     */
+    private static String correctCode(String llmCode, List<String> realCodes) {
+        if (llmCode == null) return "";
+        String c = llmCode.trim();
+        if (realCodes == null || realCodes.isEmpty()) return c;
+        if (realCodes.contains(c)) return c;                    // 精确命中
+        List<String> pref = new ArrayList<>();
+        for (String r : realCodes) if (r.startsWith(c) || c.startsWith(r)) pref.add(r);
+        if (pref.size() == 1) return pref.get(0);               // 唯一前缀匹配→校正
+        return c;                                               // 多义/无匹配:不瞎改,保留原值
     }
 
     /**
@@ -314,6 +382,12 @@ public class LyTextService {
         Object rawPlans = llmResult.get("plans");
         if (!(rawPlans instanceof List)) return out;
 
+        // 权威真码清单(generateSkuPlans 带出):用于把 LLM 篡改/截断的编码校正回真码。
+        List<String> realMainCodes = llmResult.get("__mainCodes") instanceof List
+                ? (List<String>) llmResult.get("__mainCodes") : List.of();
+        List<String> realAllCodes = llmResult.get("__allCodes") instanceof List
+                ? (List<String>) llmResult.get("__allCodes") : List.of();
+
         for (Object po : (List<Object>) rawPlans) {
             if (!(po instanceof Map)) continue;
             Map<String, Object> pm = (Map<String, Object>) po;
@@ -328,10 +402,13 @@ public class LyTextService {
             if (models.isEmpty()) models = List.of(Map.of("specName", "单品", "components", List.of()));
 
             for (Map<String, Object> main : mainItems) {
-                String mainCode = String.valueOf(main.getOrDefault("itemCode", ""));
+                String rawCode = String.valueOf(main.getOrDefault("itemCode", ""));
+                String mainCode = correctCode(rawCode, realMainCodes);   // 校正回权威真码
+                if (!mainCode.equals(rawCode.trim()))
+                    log.info("[SKU编码校正] LLM 回传「{}」→ 真码「{}」", rawCode, mainCode);
                 String mainSpec = String.valueOf(main.getOrDefault("specName", ""));
                 for (Map<String, Object> model : models) {
-                    plan.getItems().add(buildItem(mainCode, mainSpec, model));
+                    plan.getItems().add(buildItem(mainCode, mainSpec, model, realAllCodes));
                 }
             }
             out.add(plan);
@@ -341,7 +418,7 @@ public class LyTextService {
 
     /** 组合一个 SKU 条目：主件 × 单个型号。itemCode 拼 `主件码+配件码*N`，accParts 结构化。 */
     @SuppressWarnings("unchecked")
-    private SkuItem buildItem(String mainCode, String mainSpec, Map<String, Object> model) {
+    private SkuItem buildItem(String mainCode, String mainSpec, Map<String, Object> model, List<String> realAllCodes) {
         String modelSpec = String.valueOf(model.getOrDefault("specName", ""));
         List<Map<String, Object>> comps = asMapList(model.get("components"));
 
@@ -358,7 +435,7 @@ public class LyTextService {
 
         StringBuilder code = new StringBuilder(mainCode);
         for (Map<String, Object> c : comps) {
-            String ccode = String.valueOf(c.getOrDefault("itemCode", ""));
+            String ccode = correctCode(String.valueOf(c.getOrDefault("itemCode", "")), realAllCodes);  // 配件码也校正回真码
             if (ccode.isBlank()) continue;
             int qty = c.get("qty") instanceof Number n ? n.intValue() : 1;
             code.append("+").append(ccode).append("*").append(qty);
