@@ -154,6 +154,162 @@ public class FlowController {
     }
 
     /**
+     * 产品替换（权宜之计·抽卡档）。生图质量不够时的临时手段：拿现成好构图的参考图，只替换其中的产品主体为
+     * 自家白底新品、构图近似保留，靠模型随机性抽多张凑满 count 张，供人工筛 6 张后走既有链上新。
+     * 独立命名（replace-*），生图质量起来后整块删除，不污染 step1/step-all。
+     *
+     * <p>入参 {@code { contextId, refImages:[url...], whiteBg?, count?=100 }}。whiteBg 缺省取
+     * context.visual.whiteImages[0]。<b>不出方案(plans)</b>——筛 6 后前端覆写 mainImages 再调 generate-layout。
+     * 立即返回 {@code {taskId,total,contextId,refCount}}，前端轮询 GET /api/flow/task/{taskId}。
+     */
+    @PostMapping("/replace-mains")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<Map<String, Object>> replaceMains(@RequestBody Map<String, Object> body) {
+        try {
+            String contextId = (String) body.get("contextId");
+            if (contextId == null || contextId.isBlank())
+                return ResponseEntity.badRequest().body(Map.of("error", "contextId 必填"));
+            ProductContext ctx = contextService.findById(contextId);
+            if (ctx == null) return ResponseEntity.status(404).body(Map.of("error", "context 不存在"));
+
+            // 参考图本地化：data URL 落地、http/COS key/本地路径原样（与 step1 白底图同款处理）。
+            List<String> rawRefs = (List<String>) body.getOrDefault("refImages", List.of());
+            List<String> refImages = new ArrayList<>();
+            for (String r : rawRefs) {
+                if (r == null || r.isBlank()) continue;
+                if (r.startsWith("data:")) {
+                    String local = localizeWhite(r);
+                    if (local != null) refImages.add(local);
+                    else log.warn("[产品替换] 参考图 data URL 本地化失败，已丢弃");
+                } else refImages.add(r);
+            }
+            if (refImages.isEmpty())
+                return ResponseEntity.badRequest().body(Map.of("error", "refImages 必填（至少 1 张参考图）"));
+
+            // 产品白底图：入参优先，缺则取 context.visual.whiteImages[0]。
+            String whiteBg = body.get("whiteBg") instanceof String s && !s.isBlank() ? s : null;
+            if (whiteBg == null) {
+                List<String> ws = ctx.getVisual().getWhiteImages();
+                if (ws != null && !ws.isEmpty()) whiteBg = ws.get(0);
+            }
+            if (whiteBg == null || whiteBg.isBlank())
+                return ResponseEntity.badRequest().body(Map.of("error", "无产品白底图（请传 whiteBg 或先在 context 存白底图）"));
+
+            int count = body.get("count") instanceof Number n ? Math.max(1, n.intValue()) : 100;
+
+            String taskId = "replace-" + System.nanoTime();
+            GenerationTask task = new GenerationTask(taskId, count);
+            task.setStatus("running");
+            flowTasks.put(taskId, task);
+            final String fWhiteBg = whiteBg;
+            final int fCount = count;
+            imageGen.getExecutor().submit(() -> {
+                try {
+                    genReplaceMains(ctx, refImages, fWhiteBg, fCount, task);
+                    task.setStatus("done");
+                } catch (Exception e) {
+                    log.error("replace-mains 异步失败: {}", e.getMessage(), e);
+                    task.addResult(Map.of("message", "产品替换失败：" + e.getMessage()));
+                    task.setStatus("error");
+                }
+            });
+
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("taskId", taskId);
+            resp.put("total", count);
+            resp.put("contextId", ctx.getId());
+            resp.put("refCount", refImages.size());
+            return ResponseEntity.ok(resp);
+        } catch (Exception e) {
+            log.error("replace-mains 编排失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body(Map.of("error", "replace-mains 失败：" + e.getMessage()));
+        }
+    }
+
+    /**
+     * 产品替换工作体（抽卡档）：对每张参考图，只替换其中的产品主体为白底产品、构图近似保留，靠模型随机性
+     * 抽多张变体凑满 count 张。分配：base=count/N，余 count%N 摊到前几张参考图（例 6 参考图凑 100 → 每张 16、前 4 张各 +1）。
+     * 结果流式写 ctx.visual.mainImages（与 genAllMains 同款预分配 null 槽 + 逐张 streamMainSlot），前端轮询逐张可见。
+     * refs=[白底产品, 参考图]——两图都进 refImagePaths（GptImageAgent.generateMulti 只用该列表），prompt 明确各自角色。
+     */
+    private void genReplaceMains(ProductContext ctx, List<String> refImages, String whiteBg, int count, GenerationTask task) {
+        String white = localizeWhite(whiteBg);
+        if (white == null) throw new RuntimeException("产品白底图无法本地化");
+        List<String> localRefs = new ArrayList<>();
+        for (String r : refImages) {
+            String lr = localizeWhite(r);
+            if (lr != null) localRefs.add(lr);
+            else log.warn("[产品替换] 参考图本地化失败，跳过: {}", r);
+        }
+        if (localRefs.isEmpty()) throw new RuntimeException("全部参考图无法本地化");
+        int n = localRefs.size();
+
+        File tmpOut = new File(appProperties.getPaths().getTempOutputDir(), "replace-" + System.nanoTime());
+        tmpOut.mkdirs();
+        String aspect = resolveAutoAspect("auto", localRefs.get(0));   // 画幅按参考图吸附（保留构图）
+
+        // 分配：base=count/N，extra=count%N 摊到前 extra 张参考图
+        int base = count / n, extra = count % n;
+        int[] perRef = new int[n];
+        for (int i = 0; i < n; i++) perRef[i] = base + (i < extra ? 1 : 0);
+
+        // 预分配 count 个 null 槽，逐张完成即写（前端逐张可见），末尾 compact 掉未出的
+        synchronized (ctx) {
+            List<String> mi = ctx.getVisual().getMainImages();
+            mi.clear();
+            for (int i = 0; i < count; i++) mi.add(null);
+        }
+        contextService.save(ctx);
+
+        String prompt = "参考图共两张：第一张为产品白底图（要替换进去的目标产品），第二张为构图参考图。"
+                + "请严格保留第二张参考图的构图、背景、场景、版式与镜头角度，仅把其中原有的产品主体替换为第一张白底图中的产品，"
+                + "使新产品自然融入原位置。不要改变构图布局、不要改变背景，只替换产品主体本身。";
+
+        String[] keys = new String[count];
+        List<java.util.concurrent.CompletableFuture<Void>> futures = new ArrayList<>();
+        int slot = 0;
+        for (int ri = 0; ri < n; ri++) {
+            final String refLocal = localRefs.get(ri);
+            for (int k = 0; k < perRef[ri]; k++) {
+                final int idx = slot++;
+                futures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
+                    try {
+                        if (task.isCancelled()) return;
+                        GEN_CONC.acquire();
+                        try {
+                            if (task.isCancelled()) return;
+                            task.setCurrentProduct("产品替换 " + (idx + 1) + "/" + count);
+                            String out = new File(tmpOut, "rep-" + idx + ".jpg").getAbsolutePath();
+                            List<String> refs = List.of(white, refLocal);   // [白底产品, 参考图]
+                            if (genWithRetry(prompt, refs, white, out, aspect, 2)) {
+                                keys[idx] = uploadIfCos(out);
+                                streamMainSlot(ctx, idx, keys[idx]);
+                            } else {
+                                task.addResult(Map.of("message", "第 " + (idx + 1) + " 张替换失败"));
+                            }
+                        } finally { GEN_CONC.release(); }
+                    } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                    catch (Exception e) {
+                        task.addResult(Map.of("message", "第 " + (idx + 1) + " 张异常: " + e.getMessage()));
+                    }
+                    finally { task.incrementProgress(); }
+                }, imageGen.getExecutor()));
+            }
+        }
+        java.util.concurrent.CompletableFuture.allOf(futures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
+
+        int okCount;
+        synchronized (ctx) {
+            List<String> mi = ctx.getVisual().getMainImages();
+            mi.removeIf(java.util.Objects::isNull);
+            okCount = mi.size();
+        }
+        contextService.save(ctx);
+        log.info("[产品替换] contextId={} 参考图{}张 目标{}张 → 成功{}张", ctx.getId(), n, count, okCount);
+        if (okCount == 0) throw new RuntimeException("产品替换全部失败（共 " + count + " 张，成功 0 张）");
+    }
+
+    /**
      * step1 主图工作体（M11：改用羽刃自定义模式——先视觉分析真实白底图出产品专属提示词，再逐张生图）。
      * 每张主图用各自的分析段 prompt(不再套静态模板)；首图作基调、2~N 以首图为参考保持系列一致。
      * 分析失败则降级用 buildMainPrompt。customRequest 为空则自动按品类/卖点/主件名生成。
@@ -899,29 +1055,26 @@ public class FlowController {
      * @param mainLocal 已本地化的对应主图路径(作 ref+base)  @param white 兜底白底
      */
     /**
-     * 详情图 prompt（#1 卖点不对应修，07.24）。根因：原 prompt 只说"铺陈卖点信息"、没给具体文字，
-     * gpt-image 自己乱编 → 文字与画面/功能不符、还带错别字("工打磨"等)。
-     * 改：把 context 已提取的**真实卖点**显式传入,强约束"只渲染给定文字、逐字照抄、禁止自造/改写/编造功能"。
-     * 无卖点时退回原通用话术(不强塞)。这是 A 方案(prompt 层缓解);若中文渲染错别字仍严重再上 B(Canvas 合成)。
+     * 详情图 prompt（#1 卖点不对应·07.28 重修）。
+     * <p>根因（用户指正）：详情图=把对应主图【改比例】而来（以该主图作 ref+base），主图上已渲染好它自己那张
+     * 被分配的卖点文案（来自 {@code sellPointFor(idx, libSellPoints, hiConv)}）。而旧逻辑却在详情 prompt 里
+     * 从【另一套来源】{@code visual.sellingPoints[idx%size]} 再抠一个卖点重新盖上去——两套来源不同→详情文字与
+     * 它所源出的主图文字对不上；且 runStep2 路径下主图那次分配早已出栈，根本无从对齐。
+     * <p>修法（忠于源头，不再由详情侧另行编文案）：把源主图当唯一事实来源，指令模型
+     * **原样保留参考主图上已有的中文文案（逐字、位置、层级不改），仅做 9:16 竖版重排**；
+     * 严禁新增/改写/删减/臆造任何卖点文字。主图若本就无字，则详情也不强塞（宁缺勿错）。
+     * 卖点文案是否正确、是否有错别字，交由主图生成侧（buildSeriesPrompt 的画面文案）治理，详情不越权。
      */
     private String buildDetailPrompt(ProductContext ctx, int idx) {
-        List<String> sp = ctx.getVisual() != null ? ctx.getVisual().getSellingPoints() : null;
-        StringBuilder dp = new StringBuilder(
-            "将所给的第 " + (idx + 1) + " 张主图重新排版为 9:16 竖版电商详情图，"
-            + "产品主体、颜色、角度、结构与该主图严格保持一致，纵向铺陈，适合详情页竖版展示。");
-        if (sp != null && !sp.isEmpty()) {
-            // 每张详情轮取一个卖点作主标题(跨张不同),避免多张都堆同一句;全部卖点作可选文案池。
-            String primary = sp.get(idx % sp.size());
-            dp.append("\n【画面文案·硬性要求】图上的卖点文字【只能】从下面这几条里【逐字照抄】，")
-              .append("严禁自己编造、改写、缩写或臆造产品并不具备的功能；每个字都必须来自给定文案，")
-              .append("不认识的功能一律不写。本图主标题用：「").append(primary).append("」。")
-              .append("可选副文案（择需选用，同样逐字照抄，不要全堆上去）：")
-              .append(String.join("、", sp)).append("。")
-              .append("\n【严禁】出现给定文案之外的任何中文卖点词、错别字、生造词。");
-        } else {
-            dp.append("纵向铺陈场景，不要在图上编造任何具体功能卖点文字（宁可少写也不要写错）。");
-        }
-        return dp.toString();
+        return "将所给的第 " + (idx + 1) + " 张主图重新排版为 9:16 竖版电商详情图，"
+            + "产品主体、颜色、角度、结构与该主图严格保持一致，适合详情页竖版展示。"
+            + "\n【如何达到 9:16·关键】主图多为近方形(1:1)，转竖版必须【纵向扩展画布】(在上方/下方补足同风格的背景或场景延伸)来变高，"
+            + "【严禁横向裁切/收窄画面两侧】——原主图的全部横向内容(产品与文字)必须完整保留在画面内，一个像素都不许被切到画框外。"
+            + "\n【画面文案·硬性要求】以该参考主图为唯一事实来源：图上【已有的中文文案完整保留、逐字不变】，"
+            + "每一个字都要完整显示、不得被裁掉半个字或截断成不完整词；随竖版重排时若某行放不下，就【整行换行折行】显示，"
+            + "绝不缩掉、切掉或省略任何文字；保持原有主/副标题层级。"
+            + "\n【严禁】新增、改写、缩写、删减、截断或臆造任何卖点文字，严禁出现参考主图上没有的中文词、"
+            + "错别字或生造词；若参考主图本就没有文案，则详情也不要凭空编造功能卖点文字（宁可少写也不要写错）。";
     }
 
     private void genOneDetail(ProductContext ctx, GenerationTask task, int idx, String mainLocal, String white, File tmpOut) {

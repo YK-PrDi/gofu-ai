@@ -165,12 +165,15 @@ export function readOrderRows(bytes) {
   const sheet = parseXml(text(archive, resolveSheet(archive)));
   const strings = sharedStrings(archive);
   const header = elements(sheet, "row").find((row) => Number(row.getAttribute("r")) === 1);
-  const statusColumn = header
-    ? Array.from(header.childNodes)
-      .filter((node) => node.nodeType === 1 && node.localName === "c")
-      .find((cell) => cellValue(cell, strings).trim() === "补发状态")
-    : null;
+  const headerCells = header
+    ? Array.from(header.childNodes).filter((node) => node.nodeType === 1 && node.localName === "c")
+    : [];
+  const statusColumn = headerCells.find((cell) => cellValue(cell, strings).trim() === "补发状态");
   const statusColumnName = columnFromReference(statusColumn?.getAttribute("r"));
+  // 「是否按新地址登记」列(07.28)：该列有文字=需人工按新地址处理,自动化处理不了→上层标红跳过。
+  // 表头用包含匹配「新地址」(比精确匹配鲁棒,容忍"是否按新地址登记/新地址/按新地址"等细微出入)。
+  const newAddressColumn = headerCells.find((cell) => cellValue(cell, strings).includes("新地址"));
+  const newAddressColumnName = columnFromReference(newAddressColumn?.getAttribute("r"));
   const output = [];
   for (const row of elements(sheet, "row")) {
     const number = Number(row.getAttribute("r"));
@@ -183,6 +186,9 @@ export function readOrderRows(bytes) {
       merchantCode: cellValue(getCell(row, `D${number}`), strings).trim(),
       reshipStatus: statusColumnName
         ? cellValue(getCell(row, `${statusColumnName}${number}`), strings).trim()
+        : "",
+      newAddressNote: newAddressColumnName
+        ? cellValue(getCell(row, `${newAddressColumnName}${number}`), strings).trim()
         : "",
     });
   }

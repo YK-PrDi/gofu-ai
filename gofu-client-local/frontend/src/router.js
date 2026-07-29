@@ -15,6 +15,8 @@ const routes = [
       { path: 'single', name: 'single', component: () => import('@/views/SingleProduct.vue'), meta: { title: '单品上新', icon: 'Goods', zone: '运营' } },
       { path: 'batch', name: 'batch', component: () => import('@/views/BatchListing.vue'), meta: { title: '批量上新', icon: 'Files', zone: '运营' } },
       { path: 'import', name: 'import', component: () => import('@/views/ImportProduct.vue'), meta: { title: '导入建品', icon: 'Upload', zone: '运营' } },
+      // 权宜模块·产品替换(生图质量不足的临时手段,后续整体删除;物理隔离独立 view/路由)
+      { path: 'product-replace', name: 'product-replace', component: () => import('@/views/ProductReplace.vue'), meta: { title: '产品替换', icon: 'MagicStick', zone: '运营' } },
       { path: 'reship', name: 'reship', component: () => import('@/views/Reship.vue'), meta: { title: '订单补发', icon: 'RefreshRight', zone: '售后' } },
       { path: 'stores', name: 'stores', component: () => import('@/views/Stores.vue'), meta: { title: '店铺管理', icon: 'Shop', zone: '系统' } },
       { path: 'settings', name: 'settings', component: () => import('@/views/Settings.vue'), meta: { title: '设置', icon: 'Setting', zone: '系统' } },

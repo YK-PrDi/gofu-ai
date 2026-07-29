@@ -23,6 +23,17 @@ function maskedOrder(orderNo) {
   return value.length <= 6 ? value : `***${value.slice(-6)}`;
 }
 
+// 「是否按新地址登记」列判定:是否真的需要人工按新地址处理。
+// 只有【肯定登记了新地址】才跳过标红——否定值(否/无/不/暂无/-//等)和空一律"照常补发"。
+// 否定值命中即返回 false;其余任何非空文字视为"登记了新地址/写了具体地址"→需人工。
+function needsManualNewAddress(note) {
+  const v = String(note || "").trim();
+  if (!v) return false;
+  const negatives = new Set(["否", "无", "没有", "不", "不是", "不需要", "暂无", "-", "—", "/", "n", "no", "false", "0"]);
+  if (negatives.has(v.toLowerCase())) return false;
+  return true;
+}
+
 export class AutomationService {
   constructor({
     runner,
@@ -90,7 +101,14 @@ export class AutomationService {
       }
     }
 
-    if (orders.some((order) => !alreadyResentRows.has(order.row) && !remarkRows.has(order.row))) {
+    // 「是否按新地址登记」列=需人工按新地址处理才跳过(下方标红),这类行不进 ERP。
+    // 07.28 回归修:旧逻辑把该列【任何非空文字】都当"需人工"→ "否/无/-"等否定值也被误标红,
+    // 导致能补发的行(快麦查得到)反而失败。现只在【肯定值】(是/需要新地址/带具体地址)时才判需人工。
+    const newAddressRows = new Set(
+      orders.filter((order) => needsManualNewAddress(order.newAddressNote)).map((order) => order.row),
+    );
+
+    if (orders.some((order) => !alreadyResentRows.has(order.row) && !remarkRows.has(order.row) && !newAddressRows.has(order.row))) {
       await this.runner.start(request.erp, (event) => onProgress?.({ ...event, summary: { ...summary } }));
     }
 
@@ -103,7 +121,10 @@ export class AutomationService {
       });
 
       let result;
-      if (alreadyResentRows.has(order.row)) {
+      if (newAddressRows.has(order.row)) {
+        // 「是否按新地址登记」列有文字→需人工按新地址补发,自动化处理不了。ok:false 触发下方标红,并计失败(供运营看红行)。
+        result = { ok: false, code: "NEW_ADDRESS_MANUAL", message: `「是否按新地址登记」有内容(${order.newAddressNote})，需人工按新地址处理，已标红跳过` };
+      } else if (alreadyResentRows.has(order.row)) {
         result = { ok: true, code: "ALREADY_RESENT_SKIPPED", message: "补发状态为已补发，跳过" };
       } else if (remarkRows.has(order.row)) {
         result = { ok: true, code: "REMARK_ROUTED", message: "备注行已转 GOFU，跳过 ERP" };

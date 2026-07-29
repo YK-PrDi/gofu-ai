@@ -283,9 +283,12 @@ public class SemiAutoController {
 
     /**
      * 列出所有店铺 + 每店登录态。
-     * loggedIn 只表示"有过登录记录"（cookie 文件存在），不代表当前一定有效——
-     * 拼多多 token 会过期。lastActiveMs=cookie 文件最后写入时间（保活/登录/上新成功都会回写），
-     * 是登录新鲜度的代理：太久没刷新说明保活断了、登录很可能已失效。前端据此显示"可能过期"。
+     * <p>loggedIn 语义（07.28 修）：不再等于"cookie 文件存在"。用户反馈——换台电脑登录同店 / 本机没跑完扫码，
+     * 导致本机 storageState 是【空壳或半截】(Playwright 登录未完成时写 {@code {"cookies":[],"origins":[]}})，
+     * 却仍被判「已登录」。铁律：**没有成功保存有效登录态就不该显示已登录**。故 loggedIn 现在要求
+     * cookie 文件存在【且】能解析出【非空的 pdd 站点会话 cookie】(见 {@link #hasValidCookies})，否则视为未登录。
+     * <p>lastActiveMs=cookie 文件最后写入时间（保活每 8h/登录/上新成功都会回写），是登录新鲜度代理；
+     * 太久没刷新说明保活多次没成功、服务端 token 很可能已失效（如跨设备登录把本机挤下线），前端据此显示"可能过期"。
      */
     @GetMapping("/stores")
     public ResponseEntity<?> listStores() {
@@ -295,11 +298,34 @@ public class SemiAutoController {
             m.put("name", s.getName());
             m.put("profile", s.getProfile());
             File ck = new File(storeService.cookiesPathOf(s.getProfile()));
-            m.put("loggedIn", ck.isFile());
-            m.put("lastActiveMs", ck.isFile() ? ck.lastModified() : 0L);   // cookie 最后回写时间，前端判"可能过期"
+            boolean valid = ck.isFile() && hasValidCookies(ck);   // 文件存在≠登录成功;要求非空会话cookie
+            m.put("loggedIn", valid);
+            m.put("lastActiveMs", valid ? ck.lastModified() : 0L);   // 未有效登录则不给新鲜度,前端不显示"已登录"
             return m;
         }).toList();
         return ResponseEntity.ok(Map.of("stores", rows));
+    }
+
+    /**
+     * 判定一份 storageState(Playwright) 是否代表【真正保存成功】的登录态：文件能解析为 JSON、
+     * 且 {@code cookies} 数组非空（含拼多多站点的会话 cookie）。登录未完成/被清空时该数组为空 → 判未登录。
+     * 解析失败(文件损坏)一律按未登录处理（宁可提示重登，也不假显示已登录）。
+     */
+    private boolean hasValidCookies(File cookieFile) {
+        try {
+            String json = java.nio.file.Files.readString(cookieFile.toPath());
+            if (json == null || json.isBlank()) return false;
+            com.fasterxml.jackson.databind.JsonNode root =
+                new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+            // pdd_listing.js 实际写的是 context.cookies() 的【裸数组】[{name,value,...},...]，
+            // 不是 storageState 对象 {"cookies":[...],"origins":[...]}。两种都兼容：
+            //   裸数组 → 直接判 size>0；对象 → 取 cookies 字段判 size>0。
+            com.fasterxml.jackson.databind.JsonNode cookies =
+                root.isArray() ? root : root.get("cookies");
+            return cookies != null && cookies.isArray() && cookies.size() > 0;
+        } catch (Exception e) {
+            return false;   // 损坏/不可读 = 没成功保存登录态
+        }
     }
 
     /**

@@ -222,14 +222,31 @@ public class PromptTemplateService {
                 if (k.equals(leaf)) { node = e.getValue(); break; }
             }
             if (node == null) return List.of();
-            // 锅盖架等分组：node 是 {落地:[...],吸盘:[...]}；取对应组
+            // 分级版(_v=2)：品类节点两种形态——
+            //   ① 单节点 {_template, rows}（支架挂钩/置物架/卫浴置物架）。
+            //   ② 分组 {落地:{_template,rows}, 吸盘:{...}}（锅盖架，按 skuHint 挑组）。
+            //   花洒喷头仍是旧格式 List（每条带 baked prompt + focus 标记），按老路走。
+            // template 为空表示旧格式条目(自带 prompt)；非空则需 base=merge(_template,row) 现拼(排除禁止)。
             List<Map<String, Object>> entries;
+            Map<String, Object> template = null;
             if (node instanceof Map) {
-                Map<String, Object> groups = (Map<String, Object>) node;
-                String hint = skuHint == null ? "" : skuHint;
-                String group = (hint.contains("吸盘") || hint.contains("壁挂") || hint.contains("墙") || hint.contains("免钉")) ? "吸盘" : "落地";
-                if (!(groups.get(group) instanceof List)) group = groups.containsKey("落地") ? "落地" : groups.keySet().iterator().next();
-                entries = (List<Map<String, Object>>) groups.getOrDefault(group, List.of());
+                Map<String, Object> m0 = (Map<String, Object>) node;
+                Map<String, Object> leafNode;
+                if (m0.containsKey("rows")) {
+                    leafNode = m0;   // ① 单节点
+                } else {
+                    // ② 分组：skuHint 含 吸盘/壁挂/墙/免钉 → 吸盘，否则 落地(或首个可用组)
+                    String hint = skuHint == null ? "" : skuHint;
+                    String group = (hint.contains("吸盘") || hint.contains("壁挂") || hint.contains("墙") || hint.contains("免钉")) ? "吸盘" : "落地";
+                    Object g = m0.get(group);
+                    if (!(g instanceof Map) || !((Map<String, Object>) g).containsKey("rows")) {
+                        g = m0.containsKey("落地") ? m0.get("落地") : m0.values().iterator().next();
+                    }
+                    if (!(g instanceof Map)) return List.of();
+                    leafNode = (Map<String, Object>) g;
+                }
+                template = (Map<String, Object>) leafNode.getOrDefault("_template", Map.of());
+                entries = (List<Map<String, Object>>) leafNode.getOrDefault("rows", List.of());
             } else if (node instanceof List) {
                 // 花洒喷头等单池：不带滤芯配件时剔除 focus=滤芯 的构图，避免不带滤芯的花洒画滤芯特写
                 entries = new java.util.ArrayList<>();
@@ -241,28 +258,24 @@ public class PromptTemplateService {
                 }
             } else return List.of();
             if (entries.isEmpty()) return List.of();
-            // 打乱后取 count 套；不足则循环补。#2 主图重复修(07.24)：库母题数 < count 时,
-            //   原来 pool.get(i%size) 直接循环重取同一套→主图肉眼可见重复。改:重复取的那几张(i>=size)
-            //   追加"换机位/角度/景别"微扰指令,让复用的构图母题至少在角度/景别上错开,减少雷同。
-            //   (治本仍需给该品类补够构图库母题,属长期数据活。)
+            // 打乱后取 count 套(库母题多于张数,天然不重复;不足则循环补,靠库容量而非微扰错开)。
+            //   分级重构(07.28)后每套 base 由 _template+row 现拼,构图/文字逐行不同已足够差异化,
+            //   删掉原微扰指令(锅盖架落地16套/吸盘15套已超常规张数,循环命中概率极低,微扰是伪需求)。
             List<Map<String, Object>> pool = new java.util.ArrayList<>(entries);
             java.util.Collections.shuffle(pool);
-            // 微扰词库:重复复用构图时轮流追加,强制换视角(与母题正交,不改主体)。
-            String[] variations = {
-                "改用俯视/高角度机位", "改用低角度仰视机位", "改用 45° 侧前方机位",
-                "拉近成特写景别(突出细节)", "拉远成全景景别(带环境)", "换到画面另一侧构图、光从对侧打"
-            };
             List<String> out = new java.util.ArrayList<>();
             int poolSize = pool.size();
             for (int i = 0; i < count; i++) {
                 Map<String, Object> e = pool.get(i % poolSize);
-                String p = String.valueOf(e.getOrDefault("prompt", "")).trim();
-                if (p.isBlank()) continue;
-                // 第 2 轮起(i>=poolSize)复用了同一母题→追加微扰,避免与前面某张完全雷同
-                if (i >= poolSize) {
-                    String v = variations[(i - poolSize) % variations.length];
-                    p = p + "\n【防重复·本张换视角】" + v + "，与前面同构图的那张明显区分开，不得雷同。";
+                String p;
+                if (template == null) {
+                    // 旧格式(花洒喷头):直接用 baked prompt。
+                    p = String.valueOf(e.getOrDefault("prompt", "")).trim();
+                } else {
+                    // 分级格式:base = 固定任务开头 + merge(_template, row) 各字段拼接(禁止交 ec-catalog,不进此处)。
+                    p = assembleComposition(template, e);
                 }
+                if (p == null || p.isBlank()) continue;
                 out.add(p);
             }
             return out;
@@ -270,6 +283,29 @@ public class PromptTemplateService {
             log.warn("主图构图库选择失败(category={}): {}", category, e.getMessage());
             return List.of();
         }
+    }
+
+    // 分级格式固定任务开头(原每行 xlsx"任务"列都是同一句,收口成常量,不再逐行存)。
+    private static final String COMP_TASK =
+            "制作一张1:1正方形电商作图参考图，严格复刻参考版式比例、主体数量、镜头角度、人物动作、信息模块位置和视觉动势。产品仅作为可替换占位主体，不描述其具体内部结构，不分析或复刻背景内容。";
+
+    /** 分级构图拼装:任务开头 + merge(_template, row) 按固定字段序拼句。禁止不在此(交 ec-catalog negative,消重复)。 */
+    private String assembleComposition(Map<String, Object> template, Map<String, Object> row) {
+        java.util.LinkedHashMap<String, Object> merged = new java.util.LinkedHashMap<>(template);
+        for (Map.Entry<String, Object> e : row.entrySet()) {
+            if ("id".equals(e.getKey())) continue;
+            merged.put(e.getKey(), e.getValue());   // 行覆盖模板
+        }
+        // 字段拼接序(与旧 baked prompt 一致,禁止/id 排除;视觉记忆点接在风格前)
+        String[] order = {"构图", "核心主体", "人物元素", "文字", "放大模块", "对比模块", "视觉记忆点", "风格与画质"};
+        StringBuilder sb = new StringBuilder(COMP_TASK);
+        for (String k : order) {
+            Object v = merged.get(k);
+            if (v == null) continue;
+            String s = String.valueOf(v).trim();
+            if (!s.isBlank()) sb.append(' ').append(s);
+        }
+        return sb.toString();
     }
 
     /**

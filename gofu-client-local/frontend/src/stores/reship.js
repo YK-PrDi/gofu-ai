@@ -97,8 +97,8 @@ export const useReshipStore = defineStore('reship', {
         // 登录动作不灌补发进度日志/标红(那是补发专用),避免"处理进度 N 条"误导成正在补发。
         if (!opts?.isLogin) {
           this.logs = results
-          // 失败标红计数(code 含 NOT_FOUND / 或 type=error 且非中断)
-          this.redCount = results.filter((x) => x.type === 'error' || (x.code && /NOT_FOUND|EMPTY|FAILED/i.test(x.code))).length
+          // 失败标红计数(code 含 NOT_FOUND / 或 type=error 且非中断;NEW_ADDRESS_MANUAL=新地址需人工也标红)
+          this.redCount = results.filter((x) => x.type === 'error' || (x.code && /NOT_FOUND|EMPTY|FAILED|NEW_ADDRESS/i.test(x.code))).length
         }
         this.setMsg(opts?.runningMsg || `补发中… ${t.status} ${t.progress}/${t.total}`, '')
         if (t.status === 'running') { setTimeout(() => this.poll(taskId, tries + 1, opts), 1500); return }
