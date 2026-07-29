@@ -158,8 +158,9 @@ public class FlowController {
      * 自家白底新品、构图近似保留，靠模型随机性抽多张凑满 count 张，供人工筛 6 张后走既有链上新。
      * 独立命名（replace-*），生图质量起来后整块删除，不污染 step1/step-all。
      *
-     * <p>入参 {@code { contextId, refImages:[url...], whiteBg?, count?=100 }}。whiteBg 缺省取
-     * context.visual.whiteImages[0]。<b>不出方案(plans)</b>——筛 6 后前端覆写 mainImages 再调 generate-layout。
+     * <p>入参 {@code { contextId, refImages:[url...], whiteBg?/whiteBgs?:[url...], count?=100 }}。
+     * 缺省取 context.visual.whiteImages 全部——多 SKU 商品(如二层+三层纸巾架)传多张白底，count 会按
+     * 白底图数摊分，每张白底各自套全部参考图出图。<b>不出方案(plans)</b>——筛 6 后前端覆写 mainImages 再调 generate-layout。
      * 立即返回 {@code {taskId,total,contextId,refCount}}，前端轮询 GET /api/flow/task/{taskId}。
      */
     @PostMapping("/replace-mains")
@@ -186,14 +187,18 @@ public class FlowController {
             if (refImages.isEmpty())
                 return ResponseEntity.badRequest().body(Map.of("error", "refImages 必填（至少 1 张参考图）"));
 
-            // 产品白底图：入参优先，缺则取 context.visual.whiteImages[0]。
-            String whiteBg = body.get("whiteBg") instanceof String s && !s.isBlank() ? s : null;
-            if (whiteBg == null) {
-                List<String> ws = ctx.getVisual().getWhiteImages();
-                if (ws != null && !ws.isEmpty()) whiteBg = ws.get(0);
+            // 产品白底图(可多张=多SKU)：入参 whiteBgs 优先，其次单张 whiteBg，缺则取 context.visual.whiteImages 全部。
+            List<String> whiteBgs = new ArrayList<>();
+            if (body.get("whiteBgs") instanceof List<?> wl) {
+                for (Object o : wl) if (o instanceof String s && !s.isBlank()) whiteBgs.add(s);
             }
-            if (whiteBg == null || whiteBg.isBlank())
-                return ResponseEntity.badRequest().body(Map.of("error", "无产品白底图（请传 whiteBg 或先在 context 存白底图）"));
+            if (whiteBgs.isEmpty() && body.get("whiteBg") instanceof String s && !s.isBlank()) whiteBgs.add(s);
+            if (whiteBgs.isEmpty()) {
+                List<String> ws = ctx.getVisual().getWhiteImages();
+                if (ws != null) for (String w : ws) if (w != null && !w.isBlank()) whiteBgs.add(w);
+            }
+            if (whiteBgs.isEmpty())
+                return ResponseEntity.badRequest().body(Map.of("error", "无产品白底图（请传 whiteBg(s) 或先在 context 存白底图）"));
 
             int count = body.get("count") instanceof Number n ? Math.max(1, n.intValue()) : 100;
 
@@ -201,11 +206,11 @@ public class FlowController {
             GenerationTask task = new GenerationTask(taskId, count);
             task.setStatus("running");
             flowTasks.put(taskId, task);
-            final String fWhiteBg = whiteBg;
+            final List<String> fWhiteBgs = whiteBgs;
             final int fCount = count;
             imageGen.getExecutor().submit(() -> {
                 try {
-                    genReplaceMains(ctx, refImages, fWhiteBg, fCount, task);
+                    genReplaceMains(ctx, refImages, fWhiteBgs, fCount, task);
                     task.setStatus("done");
                 } catch (Exception e) {
                     log.error("replace-mains 异步失败: {}", e.getMessage(), e);
@@ -228,13 +233,19 @@ public class FlowController {
 
     /**
      * 产品替换工作体（抽卡档）：对每张参考图，只替换其中的产品主体为白底产品、构图近似保留，靠模型随机性
-     * 抽多张变体凑满 count 张。分配：base=count/N，余 count%N 摊到前几张参考图（例 6 参考图凑 100 → 每张 16、前 4 张各 +1）。
+     * 抽多张变体凑满 count 张。两级分配：先按白底图数 W 摊 count（多SKU商品，如二层+三层纸巾架各出一半），
+     * 每张白底各自的份额再按参考图数 N 摊（同 genReplaceMains 原单白底逻辑：base=份额/N，余数摊前几张）。
      * 结果流式写 ctx.visual.mainImages（与 genAllMains 同款预分配 null 槽 + 逐张 streamMainSlot），前端轮询逐张可见。
      * refs=[白底产品, 参考图]——两图都进 refImagePaths（GptImageAgent.generateMulti 只用该列表），prompt 明确各自角色。
      */
-    private void genReplaceMains(ProductContext ctx, List<String> refImages, String whiteBg, int count, GenerationTask task) {
-        String white = localizeWhite(whiteBg);
-        if (white == null) throw new RuntimeException("产品白底图无法本地化");
+    private void genReplaceMains(ProductContext ctx, List<String> refImages, List<String> whiteBgs, int count, GenerationTask task) {
+        List<String> localWhites = new ArrayList<>();
+        for (String w : whiteBgs) {
+            String lw = localizeWhite(w);
+            if (lw != null) localWhites.add(lw);
+            else log.warn("[产品替换] 白底图本地化失败，跳过: {}", w);
+        }
+        if (localWhites.isEmpty()) throw new RuntimeException("产品白底图无法本地化");
         List<String> localRefs = new ArrayList<>();
         for (String r : refImages) {
             String lr = localizeWhite(r);
@@ -242,16 +253,20 @@ public class FlowController {
             else log.warn("[产品替换] 参考图本地化失败，跳过: {}", r);
         }
         if (localRefs.isEmpty()) throw new RuntimeException("全部参考图无法本地化");
-        int n = localRefs.size();
+        int w = localWhites.size(), n = localRefs.size();
 
         File tmpOut = new File(appProperties.getPaths().getTempOutputDir(), "replace-" + System.nanoTime());
         tmpOut.mkdirs();
         String aspect = resolveAutoAspect("auto", localRefs.get(0));   // 画幅按参考图吸附（保留构图）
 
-        // 分配：base=count/N，extra=count%N 摊到前 extra 张参考图
-        int base = count / n, extra = count % n;
-        int[] perRef = new int[n];
-        for (int i = 0; i < n; i++) perRef[i] = base + (i < extra ? 1 : 0);
+        // 第一级：按白底图数 W 摊 count（多SKU各出一份）；第二级：每份内再按参考图数 N 摊（原单白底逻辑）
+        int wBase = count / w, wExtra = count % w;
+        int[] perWhite = new int[w];
+        for (int i = 0; i < w; i++) perWhite[i] = wBase + (i < wExtra ? 1 : 0);
+
+        String prompt = "参考图共两张：第一张为产品白底图（要替换进去的目标产品），第二张为构图参考图。"
+                + "请严格保留第二张参考图的构图、背景、场景、版式与镜头角度，仅把其中原有的产品主体替换为第一张白底图中的产品，"
+                + "使新产品自然融入原位置。不要改变构图布局、不要改变背景，只替换产品主体本身。";
 
         // 预分配 count 个 null 槽，逐张完成即写（前端逐张可见），末尾 compact 掉未出的
         synchronized (ctx) {
@@ -261,39 +276,42 @@ public class FlowController {
         }
         contextService.save(ctx);
 
-        String prompt = "参考图共两张：第一张为产品白底图（要替换进去的目标产品），第二张为构图参考图。"
-                + "请严格保留第二张参考图的构图、背景、场景、版式与镜头角度，仅把其中原有的产品主体替换为第一张白底图中的产品，"
-                + "使新产品自然融入原位置。不要改变构图布局、不要改变背景，只替换产品主体本身。";
-
         String[] keys = new String[count];
         List<java.util.concurrent.CompletableFuture<Void>> futures = new ArrayList<>();
         int slot = 0;
-        for (int ri = 0; ri < n; ri++) {
-            final String refLocal = localRefs.get(ri);
-            for (int k = 0; k < perRef[ri]; k++) {
-                final int idx = slot++;
-                futures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
-                    try {
-                        if (task.isCancelled()) return;
-                        GEN_CONC.acquire();
+        for (int wi = 0; wi < w; wi++) {
+            final String white = localWhites.get(wi);
+            int wCount = perWhite[wi];
+            if (wCount <= 0) continue;
+            int base = wCount / n, extra = wCount % n;
+            for (int ri = 0; ri < n; ri++) {
+                final String refLocal = localRefs.get(ri);
+                int refCount = base + (ri < extra ? 1 : 0);
+                for (int k = 0; k < refCount; k++) {
+                    final int idx = slot++;
+                    futures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
                         try {
                             if (task.isCancelled()) return;
-                            task.setCurrentProduct("产品替换 " + (idx + 1) + "/" + count);
-                            String out = new File(tmpOut, "rep-" + idx + ".jpg").getAbsolutePath();
-                            List<String> refs = List.of(white, refLocal);   // [白底产品, 参考图]
-                            if (genWithRetry(prompt, refs, white, out, aspect, 2)) {
-                                keys[idx] = uploadIfCos(out);
-                                streamMainSlot(ctx, idx, keys[idx]);
-                            } else {
-                                task.addResult(Map.of("message", "第 " + (idx + 1) + " 张替换失败"));
-                            }
-                        } finally { GEN_CONC.release(); }
-                    } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                    catch (Exception e) {
-                        task.addResult(Map.of("message", "第 " + (idx + 1) + " 张异常: " + e.getMessage()));
-                    }
-                    finally { task.incrementProgress(); }
-                }, imageGen.getExecutor()));
+                            GEN_CONC.acquire();
+                            try {
+                                if (task.isCancelled()) return;
+                                task.setCurrentProduct("产品替换 " + (idx + 1) + "/" + count);
+                                String out = new File(tmpOut, "rep-" + idx + ".jpg").getAbsolutePath();
+                                List<String> refs = List.of(white, refLocal);   // [白底产品, 参考图]
+                                if (genWithRetry(prompt, refs, white, out, aspect, 2)) {
+                                    keys[idx] = uploadIfCos(out);
+                                    streamMainSlot(ctx, idx, keys[idx]);
+                                } else {
+                                    task.addResult(Map.of("message", "第 " + (idx + 1) + " 张替换失败"));
+                                }
+                            } finally { GEN_CONC.release(); }
+                        } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                        catch (Exception e) {
+                            task.addResult(Map.of("message", "第 " + (idx + 1) + " 张异常: " + e.getMessage()));
+                        }
+                        finally { task.incrementProgress(); }
+                    }, imageGen.getExecutor()));
+                }
             }
         }
         java.util.concurrent.CompletableFuture.allOf(futures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
@@ -305,7 +323,7 @@ public class FlowController {
             okCount = mi.size();
         }
         contextService.save(ctx);
-        log.info("[产品替换] contextId={} 参考图{}张 目标{}张 → 成功{}张", ctx.getId(), n, count, okCount);
+        log.info("[产品替换] contextId={} 白底{}张 参考图{}张 目标{}张 → 成功{}张", ctx.getId(), w, n, count, okCount);
         if (okCount == 0) throw new RuntimeException("产品替换全部失败（共 " + count + " 张，成功 0 张）");
     }
 
