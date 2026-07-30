@@ -1,5 +1,6 @@
 package com.gofu.cloud.controller;
 
+import com.gofu.cloud.service.DisneyAssetService;
 import com.gofu.cloud.config.AppProperties;
 import com.gofu.cloud.model.GenerationTask;
 import com.gofu.cloud.service.CosService;
@@ -47,6 +48,7 @@ public class FlowController {
     private final AppProperties appProperties;
     private final com.gofu.cloud.service.lyimage.ImageGenService lyImageGen;   // 乐羽成熟 SKU 生图(sticker贴图/基准图)
     private final com.gofu.cloud.service.lyimage.PromptTemplateService templateService;   // 0a：主图构图库(按品类取构图)
+    private final DisneyAssetService disneyAssetService;
     private final OkHttpClient http = new OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).build();
 
@@ -54,7 +56,8 @@ public class FlowController {
                           ContextService contextService, CosService cosService,
                           AppProperties appProperties,
                           com.gofu.cloud.service.lyimage.ImageGenService lyImageGen,
-                          com.gofu.cloud.service.lyimage.PromptTemplateService templateService) {
+                          com.gofu.cloud.service.lyimage.PromptTemplateService templateService,
+                          DisneyAssetService disneyAssetService) {
         this.imageGen = imageGen;
         this.lyTextService = lyTextService;
         this.contextService = contextService;
@@ -62,6 +65,7 @@ public class FlowController {
         this.appProperties = appProperties;
         this.lyImageGen = lyImageGen;
         this.templateService = templateService;
+        this.disneyAssetService = disneyAssetService;
     }
 
     /**
@@ -325,6 +329,174 @@ public class FlowController {
         contextService.save(ctx);
         log.info("[产品替换] contextId={} 白底{}张 参考图{}张 目标{}张 → 成功{}张", ctx.getId(), w, n, count, okCount);
         if (okCount == 0) throw new RuntimeException("产品替换全部失败（共 " + count + " 张，成功 0 张）");
+    }
+
+    /**
+     * 开品模式·参照数据库生图。把用户上传图 + 从迪士尼素材库按标签随机抽到的 N 张参考图合并，
+     * 走 generateImageMulti 生成具有贴纸风格的新商品图。
+     *
+     * <p>入参 {@code { contextId, userImageRef, tag, n?=3, prompt, count?=6 }}。
+     * 立即返回 {@code {taskId,total,contextId}}，前端轮询 GET /api/flow/task/{taskId}。
+     */
+    @PostMapping("/kaipin-generate")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<Map<String, Object>> kaipinGenerate(@RequestBody Map<String, Object> body) {
+        try {
+            String contextId = (String) body.get("contextId");
+            if (contextId == null || contextId.isBlank())
+                return ResponseEntity.badRequest().body(Map.of("error", "contextId 必填"));
+            ProductContext ctx = contextService.findById(contextId);
+            if (ctx == null) return ResponseEntity.status(404).body(Map.of("error", "context 不存在"));
+
+            String userImageRef = (String) body.get("userImageRef");
+            if (userImageRef == null || userImageRef.isBlank())
+                return ResponseEntity.badRequest().body(Map.of("error", "userImageRef 必填"));
+
+            String tag = (String) body.get("tag");
+            if (tag == null || tag.isBlank())
+                return ResponseEntity.badRequest().body(Map.of("error", "tag 必填"));
+
+            int n = body.get("n") instanceof Number nu ? Math.min(Math.max(1, nu.intValue()), 10) : 3;
+            int count = body.get("count") instanceof Number nu ? Math.min(Math.max(1, nu.intValue()), 100) : 6;
+            String prompt = body.get("prompt") instanceof String s && !s.isBlank() ? s
+                    : "以第一张图片为产品主体，将后续迪士尼贴纸图案融合到产品外观或背景场景中，保持产品功能结构清晰，整体风格活泼可爱，适合电商主图展示。";
+
+            // 1) 从迪士尼素材库随机抽 N 张
+            List<java.util.Map<String, String>> samples = disneyAssetService.sample(tag, n);
+            if (samples.isEmpty())
+                return ResponseEntity.badRequest().body(Map.of("error", "标签「" + tag + "」下暂无素材，请先导入"));
+
+            // 2) 本地化用户图和素材图
+            String userLocal = localizeWhite(userImageRef);
+            if (userLocal == null) return ResponseEntity.badRequest().body(Map.of("error", "用户图片无法本地化"));
+
+            List<String> refLocals = new ArrayList<>();
+            refLocals.add(userLocal);
+            for (java.util.Map<String, String> s : samples) {
+                String local = localizeWhite(s.get("cosKey"));
+                if (local != null) refLocals.add(local);
+            }
+
+            int total = count;
+            String taskId = "kaipin-" + System.nanoTime();
+            GenerationTask task = new GenerationTask(taskId, total);
+            task.setStatus("running");
+            flowTasks.put(taskId, task);
+
+            final List<String> fRefs = refLocals;
+            final String fPrompt = prompt;
+            final int fCount = total;
+            final String fUserLocal = userLocal;
+            imageGen.getExecutor().submit(() -> {
+                try {
+                    genKaipinImages(ctx, fRefs, fUserLocal, fPrompt, fCount, task);
+                    task.setStatus("done");
+                } catch (Exception e) {
+                    log.error("[开品生图] 异步失败: {}", e.getMessage(), e);
+                    task.addResult(Map.of("message", "开品生图失败：" + e.getMessage()));
+                    task.setStatus("error");
+                }
+            });
+
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("taskId", taskId); resp.put("total", total); resp.put("contextId", ctx.getId());
+            resp.put("sampledCount", samples.size()); resp.put("tag", tag);
+            return ResponseEntity.ok(resp);
+        } catch (Exception e) {
+            log.error("[开品生图] 编排失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body(Map.of("error", "开品生图失败：" + e.getMessage()));
+        }
+    }
+
+    /**
+     * 开品生图工作体：每张图只用 [用户图, 随机1张迪士尼素材] 两图输入，避免多图并发超时。
+     * 迪士尼贴纸是大图（1280×1714），在传给 GPT 前先缩到 512px，减少上传体积和处理时间。
+     * count 张结果轮换素材列表（round-robin），流式写 ctx.visual.mainImages。
+     */
+    private void genKaipinImages(ProductContext ctx, List<String> refLocals, String userLocal,
+                                  String prompt, int count, GenerationTask task) {
+        // refLocals[0] = userLocal，[1..] = 素材图；每次只取用户图 + 1张素材
+        List<String> disneyLocals = refLocals.size() > 1 ? refLocals.subList(1, refLocals.size()) : refLocals;
+        if (disneyLocals.isEmpty()) throw new RuntimeException("无可用迪士尼素材图");
+
+        File tmpOut = new File(appProperties.getPaths().getTempOutputDir(), "kaipin-" + System.nanoTime());
+        tmpOut.mkdirs();
+        String aspect = "1:1";
+
+        // 预缩迪士尼素材图到 512px（减少 GPT edits 处理时间，避免超时）
+        List<String> disneySmall = new ArrayList<>();
+        for (String d : disneyLocals) {
+            File src = new File(d);
+            try {
+                java.awt.image.BufferedImage img = javax.imageio.ImageIO.read(src);
+                if (img != null && (img.getWidth() > 512 || img.getHeight() > 512)) {
+                    double scale = 512.0 / Math.max(img.getWidth(), img.getHeight());
+                    int sw = (int) (img.getWidth() * scale), sh = (int) (img.getHeight() * scale);
+                    java.awt.image.BufferedImage small = new java.awt.image.BufferedImage(sw, sh, java.awt.image.BufferedImage.TYPE_3BYTE_BGR);
+                    java.awt.Graphics2D g = small.createGraphics();
+                    g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+                    g.drawImage(img, 0, 0, sw, sh, null);
+                    g.dispose();
+                    File smallFile = File.createTempFile("disney_small_", ".jpg", tmpOut);
+                    javax.imageio.ImageIO.write(small, "jpeg", smallFile);
+                    disneySmall.add(smallFile.getAbsolutePath());
+                    log.info("[开品生图] 迪士尼图缩小 {}x{} -> {}x{}", img.getWidth(), img.getHeight(), sw, sh);
+                } else {
+                    disneySmall.add(d);
+                }
+            } catch (Exception e) {
+                log.warn("[开品生图] 缩图失败，使用原图: {}", e.getMessage());
+                disneySmall.add(d);
+            }
+        }
+
+        synchronized (ctx) {
+            List<String> mi = ctx.getVisual().getMainImages();
+            mi.clear();
+            for (int i = 0; i < count; i++) mi.add(null);
+        }
+        contextService.save(ctx);
+
+        String[] keys = new String[count];
+        List<java.util.concurrent.CompletableFuture<Void>> futures = new ArrayList<>();
+        for (int idx = 0; idx < count; idx++) {
+            final int i = idx;
+            // 轮换素材：每次取 1 张缩小版，均匀分布
+            final String disneyLocal = disneySmall.get(i % disneySmall.size());
+            futures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try {
+                    if (task.isCancelled()) return;
+                    GEN_CONC.acquire();
+                    try {
+                        if (task.isCancelled()) return;
+                        task.setCurrentProduct("开品生图 " + (i + 1) + "/" + count);
+                        String out = new File(tmpOut, "kaipin-" + i + ".jpg").getAbsolutePath();
+                        // 两张输入：[迪士尼缩图(512px), 用户图]，传给 GPT-Image edits
+                        List<String> twoRefs = List.of(disneyLocal, userLocal);
+                        if (genWithRetryKaipin(prompt, twoRefs, userLocal, out, aspect, 2)) {
+                            keys[i] = uploadIfCos(out);
+                            streamMainSlot(ctx, i, keys[i]);
+                        } else {
+                            task.addResult(Map.of("message", "第 " + (i + 1) + " 张生成失败"));
+                        }
+                    } finally { GEN_CONC.release(); }
+                } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                catch (Exception e) {
+                    task.addResult(Map.of("message", "第 " + (i + 1) + " 张异常: " + e.getMessage()));
+                } finally { task.incrementProgress(); }
+            }, imageGen.getExecutor()));
+        }
+        java.util.concurrent.CompletableFuture.allOf(futures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
+
+        int okCount;
+        synchronized (ctx) {
+            List<String> mi = ctx.getVisual().getMainImages();
+            mi.removeIf(java.util.Objects::isNull);
+            okCount = mi.size();
+        }
+        contextService.save(ctx);
+        log.info("[开品生图] contextId={} 参考图{}张 目标{}张 → 成功{}张", ctx.getId(), refLocals.size(), count, okCount);
+        if (okCount == 0) throw new RuntimeException("开品生图全部失败（共 " + count + " 张，成功 0 张）");
     }
 
     /**
@@ -1661,6 +1833,19 @@ public class FlowController {
                     long waitMs = Math.min(16000, 2000L * (1L << Math.min(3, a)));
                     try { Thread.sleep(waitMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
                 }
+            }
+        }
+        return false;
+    }
+
+    /** 开品模式专用重试：quality=low，走 ImageGenerationService.generateImageMultiLowQuality。 */
+    private boolean genWithRetryKaipin(String prompt, List<String> refs, String white, String out, String aspect, int maxRetry) {
+        for (int a = 0; a <= maxRetry; a++) {
+            try {
+                if (imageGen.generateImageMultiLowQuality(prompt, refs, white, out, aspect)) return true;
+            } catch (Exception e) {
+                log.warn("[开品生图] 第 {} 次失败: {}", a + 1, e.getMessage());
+                if (a < maxRetry) try { Thread.sleep(3000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
             }
         }
         return false;

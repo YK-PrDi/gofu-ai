@@ -37,8 +37,10 @@ public class CloudGatewayController {
         this.cloudBase = cloudBase != null ? cloudBase.replace("localhost", "127.0.0.1") : "http://127.0.0.1:5020";
     }
 
-    /** 转发云端独有前缀：/api/context/** 、/api/gen/** 、/api/ly-gen/** 、/api/flow/**（M8 交错编排）。 */
-    @RequestMapping({"/api/context/**", "/api/gen/**", "/api/ly-gen/**", "/api/flow/**"})
+    /** 转发云端独有前缀：/api/context/**、/api/gen/**、/api/ly-gen/**、/api/flow/**（M8 交错编排）。
+     *  以及开品模式相关端点：/api/kaipin_analyze、/api/disney/**（素材库）。 */
+    @RequestMapping({"/api/context/**", "/api/gen/**", "/api/ly-gen/**", "/api/flow/**",
+            "/api/kaipin_analyze", "/api/disney/**"})
     public ResponseEntity<byte[]> forward(HttpServletRequest req,
                                           @RequestBody(required = false) byte[] body) throws Exception {
         String path = req.getRequestURI();

@@ -841,9 +841,17 @@ public class ImageGenerationService {
                 refImagePaths == null ? 0 : refImagePaths.size(), aspect);
         String enforcedPrompt = enforceNoIntersectionPrompt(prompt);
 
-        // ADR-009：GenerationTask 已提进接口，统一调 generateMulti(...task)，无需 instanceof 类型转换。
-        // 不支持中断的 Agent 走接口 default（忽略 task）；Gemini/Wan 覆写此方法做分段中断。
         return agent.generateMulti(enforcedPrompt, refImagePaths, whiteBgPath, outputPath, aspect, task);
+    }
+
+    /** 开品模式专用：走 GPT-Image，和普通生图一样，但迪士尼素材图已由调用方预缩小。 */
+    public boolean generateImageMultiLowQuality(String prompt, List<String> refImagePaths,
+                                                 String whiteBgPath, String outputPath, String aspect) {
+        // 和 genWithRetry 同款，走默认 agent（gpt-image），不改 quality（保持 medium）
+        ImageGeneratorAgent agent = resolveAgent(null);
+        String enforcedPrompt = enforceNoIntersectionPrompt(prompt);
+        log.info("[开品生图] 使用智能体 [{}] refs={}", agent.getId(), refImagePaths == null ? 0 : refImagePaths.size());
+        return agent.generateMulti(enforcedPrompt, refImagePaths, whiteBgPath, outputPath, aspect);
     }
 
     private String enforceNoIntersectionPrompt(String prompt) {

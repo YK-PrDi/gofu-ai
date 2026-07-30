@@ -14,7 +14,7 @@ DIST="$PKG/dist"
 ZIP="$DIST/GOFU-AI-测试版-v${VER}.zip"
 
 echo "############ [1/4] Maven 打包三模块 (mvn package) ############"
-"$MVN" -q -o -f "$ROOT/pom.xml" package -DskipTests || "$MVN" -q -f "$ROOT/pom.xml" package -DskipTests
+"$MVN" -q -o -f "$ROOT/pom.xml" package -Dmaven.test.skip=true || "$MVN" -q -f "$ROOT/pom.xml" package -Dmaven.test.skip=true
 echo "Maven 打包完成"
 
 echo "############ [2/4] 构建 exe (build-exe.sh) ############"

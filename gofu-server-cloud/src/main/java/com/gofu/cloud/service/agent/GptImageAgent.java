@@ -116,6 +116,12 @@ public class GptImageAgent implements ImageGeneratorAgent {
     @Override
     public boolean generateMulti(String prompt, List<String> refImagePaths,
                                  String whiteBgPath, String outputPath, String aspect) {
+        return generateMulti(prompt, refImagePaths, whiteBgPath, outputPath, aspect, "medium");
+    }
+
+    /** quality 可传 "low"/"medium"/"high"，开品模式传 "low" 加快响应。 */
+    public boolean generateMulti(String prompt, List<String> refImagePaths,
+                                 String whiteBgPath, String outputPath, String aspect, String quality) {
         List<String> keys = appProperties.getGptImage().getApiKeys();
         if (keys == null || keys.isEmpty()) {
             log.error("GPT-Image API Key 未配置");
@@ -128,7 +134,7 @@ public class GptImageAgent implements ImageGeneratorAgent {
             String baseUrl = baseUrlForKey(apiKey);
             log.info("GPT-Image 尝试 key [{}], baseUrl={}", maskKey(apiKey), baseUrl);
             boolean ok = !imageFiles.isEmpty()
-                    ? generateWithImages(prompt, imageFiles, outputPath, apiKey, baseUrl, size)
+                    ? generateWithImages(prompt, imageFiles, outputPath, apiKey, baseUrl, size, quality)
                     : generateTextOnly(prompt, outputPath, apiKey, baseUrl, size);
             if (ok) return true;
             log.warn("GPT-Image key [{}] 失败，尝试下一个", maskKey(apiKey));
@@ -176,6 +182,11 @@ public class GptImageAgent implements ImageGeneratorAgent {
 
     private boolean generateWithImages(String prompt, List<File> imageFiles, String outputPath,
                                        String apiKey, String baseUrl, String size) {
+        return generateWithImages(prompt, imageFiles, outputPath, apiKey, baseUrl, size, "medium");
+    }
+
+    private boolean generateWithImages(String prompt, List<File> imageFiles, String outputPath,
+                                       String apiKey, String baseUrl, String size, String quality) {
         List<File> tempFiles = new ArrayList<>();
         try {
             List<File> preparedFiles = new ArrayList<>();
@@ -201,7 +212,7 @@ public class GptImageAgent implements ImageGeneratorAgent {
                 writeField(os, boundary, "model", "gpt-image-2");
                 writeField(os, boundary, "prompt", finalPrompt);
                 writeField(os, boundary, "size", size);
-                writeField(os, boundary, "quality", "medium");
+                writeField(os, boundary, "quality", quality != null ? quality : "medium");
                 writeField(os, boundary, "output_format", "jpeg");
                 for (File f : preparedFiles) {
                     writeFile(os, boundary, "image[]", f);

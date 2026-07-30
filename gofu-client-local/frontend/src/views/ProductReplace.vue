@@ -8,34 +8,31 @@ import { api } from '@/api.js'
 import { useContextStore } from '@/stores/context.js'
 import { useSettingsStore } from '@/stores/settings.js'
 import { useStoresStore } from '@/stores/stores-mgmt.js'
+import { useProductReplaceStore } from '@/stores/product-replace.js'
 
 const ctxStore = useContextStore()
 const settings = useSettingsStore()
 const storesStore = useStoresStore()
+const prStore = useProductReplaceStore()
 
 const imgUrl = (r) => '/api/gen/img?ref=' + encodeURIComponent(r)
 
 // -------------------- 模式: 单商品 vs 批量 --------------------
 const mode = ref('single')  // 'single' | 'batch'
 
-// -------------------- 单商品状态 --------------------
+// -------------------- 单商品状态（切页不丢的字段挂 prStore，其余局部）--------------------
+// white/refs 含 base64 太大，不进 store，切页后需重选文件夹（提示用 prStore.folderName 显示上次名字）
 const st = reactive({
-  folderName: '',
-  white: [],        // [{name,b64,ext}] 产品白底图
-  refs: [],         // [{name,b64,ext}] N张构图参考图
-  refsCount: 0,     // 抽卡启动时快照 refs.length，重启后也能保住上限数字
-  count: 100,
-  msg: '', msgType: '',
-  phase: '', pct: 0,
+  white: [],        // [{name,b64,ext}] 产品白底图（局部，切页丢失）
+  refs: [],         // [{name,b64,ext}] N张构图参考图（局部，切页丢失）
   running: false,
-  cloudTaskId: '',
-  gachaDone: false,
-  picked: [],
   chaining: false,
-  chainLog: '',
 })
-const lastRecognized = ref(null)
-const mainImages = computed(() => (ctxStore.current?.visual?.mainImages || []).filter(Boolean))
+// 切页保留字段直接用 prStore（folderName/refsCount/count/msg/msgType/phase/pct/gachaDone/picked/cloudTaskId/contextId/chainLog）
+const mainImages = computed(() => {
+  if (!prStore.contextId || ctxStore.contextId !== prStore.contextId) return []
+  return (ctxStore.current?.visual?.mainImages || []).filter(Boolean)
+})
 const busy = computed(() => st.running || st.chaining)
 
 // -------------------- 批量状态 --------------------
@@ -72,7 +69,7 @@ function pickFolder() {
 // 单商品选层校验+白底/参考归类(复用白底/参考关键字判定逻辑)
 async function processSingleFiles(files) {
   const imgs = files.filter((f) => f.type && f.type.startsWith('image/'))
-  if (!imgs.length) { st.msg = '该文件夹没有图片'; st.msgType = 'err'; return }
+  if (!imgs.length) { prStore.msg = '该文件夹没有图片'; prStore.msgType = 'err'; return }
   const white = [], refs = []
   const productPaths = new Set()
   for (const f of imgs) {
@@ -89,23 +86,23 @@ async function processSingleFiles(files) {
   }
   if (productPaths.size > 1) {
     st.white = []; st.refs = []
-    st.msg = `❌ 选到的文件夹里有 ${productPaths.size} 个不同商品(检测到多组「白底/参考」子目录),会把不同商品的图混在一起。请选到单个商品的文件夹（如「花洒喷头-GF-112-银色花洒」），不要选店铺层或更外层。`
-    st.msgType = 'err'; return
+    prStore.msg = `❌ 选到的文件夹里有 ${productPaths.size} 个不同商品(检测到多组「白底/参考」子目录),会把不同商品的图混在一起。请选到单个商品的文件夹（如「花洒喷头-GF-112-银色花洒」），不要选店铺层或更外层。`
+    prStore.msgType = 'err'; return
   }
   const productPath = [...productPaths][0] || (imgs[0].webkitRelativePath || '').split('/')[0] || ''
-  st.folderName = productPath.split('/').pop() || ''
+  prStore.folderName = productPath.split('/').pop() || ''
   st.white = white; st.refs = refs
   if (!white.length || !refs.length) {
-    st.msg = `❌ 结构不完整（白底${white.length}·参考${refs.length}）。商品文件夹内需含名字带「白底」的子目录(放1张或多张产品白底图) + 名字带「参考」的子目录(放N张构图参考图)。`
-    st.msgType = 'err'; return
+    prStore.msg = `❌ 结构不完整（白底${white.length}·参考${refs.length}）。商品文件夹内需含名字带「白底」的子目录(放1张或多张产品白底图) + 名字带「参考」的子目录(放N张构图参考图)。`
+    prStore.msgType = 'err'; return
   }
   const warns = []
-  if (!st.folderName.includes('-')) warns.push(`文件夹名「${st.folderName}」没按「品类-主件名」命名（缺"-"），品类/SKU反推会不准。`)
-  const perWhiteApprox = Math.floor(st.count / white.length)
-  st.msg = `✓ 已读「${st.folderName}」（白底${white.length}张 × 参考${refs.length}张）。${warns.join(' ')}`
+  if (!prStore.folderName.includes('-')) warns.push(`文件夹名「${prStore.folderName}」没按「品类-主件名」命名（缺"-"），品类/SKU反推会不准。`)
+  const perWhiteApprox = Math.floor(prStore.count / white.length)
+  prStore.msg = `✓ 已读「${prStore.folderName}」（白底${white.length}张 × 参考${refs.length}张）。${warns.join(' ')}`
     + (white.length > 1 ? `${white.length} 张白底各自出图，约每张白底分到 ${perWhiteApprox} 张。` : '')
-    + `点「开始抽卡」凑${st.count}张。`
-  st.msgType = warns.length ? 'err' : 'ok'
+    + `点「开始抽卡」凑${prStore.count}张。`
+  prStore.msgType = warns.length ? 'err' : 'ok'
 }
 
 // -------------------- 批量: 选根目录 --------------------
@@ -187,7 +184,7 @@ async function runBatchItem(idx) {
   item.status = 'running-gacha'; item.pct = 0; item.phase = '启动中…'; item.chainLog = ''
   try {
     const started = await api.post('/api/product-replace/start', {
-      folderName: item.productName, white: item.white, refs: item.refs, count: st.count,
+      folderName: item.productName, white: item.white, refs: item.refs, count: prStore.count,
     })
     if (started.error) throw new Error(started.error)
     const info = await pollBatchStart(idx, started.replaceId)
@@ -223,7 +220,7 @@ async function pollBatchGacha(idx, taskId) {
     await new Promise((r) => setTimeout(r, 2500))
     let t
     try { t = await api.get('/api/flow/task/' + taskId) } catch (_) { continue }
-    const done = t.progress || 0, total = t.total || st.count
+    const done = t.progress || 0, total = t.total || prStore.count
     item.pct = 60 + Math.round(38 * done / Math.max(1, total))
     item.phase = `抽卡替换中 ${done}/${total}…`
     if (item.contextId) { try { await ctxStore.load(item.contextId) } catch (_) {} }
@@ -275,23 +272,26 @@ function pickFolder2() { pickFolder() }   // alias，template 里用
 
 async function startGacha() {
   if (!st.white.length || !st.refs.length) return
-  st.running = true; st.gachaDone = false; st.picked = []; st.cloudTaskId = ''
-  st.refsCount = st.refs.length   // 快照:抽卡完成后 refs 可能被清,用快照保住上限数字
-  st.pct = 0; st.phase = '启动中…'; st.msg = ''; st.msgType = ''
+  st.running = true; prStore.gachaDone = false; prStore.picked = []; prStore.cloudTaskId = ''
+  prStore.refsCount = st.refs.length   // 快照:抽卡完成后 refs 可能被清,用快照保住上限数字
+  prStore.pct = 0; prStore.phase = '启动中…'; prStore.msg = ''; prStore.msgType = ''
   try {
     const started = await api.post('/api/product-replace/start', {
-      folderName: st.folderName, white: st.white, refs: st.refs, count: st.count,
+      folderName: prStore.folderName, white: st.white, refs: st.refs, count: prStore.count,
     })
     if (started.error) throw new Error(started.error)
     if (!started.replaceId) throw new Error('未返回 replaceId')
     const info = await pollStart(started.replaceId)
     if (!info.contextId || !info.cloudTaskId) throw new Error('抽卡启动未返回 contextId/cloudTaskId')
-    lastRecognized.value = info.recognized || null
+    prStore.recognizedCategory = info.recognized?.category || ''
+    prStore.recognizedProductName = info.recognized?.productName || ''
+    prStore.recognizedSkus = info.recognized?.skus || []
     await ctxStore.load(info.contextId, 'product-replace')
-    st.cloudTaskId = info.cloudTaskId
+    prStore.cloudTaskId = info.cloudTaskId
+    prStore.contextId = info.contextId
     await pollCloudGacha(info.cloudTaskId)
   } catch (e) {
-    st.msg = '抽卡失败：' + e.message; st.msgType = 'err'
+    prStore.msg = '抽卡失败：' + e.message; prStore.msgType = 'err'
   } finally {
     st.running = false
   }
@@ -302,7 +302,7 @@ async function pollStart(replaceId) {
     await new Promise((r) => setTimeout(r, 1200))
     let t
     try { t = await api.get('/api/product-replace/progress/' + replaceId) } catch (_) { continue }
-    st.pct = Math.min(t.pct || 0, 60); st.phase = t.phase || '处理中…'
+    prStore.pct = Math.min(t.pct || 0, 60); prStore.phase = t.phase || '处理中…'
     if (t.done) { if (t.error) throw new Error(t.error); return t }
   }
 }
@@ -312,54 +312,54 @@ async function pollCloudGacha(taskId) {
     await new Promise((r) => setTimeout(r, 2500))
     let t
     try { t = await api.get('/api/flow/task/' + taskId) } catch (_) { continue }
-    const done = t.progress || 0, total = t.total || st.count
-    st.pct = 60 + Math.round(38 * done / Math.max(1, total))
-    st.phase = `抽卡替换中 ${done}/${total}…`
+    const done = t.progress || 0, total = t.total || prStore.count
+    prStore.pct = 60 + Math.round(38 * done / Math.max(1, total))
+    prStore.phase = `抽卡替换中 ${done}/${total}…`
     if (ctxStore.contextId) { try { await ctxStore.load(ctxStore.contextId) } catch (_) {} }
     if (t.status === 'done' || t.status === 'error') {
       if (t.status === 'error') throw new Error(t.error || '云端抽卡失败')
-      st.pct = 100; st.gachaDone = true
-      st.msg = `✓ 抽卡完成，共 ${mainImages.value.length} 张。请从下方勾选 6 张，点「确认并全自动上新」。`
-      st.msgType = 'ok'; return
+      prStore.pct = 100; prStore.gachaDone = true
+      prStore.msg = `✓ 抽卡完成，共 ${mainImages.value.length} 张。请从下方勾选 6 张，点「确认并全自动上新」。`
+      prStore.msgType = 'ok'; return
     }
   }
 }
 
 async function cancelGacha() {
-  if (!st.cloudTaskId) return
-  try { await api.post('/api/flow/cancel/' + st.cloudTaskId, {}) } catch (_) {}
-  st.msg = '已请求停止抽卡。'; st.msgType = ''
+  if (!prStore.cloudTaskId) return
+  try { await api.post('/api/flow/cancel/' + prStore.cloudTaskId, {}) } catch (_) {}
+  prStore.msg = '已请求停止抽卡。'; prStore.msgType = ''
 }
 
 function toggle(key) {
-  const maxPick = st.refsCount || st.refs.length
-  const i = st.picked.indexOf(key)
-  if (i >= 0) st.picked.splice(i, 1)
+  const maxPick = prStore.refsCount || st.refs.length
+  const i = prStore.picked.indexOf(key)
+  if (i >= 0) prStore.picked.splice(i, 1)
   else {
-    if (st.picked.length >= maxPick) { ElMessage.warning(`最多选 ${maxPick} 张（与参考图张数一致）`); return }
-    st.picked.push(key)
+    if (prStore.picked.length >= maxPick) { ElMessage.warning(`最多选 ${maxPick} 张（与参考图张数一致）`); return }
+    prStore.picked.push(key)
   }
 }
-const isPicked = (key) => st.picked.includes(key)
+const isPicked = (key) => prStore.picked.includes(key)
 
 // -------------------- 确认筛选 → step2(详情+SKU图) → 上新 --------------------
 async function confirmAndList() {
-  if (st.picked.length === 0) { ElMessage.warning('请先勾选主图'); return }
+  if (prStore.picked.length === 0) { ElMessage.warning('请先勾选主图'); return }
   if (!ctxStore.contextId) { ElMessage.error('缺 contextId'); return }
-  st.chaining = true; st.chainLog = ''
-  const log = (msg) => { st.chainLog = msg }
+  st.chaining = true; prStore.chainLog = ''
+  const log = (msg) => { prStore.chainLog = msg }
   try {
-    await doChain({ contextId: ctxStore.contextId, pickedKeys: st.picked, storeProfile: storesStore.targetProfile || '', folderName: st.folderName, recognized: lastRecognized.value, log })
-    st.msg = '✓ 全自动完成：抽卡→筛图→详情/SKU图→方案→定价→上新成功。'; st.msgType = 'ok'
+    await doChain({ contextId: ctxStore.contextId, pickedKeys: prStore.picked, storeProfile: storesStore.targetProfile || '', folderName: prStore.folderName, recognized: { category: prStore.recognizedCategory, productName: prStore.recognizedProductName, skus: prStore.recognizedSkus }, log })
+    prStore.msg = '✓ 全自动完成：抽卡→筛图→详情/SKU图→方案→定价→上新成功。'; prStore.msgType = 'ok'
   } catch (e) {
-    st.chainLog = '✗ 失败：' + e.message; st.msg = '全自动链失败：' + e.message; st.msgType = 'err'
+    prStore.chainLog = '✗ 失败：' + e.message; prStore.msg = '全自动链失败：' + e.message; prStore.msgType = 'err'
   } finally {
     st.chaining = false
   }
 }
 
 // doChain: pick → generate-layout → step2(详情图+SKU图) → from-context
-// log 回调写各自的 chainLog，避免批量模式下日志错写到单商品 st.chainLog
+// log 回调写各自的 chainLog，避免批量模式下日志错写到单商品 prStore.chainLog
 async function doChain({ contextId, pickedKeys, storeProfile, folderName, recognized, log }) {
   // 1) 筛选覆写
   log('① 覆写选定主图…')
@@ -452,7 +452,7 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
     <h2>产品替换 <span class="tag">权宜·抽卡换品</span></h2>
     <el-alert type="info" :closable="false" show-icon class="intro">
       生图质量的临时手段：传入 <b>1 张或多张产品白底图</b>(多张=多SKU，各自出各自的图) + <b>N 张构图参考图</b>，
-      程序对每张参考图只替换其中的产品主体、尽量保留构图，靠抽卡随机性凑满 {{ st.count }} 张，
+      程序对每张参考图只替换其中的产品主体、尽量保留构图，靠抽卡随机性凑满 {{ prStore.count }} 张，
       人工筛 6 张后全自动出方案/定价/详情图/SKU图/上新。<br>
       单商品模式：<b>选到商品层文件夹</b>（内含「白底图」「参考图」两个子目录）。
       批量模式：选含「<b>店铺名/商品名</b>」两层结构的根目录，程序自动分组按顺序跑完。
@@ -473,33 +473,33 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
           <el-button :disabled="busy" @click="pickFolder">📁 选择文件夹</el-button>
           <span class="cnt">
             抽卡张数
-            <el-input-number v-model="st.count" :min="1" :max="100" :step="1" :disabled="busy" size="small" controls-position="right" style="width: 110px" />
+            <el-input-number v-model="prStore.count" :min="1" :max="100" :step="1" :disabled="busy" size="small" controls-position="right" style="width: 110px" />
             <span class="cnt-hint">（自测先用小数如 15，正式凑量用 100）</span>
           </span>
           <el-button type="primary" :disabled="!st.white.length || !st.refs.length || busy" :loading="st.running" @click="startGacha">
-            {{ st.running ? '抽卡中…' : `开始抽卡（共 ${st.count} 张）` }}
+            {{ st.running ? '抽卡中…' : `开始抽卡（共 ${prStore.count} 张）` }}
           </el-button>
-          <el-button v-if="st.running && st.cloudTaskId" @click="cancelGacha">停止</el-button>
+          <el-button v-if="st.running && prStore.cloudTaskId" @click="cancelGacha">停止</el-button>
         </div>
-        <el-progress v-if="st.running || st.pct > 0" :percentage="st.pct" :status="st.gachaDone ? 'success' : ''" />
-        <p v-if="st.phase" class="phase">{{ st.phase }}</p>
-        <p v-if="st.msg" :class="['msg', st.msgType]">{{ st.msg }}</p>
+        <el-progress v-if="st.running || prStore.pct > 0" :percentage="prStore.pct" :status="prStore.gachaDone ? 'success' : ''" />
+        <p v-if="prStore.phase" class="phase">{{ prStore.phase }}</p>
+        <p v-if="prStore.msg" :class="['msg', prStore.msgType]">{{ prStore.msg }}</p>
       </el-card>
 
       <el-card v-if="mainImages.length" class="step">
-        <template #header>② 筛选主图（已选 {{ st.picked.length }} / {{ st.refsCount || st.refs.length }}，共 {{ mainImages.length }} 张）</template>
+        <template #header>② 筛选主图（已选 {{ prStore.picked.length }} / {{ prStore.refsCount || st.refs.length }}，共 {{ mainImages.length }} 张）</template>
         <div class="grid">
           <div v-for="(m, i) in mainImages" :key="i" :class="['cell', { on: isPicked(m) }]" @click="toggle(m)">
             <el-image :src="imgUrl(m)" fit="cover" loading="lazy" />
-            <span v-if="isPicked(m)" class="badge">{{ st.picked.indexOf(m) + 1 }}</span>
+            <span v-if="isPicked(m)" class="badge">{{ prStore.picked.indexOf(m) + 1 }}</span>
           </div>
         </div>
         <div class="actions foot">
-          <el-button type="success" :disabled="st.picked.length === 0 || busy" :loading="st.chaining" @click="confirmAndList">
-            {{ st.chaining ? '处理中…' : `确认并全自动上新（${st.picked.length} 张）` }}
+          <el-button type="success" :disabled="prStore.picked.length === 0 || busy" :loading="st.chaining" @click="confirmAndList">
+            {{ st.chaining ? '处理中…' : `确认并全自动上新（${prStore.picked.length} 张）` }}
           </el-button>
         </div>
-        <pre v-if="st.chainLog" class="chainlog">{{ st.chainLog }}</pre>
+        <pre v-if="prStore.chainLog" class="chainlog">{{ prStore.chainLog }}</pre>
       </el-card>
     </template>
 
@@ -511,7 +511,7 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
           <el-button :disabled="batch.running" @click="pickBatchFolder">📁 选择根目录（店铺/商品两级）</el-button>
           <span class="cnt">
             抽卡张数
-            <el-input-number v-model="st.count" :min="1" :max="100" :step="1" :disabled="batch.running" size="small" controls-position="right" style="width: 110px" />
+            <el-input-number v-model="prStore.count" :min="1" :max="100" :step="1" :disabled="batch.running" size="small" controls-position="right" style="width: 110px" />
           </span>
           <el-button type="primary" :disabled="!batch.items.some((x) => x.status === 'pending') || batch.running" @click="startBatch">
             {{ batch.running ? '批量运行中…' : '开始批量' }}
