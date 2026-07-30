@@ -308,7 +308,7 @@ export async function waitForOrderResultRows(frame, expectedRowCount, {
   // 滚动结果表容器到底,触发懒加载行全部渲染(每页可容纳很多行,目标行可能未渲染)
   const scrollToBottom = async () => {
     await frame.evaluate(() => {
-      const sels = [".module-trade-list", ".el-table__body-wrapper", ".trade-list-body", ".module-list-inpage"];
+      const sels = [".module-trade-list", ".el-table__body-wrapper", ".trade-list_body", ".module-list-inpage"];
       for (const s of sels) {
         for (const el of document.querySelectorAll(s)) {
           if (el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight;

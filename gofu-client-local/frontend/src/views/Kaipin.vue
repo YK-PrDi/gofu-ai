@@ -134,7 +134,6 @@ async function startGenerate() {
     const contextId = ctx.id
     kpStore.contextId = contextId
     await ctxStore.load(contextId, 'kaipin')
-    lastRecognized.value = null
 
     // 3) 调云端生图
     kpStore.genPhase = '生成中…'; kpStore.genPct = 20
@@ -206,7 +205,7 @@ async function confirmAndList() {
     const p = await api.post('/api/product-replace/pick', { contextId: kpStore.contextId, keys: kpStore.picked })
     if (p.error) throw new Error(p.error)
     logFn('② 生成方案/标题/定价…')
-    const rec = lastRecognized.value || {}
+    const rec = {}
     const started = await api.post('/api/semi-auto/generate-layout', {
       contextId: kpStore.contextId, category: rec.category || '',
       productName: rec.productName || input.productA || '开品商品',

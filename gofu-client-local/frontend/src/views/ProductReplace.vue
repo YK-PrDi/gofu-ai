@@ -315,7 +315,7 @@ async function pollCloudGacha(taskId) {
     const done = t.progress || 0, total = t.total || prStore.count
     prStore.pct = 60 + Math.round(38 * done / Math.max(1, total))
     prStore.phase = `抽卡替换中 ${done}/${total}…`
-    if (ctxStore.contextId) { try { await ctxStore.load(ctxStore.contextId) } catch (_) {} }
+    if (prStore.contextId) { try { await ctxStore.load(prStore.contextId) } catch (_) {} }
     if (t.status === 'done' || t.status === 'error') {
       if (t.status === 'error') throw new Error(t.error || '云端抽卡失败')
       prStore.pct = 100; prStore.gachaDone = true
