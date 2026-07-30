@@ -26,11 +26,22 @@ function maskedOrder(orderNo) {
 // 「是否按新地址登记」列判定:是否真的需要人工按新地址处理。
 // 只有【肯定登记了新地址】才跳过标红——否定值(否/无/不/暂无/-//等)和空一律"照常补发"。
 // 否定值命中即返回 false;其余任何非空文字视为"登记了新地址/写了具体地址"→需人工。
+// 只有【肯定登记了新地址】才需人工——否定值/说明性文字/空一律照常补发。
 function needsManualNewAddress(note) {
-  const v = String(note || "").trim();
+  // 去掉零宽字符后判空
+  const v = String(note || '').replace(/[​‌‍﻿ ]/g, '').trim();
   if (!v) return false;
-  const negatives = new Set(["否", "无", "没有", "不", "不是", "不需要", "暂无", "-", "—", "/", "n", "no", "false", "0"]);
+
+  // 明确否定词 → 照常补发
+  const negatives = new Set(['否', '无', '没有', '不', '不是', '不需要', '暂无', '-', '—', '/', 'n', 'no', 'false', '0']);
   if (negatives.has(v.toLowerCase())) return false;
+
+  // 说明性否定语句 → 照常补发
+  if (/^按(照)?(登记|原|订单)?地址/.test(v)) return false;
+  if (/不?需要?改/.test(v) && !/新地址/.test(v)) return false;
+  if (/原地址/.test(v) && !/新地址/.test(v)) return false;
+
+  // 其余非空文字（具体新地址/姓名电话/是/需要 等）→ 需人工处理
   return true;
 }
 
