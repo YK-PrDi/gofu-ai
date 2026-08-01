@@ -50,7 +50,11 @@ export function useGen() {
         eta = fmtSec(perItem * (t.total - t.progress))
       } else if (t.total > 0 && t.progress >= t.total) eta = '收尾中…'
       const cur = t.currentProduct || (t.progress < t.total ? `第 ${t.progress + 1} 张` : '')
-      gen.msg = `生图中… ${t.progress}/${t.total} · 已用时 ${fmtSec(elapsed)} · 预计剩余 ${eta}` + (cur ? ` · 正在生成 ${cur}` : '')
+      // 07.31: progress 只是"已尝试(成功+失败)张数",跟 successCount 脱钩——欠费/超时导致全失败时
+      // progress 照样跑到接近total,但一张没出。补显示成功数,避免"进度条98%却0张出图"这种误导。
+      const succ = t.successCount ?? 0
+      const failWarn = t.progress > 0 && succ === 0 ? ' · ⚠ 已尝试但全部失败,请检查生图服务/账户余额' : ''
+      gen.msg = `生图中… 已尝试${t.progress}/${t.total}(成功${succ}) · 已用时 ${fmtSec(elapsed)} · 预计剩余 ${eta}` + (cur ? ` · 正在生成 ${cur}` : '') + failWarn
       if (t.progress > 0) { try { await ctxStore.load(ctxStore.contextId) } catch (_) {} }
       if (t.status === 'done') { gen.flowTaskId = ''; return }
       if (t.status === 'stopped') { gen.msg = '已停止生成（已生成的图保留）'; gen.flowTaskId = ''; return }

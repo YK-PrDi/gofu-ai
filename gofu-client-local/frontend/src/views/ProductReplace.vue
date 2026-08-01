@@ -98,6 +98,7 @@ async function processSingleFiles(files) {
   }
   const warns = []
   if (!prStore.folderName.includes('-')) warns.push(`文件夹名「${prStore.folderName}」没按「品类-主件名」命名（缺"-"），品类/SKU反推会不准。`)
+  if (!prStore.count) prStore.count = 100
   const perWhiteApprox = Math.floor(prStore.count / white.length)
   prStore.msg = `✓ 已读「${prStore.folderName}」（白底${white.length}张 × 参考${refs.length}张）。${warns.join(' ')}`
     + (white.length > 1 ? `${white.length} 张白底各自出图，约每张白底分到 ${perWhiteApprox} 张。` : '')
@@ -163,44 +164,60 @@ async function parseBatchFiles(files) {
   else ElMessage.success(`解析完成：${items.length} 个商品，全部待处理，可点「开始批量」`)
 }
 
-// 批量启动：只处理 pending 商品，warn 的留在列表供用户查看和修正
+// 批量启动：并行对所有 pending 商品同时抽卡，抽完各自进 waiting-pick 等用户筛图
 async function startBatch() {
   if (batch.running) return
-  const nextIdx = batch.items.findIndex((x) => x.status === 'pending')
-  if (nextIdx < 0) {
+  const pendingIdxs = batch.items.map((x, i) => x.status === 'pending' ? i : -1).filter((i) => i >= 0)
+  if (!pendingIdxs.length) {
     const warned = batch.items.filter((x) => x.status === 'warn').length
     ElMessage.warning(warned > 0 ? `没有待处理商品，有 ${warned} 个警告项需先按提示修正后重新解析` : '没有待处理的商品了')
     return
   }
   batch.running = true
-  batch.curIdx = nextIdx
-  await runBatchItem(nextIdx)
+  // 并行启动所有 pending 商品抽卡，不等待完成
+  Promise.all(pendingIdxs.map((idx) => runBatchItem(idx))).then(() => {
+    batch.running = false
+    const done = batch.items.filter((x) => x.status === 'done').length
+    const failed = batch.items.filter((x) => x.status === 'failed').length
+    const waiting = batch.items.filter((x) => x.status === 'waiting-pick').length
+    if (waiting > 0) ElMessage.success(`抽卡全部完成，${waiting} 个商品等待筛图`)
+    else ElMessage.success(`批量全部跑完：成功 ${done}，失败 ${failed}`)
+  })
 }
 
-// 对单个批量商品跑抽卡(自动)
+// 对单个批量商品跑抽卡(自动)，抽完进 waiting-pick
 async function runBatchItem(idx) {
   const item = batch.items[idx]
-  if (!item) { batch.curIdx = -1; batch.running = false; return }
+  if (!item) return
   item.status = 'running-gacha'; item.pct = 0; item.phase = '启动中…'; item.chainLog = ''
   try {
     const started = await api.post('/api/product-replace/start', {
-      folderName: item.productName, white: item.white, refs: item.refs, count: prStore.count,
+      folderName: item.productName, white: item.white, refs: item.refs, count: prStore.count || 100,
     })
     if (started.error) throw new Error(started.error)
     const info = await pollBatchStart(idx, started.replaceId)
     if (!info.contextId || !info.cloudTaskId) throw new Error('未返回 contextId/cloudTaskId')
     item.contextId = info.contextId
     item.cloudTaskId = info.cloudTaskId
-    item.recognized = info.recognized || null   // 存识别结果供 doChain 用
-    // 加载进 ctxStore 供筛图面板读取 mainImages
-    await ctxStore.load(info.contextId, 'product-replace')
+    item.recognized = info.recognized || null
     await pollBatchGacha(idx, info.cloudTaskId)
     item.status = 'waiting-pick'
-    const maxPick = item.refs.length
-    item.phase = `抽卡完成，共 ${batchMainImages.value.length} 张。请在下方勾选最多 ${maxPick} 张后点「确认并上新」。`
+    item.phase = `抽卡完成，请勾选最多 ${item.refs.length} 张后点「确认并上新」。`
+    // 自动切换筛图面板到第一个完成的商品
+    if (batch.curIdx < 0 || !['waiting-pick', 'running-list'].includes(batch.items[batch.curIdx]?.status)) {
+      await selectBatchItem(idx)
+    }
   } catch (e) {
-    item.status = 'failed'; item.phase = '抽卡失败：' + e.message; batch.running = false
+    item.status = 'failed'; item.phase = '抽卡失败：' + e.message
   }
+}
+
+// 切换当前筛图商品：加载该商品的 context 到 ctxStore
+async function selectBatchItem(idx) {
+  const item = batch.items[idx]
+  if (!item?.contextId) return
+  batch.curIdx = idx
+  try { await ctxStore.load(item.contextId, 'product-replace') } catch (_) {}
 }
 
 async function pollBatchStart(idx, replaceId) {
@@ -222,10 +239,12 @@ async function pollBatchGacha(idx, taskId) {
     try { t = await api.get('/api/flow/task/' + taskId) } catch (_) { continue }
     const done = t.progress || 0, total = t.total || prStore.count
     item.pct = 60 + Math.round(38 * done / Math.max(1, total))
-    item.phase = `抽卡替换中 ${done}/${total}…`
+    // 07.31: progress只是已尝试数,跟成功数脱钩(欠费/超时时全部失败也照样跑到接近total)。
+    const succ = t.successCount ?? 0
+    item.phase = `抽卡替换中 已尝试${done}/${total}(成功${succ})…` + (done > 0 && succ === 0 ? ' ⚠ 全部失败,请检查生图服务/账户余额' : '')
     if (item.contextId) { try { await ctxStore.load(item.contextId) } catch (_) {} }
     if (t.status === 'done' || t.status === 'error') {
-      if (t.status === 'error') throw new Error(t.error || '云端抽卡失败')
+      if (t.status === 'error') throw new Error(t.error || `云端生图失败（已尝试${done}/${total}张，成功${succ}张）——若账户欠费请充值 api.linapi.net`)
       item.pct = 100; item.gachaDone = true; return
     }
   }
@@ -254,16 +273,14 @@ async function confirmBatchAndList() {
   } catch (e) {
     item.status = 'failed'; item.chainLog = (item.chainLog || '') + '\n✗ 失败：' + e.message
   }
-  // 无论成功/失败都自动推进到下一个 pending 商品
-  const nextIdx = batch.items.findIndex((x, i) => i > batch.curIdx && x.status === 'pending')
-  if (nextIdx >= 0) {
-    batch.curIdx = nextIdx
-    await runBatchItem(nextIdx)
-  } else {
-    batch.curIdx = -1; batch.running = false
+  // 自动切到下一个 waiting-pick 商品（如果有）
+  const nextIdx = batch.items.findIndex((x, i) => i !== batch.curIdx && x.status === 'waiting-pick')
+  if (nextIdx >= 0) await selectBatchItem(nextIdx)
+  else {
     const done = batch.items.filter((x) => x.status === 'done').length
     const failed = batch.items.filter((x) => x.status === 'failed').length
-    ElMessage.success(`批量全部跑完：成功 ${done}，失败 ${failed}，跳过 ${batch.items.filter((x) => x.status === 'skipped').length}`)
+    if (batch.items.every((x) => ['done', 'failed', 'warn', 'skipped'].includes(x.status)))
+      ElMessage.success(`批量全部跑完：成功 ${done}，失败 ${failed}`)
   }
 }
 
@@ -314,10 +331,11 @@ async function pollCloudGacha(taskId) {
     try { t = await api.get('/api/flow/task/' + taskId) } catch (_) { continue }
     const done = t.progress || 0, total = t.total || prStore.count
     prStore.pct = 60 + Math.round(38 * done / Math.max(1, total))
-    prStore.phase = `抽卡替换中 ${done}/${total}…`
+    const succ = t.successCount ?? 0
+    prStore.phase = `抽卡替换中 已尝试${done}/${total}(成功${succ})…` + (done > 0 && succ === 0 ? ' ⚠ 全部失败,请检查生图服务/账户余额' : '')
     if (prStore.contextId) { try { await ctxStore.load(prStore.contextId) } catch (_) {} }
     if (t.status === 'done' || t.status === 'error') {
-      if (t.status === 'error') throw new Error(t.error || '云端抽卡失败')
+      if (t.status === 'error') throw new Error(t.error || `云端生图失败（已尝试${done}/${total}张，成功${succ}张）——若账户欠费请充值 api.linapi.net`)
       prStore.pct = 100; prStore.gachaDone = true
       prStore.msg = `✓ 抽卡完成，共 ${mainImages.value.length} 张。请从下方勾选 6 张，点「确认并全自动上新」。`
       prStore.msgType = 'ok'; return
@@ -473,7 +491,7 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
           <el-button :disabled="busy" @click="pickFolder">📁 选择文件夹</el-button>
           <span class="cnt">
             抽卡张数
-            <el-input-number v-model="prStore.count" :min="1" :max="100" :step="1" :disabled="busy" size="small" controls-position="right" style="width: 110px" />
+            <el-input-number v-model="prStore.count" :min="1" :max="100" :step="1" :value-on-clear="100" :disabled="busy" size="small" controls-position="right" style="width: 110px" />
             <span class="cnt-hint">（自测先用小数如 15，正式凑量用 100）</span>
           </span>
           <el-button type="primary" :disabled="!st.white.length || !st.refs.length || busy" :loading="st.running" @click="startGacha">
@@ -511,7 +529,7 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
           <el-button :disabled="batch.running" @click="pickBatchFolder">📁 选择根目录（店铺/商品两级）</el-button>
           <span class="cnt">
             抽卡张数
-            <el-input-number v-model="prStore.count" :min="1" :max="100" :step="1" :disabled="batch.running" size="small" controls-position="right" style="width: 110px" />
+            <el-input-number v-model="prStore.count" :min="1" :max="100" :step="1" :value-on-clear="100" :disabled="batch.running" size="small" controls-position="right" style="width: 110px" />
           </span>
           <el-button type="primary" :disabled="!batch.items.some((x) => x.status === 'pending') || batch.running" @click="startBatch">
             {{ batch.running ? '批量运行中…' : '开始批量' }}
@@ -524,10 +542,14 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
           · 失败 {{ batch.items.filter((x) => x.status === 'failed').length }}
         </p>
         <div v-if="batch.items.length" class="batch-list">
-          <div v-for="(item, i) in batch.items" :key="i" :class="['batch-row', item.status]">
+          <div v-for="(item, i) in batch.items" :key="i"
+               :class="['batch-row', item.status, { active: batch.curIdx === i }]"
+               :style="item.status === 'waiting-pick' ? 'cursor:pointer' : ''"
+               @click="item.status === 'waiting-pick' ? selectBatchItem(i) : null">
             <el-tag :type="statusType(item.status)" size="small">{{ statusLabel(item.status) }}</el-tag>
             <span class="bname">{{ item.shopName }} / {{ item.productName }}</span>
             <span class="binfo">白底{{ item.white.length }}·参考{{ item.refs.length }}</span>
+            <span v-if="item.status === 'waiting-pick' && batch.curIdx !== i" class="bwarn" style="color:#409eff">← 点击筛图</span>
             <span v-if="item.warnReason" class="bwarn">{{ item.warnReason }}</span>
             <el-progress v-if="['running-gacha','waiting-pick','running-list'].includes(item.status)"
               :percentage="item.pct" :status="item.gachaDone ? 'success' : ''" style="flex:1;max-width:200px" />
@@ -536,7 +558,7 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
       </el-card>
 
       <!-- 当前处理商品的筛图面板 -->
-      <el-card v-if="batchCurItem && batchCurItem.status === 'waiting-pick' && batchMainImages.length" class="step">
+      <el-card v-if="batchCurItem && ['waiting-pick','running-list'].includes(batchCurItem.status)" class="step">
         <template #header>
           ② 筛选主图 — {{ batchCurItem.shopName }} / {{ batchCurItem.productName }}
           （已选 {{ batchCurItem.picked.length }} / {{ batchCurItem.refs.length }}，共 {{ batchMainImages.length }} 张）
@@ -550,7 +572,7 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
         </div>
         <div class="actions foot">
           <el-button type="success" :disabled="batchCurItem.picked.length === 0" :loading="batchCurItem.status === 'running-list'" @click="confirmBatchAndList">
-            {{ batchCurItem.status === 'running-list' ? '处理中…' : `确认并上新 → 自动进下一个（${batchCurItem.picked.length} 张）` }}
+            {{ batchCurItem.status === 'running-list' ? '处理中…' : `确认并上新（${batchCurItem.picked.length} 张）` }}
           </el-button>
         </div>
         <pre v-if="batchCurItem.chainLog" class="chainlog">{{ batchCurItem.chainLog }}</pre>
@@ -585,6 +607,7 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
 .batch-row.done { background: #f0fff4; }
 .batch-row.failed { background: #fff1f0; }
 .batch-row.waiting-pick { background: #e6f4ff; }
+.batch-row.active { outline: 2px solid #409eff; }
 .bname { font-size: 13px; font-weight: 500; }
 .binfo { font-size: 12px; color: #909399; }
 .bwarn { font-size: 12px; color: #e6a23c; flex: 1; }

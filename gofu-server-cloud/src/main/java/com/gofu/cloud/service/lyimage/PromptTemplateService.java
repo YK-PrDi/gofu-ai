@@ -243,10 +243,13 @@ public class PromptTemplateService {
             }
             if (node == null) return List.of();
             // 分级版(_v=2)：品类节点两种形态——
-            //   ① 单节点 {_template, rows}（支架挂钩/置物架/卫浴置物架）。
-            //   ② 分组 {落地:{_template,rows}, 吸盘:{...}}（锅盖架，按 skuHint 挑组）。
+            //   ① 单节点 {_template, rows}（支架挂钩/卫浴置物架）。
+            //   ② 分组 {组名:{_template,rows,matchKeywords,_default?}, ...}（锅盖架/置物架，按 skuHint 挑组）。
             //   花洒喷头仍是旧格式 List（每条带 baked prompt + focus 标记），按老路走。
             // template 为空表示旧格式条目(自带 prompt)；非空则需 base=merge(_template,row) 现拼(排除禁止)。
+            // 07.28 bug修复:原按硬编码"落地/吸盘"关键词挑组,新增子组(肥皂架/筷子筒等)时旧代码认不出组名会退化成
+            //   永远兜底成第一个组(值不对应商品,画出锅盖架/锅具置物架等错误画面)。改成组自带 matchKeywords 动态匹配,
+            //   commandKeywords 命中不到时再退回 _default 标记的组(找不到 _default 则退回遍历首个可用组，保底不抛异常)。
             List<Map<String, Object>> entries;
             Map<String, Object> template = null;
             if (node instanceof Map) {
@@ -255,15 +258,9 @@ public class PromptTemplateService {
                 if (m0.containsKey("rows")) {
                     leafNode = m0;   // ① 单节点
                 } else {
-                    // ② 分组：skuHint 含 吸盘/壁挂/墙/免钉 → 吸盘，否则 落地(或首个可用组)
-                    String hint = skuHint == null ? "" : skuHint;
-                    String group = (hint.contains("吸盘") || hint.contains("壁挂") || hint.contains("墙") || hint.contains("免钉")) ? "吸盘" : "落地";
-                    Object g = m0.get(group);
-                    if (!(g instanceof Map) || !((Map<String, Object>) g).containsKey("rows")) {
-                        g = m0.containsKey("落地") ? m0.get("落地") : m0.values().iterator().next();
-                    }
-                    if (!(g instanceof Map)) return List.of();
-                    leafNode = (Map<String, Object>) g;
+                    // ② 分组：按各组 matchKeywords 匹配 skuHint，命中不到则退回 _default 组或首个可用组
+                    leafNode = pickCompositionGroup(m0, skuHint);
+                    if (leafNode == null) return List.of();
                 }
                 template = (Map<String, Object>) leafNode.getOrDefault("_template", Map.of());
                 entries = (List<Map<String, Object>>) leafNode.getOrDefault("rows", List.of());
@@ -326,6 +323,32 @@ public class PromptTemplateService {
     /** 跨次去重用的构图唯一key:品类+id(id 在json里花洒是字符串、分级品类是数字,统一转字符串)。 */
     private String compositionKey(String category, Map<String, Object> entry) {
         return category + "#" + String.valueOf(entry.get("id"));
+    }
+
+    /**
+     * 07.28 bug修复:分组节点(如"锅盖架"/"置物架")按 skuHint 动态挑子组，取代旧的硬编码"落地/吸盘"关键词判断。
+     * 每个子组自带 matchKeywords(字符串列表)，skuHint 命中任一关键词即选中该组；
+     * 命中不到时退回标记 _default=true 的组；仍找不到则退回遍历到的第一个带 rows 的组(保底，不抛异常)。
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> pickCompositionGroup(Map<String, Object> m0, String skuHint) {
+        String hint = skuHint == null ? "" : skuHint;
+        Map<String, Object> defaultGroup = null;
+        Map<String, Object> firstGroup = null;
+        for (Object v : m0.values()) {
+            if (!(v instanceof Map)) continue;
+            Map<String, Object> g = (Map<String, Object>) v;
+            if (!g.containsKey("rows")) continue;
+            if (firstGroup == null) firstGroup = g;
+            if (Boolean.TRUE.equals(g.get("_default"))) defaultGroup = g;
+            Object mk = g.get("matchKeywords");
+            if (mk instanceof List) {
+                for (Object kw : (List<?>) mk) {
+                    if (!hint.isEmpty() && hint.contains(String.valueOf(kw))) return g;
+                }
+            }
+        }
+        return defaultGroup != null ? defaultGroup : firstGroup;
     }
 
     // 分级格式固定任务开头(原每行 xlsx"任务"列都是同一句,收口成常量,不再逐行存)。
@@ -417,7 +440,15 @@ public class PromptTemplateService {
             Object sub = node.get("sub");
             if (sub instanceof Map && skuHint != null && !skuHint.isBlank()) {
                 for (Map.Entry<String, Object> e : ((Map<String, Object>) sub).entrySet()) {
-                    if (skuHint.contains(e.getKey()) && e.getValue() instanceof List && !((List<?>) e.getValue()).isEmpty())
+                    // 07.28 bug修复:原来只认 skuHint 完整包含 key 原文(如"肥皂架")；但真实商品名常是
+                    // "三位肥皂置物架"这种不含连续"肥皂架"三字的写法，导致命中不到专属段、退回通用词库。
+                    // 补一层：key 以"架"结尾时，也用去掉末字的核心词(如"肥皂")再匹配一次。
+                    String key = e.getKey();
+                    boolean hit = skuHint.contains(key);
+                    if (!hit && key.length() > 1 && key.endsWith("架")) {
+                        hit = skuHint.contains(key.substring(0, key.length() - 1));
+                    }
+                    if (hit && e.getValue() instanceof List && !((List<?>) e.getValue()).isEmpty())
                         buckets.add(0, new java.util.ArrayList<>((List<String>) e.getValue()));
                 }
             }

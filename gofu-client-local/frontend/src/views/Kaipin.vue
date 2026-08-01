@@ -165,10 +165,11 @@ async function pollGenTask(taskId, total) {
     try { t = await api.get('/api/flow/task/' + taskId) } catch (_) { continue }
     const done = t.progress || 0
     kpStore.genPct = 20 + Math.round(78 * done / Math.max(1, total))
-    kpStore.genPhase = `生图 ${done}/${total}…`
+    const succ = t.successCount ?? 0
+    kpStore.genPhase = `生图 已尝试${done}/${total}(成功${succ})…` + (done > 0 && succ === 0 ? ' ⚠ 全部失败,请检查生图服务/账户余额' : '')
     if (kpStore.contextId) { try { await ctxStore.load(kpStore.contextId) } catch (_) {} }
     if (t.status === 'done' || t.status === 'error') {
-      if (t.status === 'error') throw new Error(t.error || '云端生图失败')
+      if (t.status === 'error') throw new Error(t.error || `云端生图失败（已尝试${done}张，成功${t.successCount??0}张）——若账户欠费请充值 api.linapi.net`)
       kpStore.genPct = 100; kpStore.genDone = true
       kpStore.genMsg = `✓ 生图完成，共 ${mainImages.value.length} 张。请勾选后点「确认并上新」。`
       kpStore.genMsgType = 'ok'; return

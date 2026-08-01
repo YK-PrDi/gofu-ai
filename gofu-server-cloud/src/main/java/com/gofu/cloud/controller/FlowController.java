@@ -305,6 +305,7 @@ public class FlowController {
                                 if (genWithRetry(prompt, refs, white, out, aspect, 2)) {
                                     keys[idx] = uploadIfCos(out);
                                     streamMainSlot(ctx, idx, keys[idx]);
+                                    task.incrementSuccess();
                                 } else {
                                     task.addResult(Map.of("message", "第 " + (idx + 1) + " 张替换失败"));
                                 }
@@ -476,6 +477,7 @@ public class FlowController {
                         if (genWithRetryKaipin(prompt, twoRefs, userLocal, out, aspect, 2)) {
                             keys[i] = uploadIfCos(out);
                             streamMainSlot(ctx, i, keys[i]);
+                            task.incrementSuccess();
                         } else {
                             task.addResult(Map.of("message", "第 " + (i + 1) + " 张生成失败"));
                         }
@@ -559,6 +561,7 @@ public class FlowController {
                 keys[0] = uploadIfCos(out);
                 firstRef = localizeWhite(keys[0]);
                 streamMainSlot(ctx, 0, keys[0]);   // 首图立刻写槽位+save,第1张即可见
+                task.incrementSuccess();
             } else {
                 // P0-A：单张失败要可见（原来静默），前端能看到"某张没出"
                 task.addResult(Map.of("message", "主图 #1 生成失败"));
@@ -588,6 +591,7 @@ public class FlowController {
                         if (genWithRetry(prompt, refs, white, out, aspect, 2)) {
                             keys[idx] = uploadIfCos(out);
                             streamMainSlot(ctx, idx, keys[idx]);   // 8d:完成即写槽位+save,前端逐张可见
+                            task.incrementSuccess();
                         } else {
                             task.addResult(Map.of("message", "主图 #" + (idx + 1) + " 生成失败"));
                             log.warn("主图 #{} 生成失败(重试用尽)", idx + 1);
@@ -1015,8 +1019,10 @@ public class FlowController {
                     if (local == null) return;
                     String outPath = new File(tmpOut, prefix + "-" + idx + ".jpg").getAbsolutePath();
                     task.setCurrentProduct("风格迁移 " + prefix + " " + (idx + 1));
-                    if (genWithRetry(prompt, List.of(local), local, outPath, "auto", 2))
+                    if (genWithRetry(prompt, List.of(local), local, outPath, "auto", 2)) {
                         out[idx] = uploadIfCos(outPath);
+                        task.incrementSuccess();
+                    }
                 } catch (Exception e) {
                     log.warn("风格迁移单张失败(保留原图) {}#{}: {}", prefix, idx, e.getMessage());
                 } finally {
@@ -1170,6 +1176,7 @@ public class FlowController {
                     mainKeys[0] = uploadIfCos(out);
                     firstRef = localizeWhite(mainKeys[0]);
                     streamMainSlot(ctx, 0, mainKeys[0]);
+                    task.incrementSuccess();
                 } else { task.addResult(Map.of("message", "主图 #1 生成失败")); log.warn("[step-all] 主图 #1(首图) 失败"); }
                 task.incrementProgress();
             }
@@ -1202,6 +1209,7 @@ public class FlowController {
                             if (genWithRetry(prompt, refs, fWhite, out, fAspect, 2)) {
                                 mainKeys[idx] = uploadIfCos(out);
                                 streamMainSlot(ctx, idx, mainKeys[idx]);
+                                task.incrementSuccess();
                             } else { task.addResult(Map.of("message", "主图 #" + (idx + 1) + " 生成失败")); log.warn("[step-all] 主图 #{} 失败", idx + 1); }
                         } finally { GEN_CONC.release(); }
                     } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
@@ -1291,6 +1299,7 @@ public class FlowController {
                 String dp = buildDetailPrompt(ctx, idx);
                 if (baseForDetail != null && genWithRetry(dp, refs, baseForDetail, out, "9:16", 2)) {
                     streamDetailSlot(ctx, idx, uploadIfCos(out));
+                    task.incrementSuccess();
                 } else {
                     // 07.31: 同 runStep2，补可见失败信号，不让详情图失败静默丢张。
                     task.addResult(Map.of("message", "详情图 #" + (idx + 1) + " 生成失败"));
@@ -1362,7 +1371,7 @@ public class FlowController {
                         task.setCurrentProduct("SKU：" + fName);
                         String path = lyImageGen.generateSkuImage(fRefMain, fName, it.getSpec2(), fProductType,
                                 fBatch, idx + 1, "", fSkuWhite, fAccImagePaths, "", fBgStyle, it.getItemCode(), fAccParts, templateId, it.getMainQty());
-                        if (path != null) { it.setImgDir(uploadIfCos(path)); streamSkuSave(ctx); }
+                        if (path != null) { it.setImgDir(uploadIfCos(path)); streamSkuSave(ctx); task.incrementSuccess(); }
                     } finally { GEN_CONC.release(); }
                 } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
                 catch (Exception e) { log.warn("[step-all] SKU「{}」生图失败(跳过): {}", fName, e.getMessage()); }
@@ -1414,6 +1423,7 @@ public class FlowController {
                             if (baseForDetail != null && genWithRetry(dp, refs, baseForDetail, out, "9:16", 2)) {
                                 dKeys[idx] = uploadIfCos(out);
                                 streamDetailSlot(ctx, idx, dKeys[idx]);   // 8d:完成即写槽位+save,前端逐张可见
+                                task.incrementSuccess();
                             } else {
                                 // 07.31: 失败原来静默留null槽位、最后被compact掉，用户只能数图片数量发现少了几张。
                                 // 补上跟主图一致的可见失败信号——前端轮询能看到、日志能查到，不用靠数数。
@@ -1514,6 +1524,7 @@ public class FlowController {
                                 // COS 上传走 uploadIfCos：失败(如账户欠费451)时回退本地路径，图不丢弃(07.08修)。
                                 it.setImgDir(uploadIfCos(path));
                                 streamSkuSave(ctx);   // 8d:该SKU完成即save,前端逐个显示(item已隔离)
+                                task.incrementSuccess();
                             }
                         } finally { GEN_CONC.release(); }
                     } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
@@ -1537,6 +1548,7 @@ public class FlowController {
         resp.put("taskId", t.getId());
         resp.put("status", t.getStatus());
         resp.put("progress", t.getProgress());
+        resp.put("successCount", t.getSuccessCount());
         resp.put("total", t.getTotal());
         resp.put("currentProduct", t.getCurrentProduct());
         resp.put("results", t.getResults());

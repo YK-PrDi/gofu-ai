@@ -30,7 +30,7 @@ public class LifecycleService {
     /** 收到 closing 后的宽限期(ms)：宽限内又有心跳(刷新恢复)则取消退出。 */
     private static final long GRACE_MS = 6_000;
     /** 兜底：完全无心跳超过此时长也退出(防浏览器整个被杀、closing 都没发出来时残留后台)。 */
-    private static final long IDLE_MAX_MS = 120_000;
+    private static final long IDLE_MAX_MS = 1_800_000;
 
     private final AtomicLong lastBeat = new AtomicLong(0);
     /** >0 表示已收到关闭信号，值=预定退出的时间戳(ms)。0=未在关闭倒计时。 */
