@@ -844,13 +844,20 @@ public class ImageGenerationService {
         return agent.generateMulti(enforcedPrompt, refImagePaths, whiteBgPath, outputPath, aspect, task);
     }
 
-    /** 开品模式专用：走 GPT-Image，和普通生图一样，但迪士尼素材图已由调用方预缩小。 */
+    /**
+     * 开品模式专用：走 GPT-Image，quality=low 减少单次生成耗时(避免 Read timed out)。
+     * 07.30 曾想靠此法提速，但误调了 ImageGeneratorAgent 接口的5参数默认方法(该方法在
+     * GptImageAgent 里硬编码转发"medium")，quality=low 从未真正传下去——本次改直调
+     * GptImageAgent 自带的6参数 quality 版本，修复这个"改了名字没改行为"的问题。
+     */
     public boolean generateImageMultiLowQuality(String prompt, List<String> refImagePaths,
                                                  String whiteBgPath, String outputPath, String aspect) {
-        // 和 genWithRetry 同款，走默认 agent（gpt-image），不改 quality（保持 medium）
         ImageGeneratorAgent agent = resolveAgent(null);
         String enforcedPrompt = enforceNoIntersectionPrompt(prompt);
-        log.info("[开品生图] 使用智能体 [{}] refs={}", agent.getId(), refImagePaths == null ? 0 : refImagePaths.size());
+        log.info("[开品生图] 使用智能体 [{}] refs={} quality=low", agent.getId(), refImagePaths == null ? 0 : refImagePaths.size());
+        if (agent instanceof com.gofu.cloud.service.agent.GptImageAgent gpt) {
+            return gpt.generateMulti(enforcedPrompt, refImagePaths, whiteBgPath, outputPath, aspect, "low");
+        }
         return agent.generateMulti(enforcedPrompt, refImagePaths, whiteBgPath, outputPath, aspect);
     }
 

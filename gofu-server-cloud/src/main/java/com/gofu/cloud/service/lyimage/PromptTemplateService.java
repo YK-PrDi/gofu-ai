@@ -22,6 +22,10 @@ public class PromptTemplateService {
     private static final Logger log = LoggerFactory.getLogger(PromptTemplateService.class);
     private final LyImageProperties appProperties;
     private final ObjectMapper om = new ObjectMapper();
+    // 0a跨次防同质化：同一 contextId 重新生成布局/主图时记住上次抽过的构图id，本次优先避开——
+    // pickMainCompositions 原来每次独立洗牌，池子小(如花洒36条抽6张)时两次生成很容易抽到大量重叠构图。
+    // 进程内存态即可(不落库)：重启即清零，只作"同session内尽量不重复"的柔性提示，非硬约束。
+    private final Map<String, java.util.Set<String>> usedCompositionIdsByContext = new java.util.concurrent.ConcurrentHashMap<>();
 
     public PromptTemplateService(LyImageProperties appProperties) {
         this.appProperties = appProperties;
@@ -199,6 +203,9 @@ public class PromptTemplateService {
         }
     }
 
+    /** 07.31：构图+其标签(值取自卖点库分组名)。给 pickSellPointsWithTags 按标签过滤候选卖点用，解决"卖点与画面语义错配"。 */
+    public record CompositionPick(String prompt, List<String> tags) {}
+
     /**
      * 主图构图库选择（0a 防同质化）：按品类从 main-compositions.json 取 N 套【不重复】构图 prompt。
      *  · 库为主 + 白底图锁主体：只提供版式/主体关系/文字区位/色彩/视效，产品本体由白底图 ref 决定。
@@ -208,8 +215,21 @@ public class PromptTemplateService {
      *  N 大于库容量时循环取（仍打乱顺序，尽量错开）。命中不到返回空列表（调用方回退 AI 现编）。
      * @return 每套构图的完整 prompt 列表（长度尽量=count；空=未命中，走原 AI 分析）。
      */
-    @SuppressWarnings("unchecked")
     public List<String> pickMainCompositions(String category, String skuHint, int count, boolean hasFilter) {
+        return pickMainCompositions(category, skuHint, count, hasFilter, null);
+    }
+
+    /** 带 contextId 的版本：同一商品重新生成时优先避开上次抽过的构图id，减少跨次撞车。contextId 为空则不去重(等价旧行为)。 */
+    public List<String> pickMainCompositions(String category, String skuHint, int count, boolean hasFilter, String contextId) {
+        List<CompositionPick> picks = pickMainCompositionsDetailed(category, skuHint, count, hasFilter, contextId);
+        List<String> out = new java.util.ArrayList<>(picks.size());
+        for (CompositionPick p : picks) out.add(p.prompt());
+        return out;
+    }
+
+    /** 同 {@link #pickMainCompositions}，但连同每套构图的 tags 一起返回。 */
+    @SuppressWarnings("unchecked")
+    public List<CompositionPick> pickMainCompositionsDetailed(String category, String skuHint, int count, boolean hasFilter, String contextId) {
         if (category == null || category.isBlank() || count <= 0) return List.of();
         try {
             Map<String, Object> root = om.readValue(PromptLoader.load("prompt/main-compositions.json"), Map.class);
@@ -261,9 +281,21 @@ public class PromptTemplateService {
             // 打乱后取 count 套(库母题多于张数,天然不重复;不足则循环补,靠库容量而非微扰错开)。
             //   分级重构(07.28)后每套 base 由 _template+row 现拼,构图/文字逐行不同已足够差异化,
             //   删掉原微扰指令(锅盖架落地16套/吸盘15套已超常规张数,循环命中概率极低,微扰是伪需求)。
+            // 07.31 跨次防同质化:同一 contextId 重新生成时,池子小(如花洒36条抽6张)两次独立洗牌很容易撞车。
+            //   把上次用过的构图id排到池尾(仍打乱各自内部顺序),池容量够时天然优先避开;不够才落回旧构图。
             List<Map<String, Object>> pool = new java.util.ArrayList<>(entries);
             java.util.Collections.shuffle(pool);
-            List<String> out = new java.util.ArrayList<>();
+            java.util.Set<String> used = contextId == null ? null : usedCompositionIdsByContext.get(contextId);
+            if (used != null && !used.isEmpty()) {
+                List<Map<String, Object>> fresh = new java.util.ArrayList<>();
+                List<Map<String, Object>> stale = new java.util.ArrayList<>();
+                for (Map<String, Object> e : pool) {
+                    (used.contains(compositionKey(category, e)) ? stale : fresh).add(e);
+                }
+                pool = fresh; pool.addAll(stale);
+            }
+            List<CompositionPick> out = new java.util.ArrayList<>();
+            java.util.Set<String> pickedIds = new java.util.LinkedHashSet<>();
             int poolSize = pool.size();
             for (int i = 0; i < count; i++) {
                 Map<String, Object> e = pool.get(i % poolSize);
@@ -276,13 +308,24 @@ public class PromptTemplateService {
                     p = assembleComposition(template, e);
                 }
                 if (p == null || p.isBlank()) continue;
-                out.add(p);
+                Object tagsRaw = e.get("tags");
+                List<String> tags = tagsRaw instanceof List ? ((List<?>) tagsRaw).stream().map(String::valueOf).toList() : List.of();
+                out.add(new CompositionPick(p, tags));
+                pickedIds.add(compositionKey(category, e));
+            }
+            if (contextId != null) {
+                usedCompositionIdsByContext.computeIfAbsent(contextId, k -> java.util.concurrent.ConcurrentHashMap.newKeySet()).addAll(pickedIds);
             }
             return out;
         } catch (Exception e) {
             log.warn("主图构图库选择失败(category={}): {}", category, e.getMessage());
             return List.of();
         }
+    }
+
+    /** 跨次去重用的构图唯一key:品类+id(id 在json里花洒是字符串、分级品类是数字,统一转字符串)。 */
+    private String compositionKey(String category, Map<String, Object> entry) {
+        return category + "#" + String.valueOf(entry.get("id"));
     }
 
     // 分级格式固定任务开头(原每行 xlsx"任务"列都是同一句,收口成常量,不再逐行存)。
@@ -306,6 +349,45 @@ public class PromptTemplateService {
             if (!s.isBlank()) sb.append(' ').append(s);
         }
         return sb.toString();
+    }
+
+    /**
+     * 07.31：给单张主图挑卖点候选词——只从该张构图的 tags(值=卖点库分组名)对应分组里抽，
+     * 解决"卖点内容与画面场景语义不搭"(如画收纳场景却分到出水体验类卖点)。
+     * tags 命中不到任何分组时退回全量分组(不因标签缺失而无候选)。
+     * @param tags   本张构图的 tags(来自 CompositionPick.tags())
+     * @param wantCount 候选词数量(2~3，交给 buildSeriesPrompt 里的 AI 在候选内挑一个最贴合画面的)
+     * @return 候选卖点短词列表（命中不到卖点库返回空列表）
+     */
+    @SuppressWarnings("unchecked")
+    public List<String> pickSellPointCandidates(String category, String skuHint, List<String> tags, int wantCount) {
+        if (category == null || category.isBlank() || wantCount <= 0) return List.of();
+        try {
+            Map<String, Object> node = sellPointNode(category);
+            if (node == null) return List.of();
+            Object groups = node.get("groups");
+            if (!(groups instanceof Map)) return List.of();
+            Map<String, Object> groupMap = (Map<String, Object>) groups;
+            List<String> pool = new java.util.ArrayList<>();
+            if (tags != null && !tags.isEmpty()) {
+                for (String tag : tags) {
+                    Object v = groupMap.get(tag);
+                    if (v instanceof List) pool.addAll((List<String>) v);
+                }
+            }
+            if (pool.isEmpty()) {
+                // 标签未命中任何分组(或未传tags)：退回全量分组，不让候选池因标签缺失而空
+                for (Object v : groupMap.values()) if (v instanceof List) pool.addAll((List<String>) v);
+            }
+            if (pool.isEmpty()) return List.of();
+            java.util.Collections.shuffle(pool);
+            java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
+            for (String w : pool) { if (out.size() >= wantCount) break; out.add(w); }
+            return new java.util.ArrayList<>(out);
+        } catch (Exception e) {
+            log.warn("按标签选卖点候选失败(category={}, tags={}): {}", category, tags, e.getMessage());
+            return List.of();
+        }
     }
 
     /**

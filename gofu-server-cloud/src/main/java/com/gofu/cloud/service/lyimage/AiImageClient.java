@@ -81,6 +81,18 @@ public class AiImageClient {
         if (src == null) throw new RuntimeException("生图返回的图片无法解码");
         int max = 1024;
         int w = src.getWidth(), h = src.getHeight();
+        // 07.31：SKU图请求参数固定 size=1024x1024，但 GPT-Image-2 不保证严格按size出图(带参考图时常按参考图比例走)，
+        // 这里原来只缩放不纠比例，模型出什么形状就存什么形状，导致SKU图偏竖/偏横不是1:1。
+        // 比照 GptImageAgent.ensureSize 的做法：比例明显偏离1:1(超5%)时 cover裁剪(铺满+居中裁剪)强制纠正成正方形。
+        double ratio = (double) w / h;
+        if (Math.abs(ratio - 1.0) > 0.05) {
+            int origW = w, origH = h;
+            int side = Math.min(w, h);
+            int sx = (w - side) / 2, sy = (h - side) / 2;
+            src = src.getSubimage(sx, sy, side, side);
+            w = h = side;
+            log.info("saveAsJpg: 比例偏离1:1(原{}x{})，居中裁剪为{}x{}正方形", origW, origH, side, side);
+        }
         BufferedImage out;
         if (w > max || h > max) {
             double scale = Math.min((double) max / w, (double) max / h);

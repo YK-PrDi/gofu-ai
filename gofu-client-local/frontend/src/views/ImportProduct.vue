@@ -102,7 +102,7 @@ async function pollImport(importId) {
     imp.progress = t.pct || 0
     imp.msg = `导入中 ${t.pct || 0}% · ${t.phase || '处理中…'}`; imp.msgType = ''
     // 建完context即中途载入并持续刷新,右侧预览实时出图(主图/详情先显示,方案/SKU随后陆续刷入),不必等100%
-    if (t.contextId) { try { await ctxStore.load(t.contextId) } catch (_) {} }
+    if (t.contextId) { try { await ctxStore.load(t.contextId, 'import') } catch (_) {} }
     if (t.done) { if (t.error) throw new Error(t.error); return t.result }
   }
 }
@@ -130,7 +130,7 @@ async function runImport() {
     imp.recWarnings = d.warnings || []
     imp.lastImportedFolder = imp.folderName
     imp.recognized = true
-    await ctxStore.load(d.contextId)
+    await ctxStore.load(d.contextId, 'import')
     imp.msg = `✓ 已识别「${imp.recProductName}」（品类${d.category || '未识别'}·SKU ${imp.recSkus.length}）。核对无误后点「确认并生成布局」。`
     imp.msgType = 'ok'
   } catch (e) {

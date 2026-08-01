@@ -530,7 +530,7 @@ public class FlowController {
         String seriesPlan = ma.seriesPlan();
         final String fSeriesPlan = seriesPlan;
         final boolean fFromLib = fromLib;   // 供 2~N 并发 lambda 用
-        final List<String> fLibSell = ma.libSellPoints();   // 0a卖点侧:每张分配的库卖点(空=走原逻辑)
+        final List<List<String>> fLibSell = ma.libSellPointCandidates();   // 0a卖点侧:每张按构图tags过滤的候选词(空=走原逻辑)
         final String fHiConv = ma.hiConvHeadline();          // 首图高转化整句
 
         // B1：重新生成前清空旧主图，实现"覆盖而非追加"（重复点/一键重生都靠这里）。
@@ -626,8 +626,10 @@ public class FlowController {
      * 0a卖点侧：库命中时附带卖点库产物——libSellPoints(每张一个跨组不同卖点,防同质化) + hiConvHeadline(首图高转化整句)。
      * 库未命中(GPT现编)时 libSellPoints 为空,卖点仍由 GPT 现编/seriesPlan 分配(原逻辑)。
      */
+    // 07.31: libSellPoints 由"每张固定分配1个词"改为"每张按该构图tags过滤后的2-3个候选词"，
+    // 交给 buildSeriesPrompt 里的 AI 在候选范围内挑一个最贴合画面场景的、允许改写措辞——见 docs/卖点画面匹配修复方案.md。
     private record MainAnalysis(List<String> segPrompts, boolean fromLib, String seriesPlan,
-                                List<String> libSellPoints, String hiConvHeadline) {}
+                                List<List<String>> libSellPointCandidates, String hiConvHeadline) {}
 
     /**
      * 8c：主图多段 prompt 分析(从 genAllMains 原样抽出,行为不变)。
@@ -638,15 +640,18 @@ public class FlowController {
         List<String> segPrompts = new ArrayList<>();
         boolean fromLib = false;   // 主图构图库是否命中(命中则 buildSeriesPrompt 弱化连贯性+跳角度约束)
         String seriesPlan = "";   // 07.10#1 保留【总分析/系列文案规划】作全局共享上下文(原来被丢弃)
+        List<List<String>> compTags = List.of();   // 07.31: 每套命中构图的 tags(值取自卖点库分组名),供下面卖点候选按标签过滤
         // 0a 防同质化：先查【主图构图库】(按品类取N套确定的优质构图,库为主+白底图锁主体)。
         //   命中→直接用库构图当每张 base prompt(不再让 GPT 看白底图现编,构图从"AI随机"变"人工筛过的库里随机",
         //   第1张也从库随机取而非AI默认正面)。未命中(该品类无库)→回退下方 GPT 现编分析。
         try {
             String skuHint = (ctx.getMainItem() == null ? "" : ctx.getMainItem());
             boolean hasFilter = skuHint.contains("滤芯") || detectFilterInPlans(ctx);
-            List<String> libComps = templateService.pickMainCompositions(ctx.getCategory(), skuHint, mainTotal, hasFilter);
+            List<com.gofu.cloud.service.lyimage.PromptTemplateService.CompositionPick> libComps =
+                    templateService.pickMainCompositionsDetailed(ctx.getCategory(), skuHint, mainTotal, hasFilter, ctx.getId());
             if (!libComps.isEmpty()) {
-                segPrompts.addAll(libComps);
+                for (var pick : libComps) segPrompts.add(pick.prompt());
+                compTags = libComps.stream().map(com.gofu.cloud.service.lyimage.PromptTemplateService.CompositionPick::tags).toList();
                 fromLib = true;   // 库命中:buildSeriesPrompt 据此弱化系列连贯性+跳过角度约束,让库构图差异化真正落地(防同质化)
                 log.info("0a 主图构图库命中 {} 套构图(品类={}, 带滤芯={}) → 用库构图,跳过AI现编", libComps.size(), ctx.getCategory(), hasFilter);
             }
@@ -683,22 +688,28 @@ public class FlowController {
         } catch (Exception e) {
             log.warn("M11 自定义分析失败，降级静态模板: {}", e.getMessage());
         }
-        // 0a 卖点侧防同质化：库命中构图时，同步从【卖点库】按品类抽 N 个跨分组不重复卖点(每张一个不同维度)，
-        //   首图另抽一句高转化整句(运营精选主标题)。卖点定内容、构图库定版式——注入 buildSeriesPrompt 的【画面文案】。
+        // 0a 卖点侧防同质化：库命中构图时，为每张按其构图 tags 过滤出2-3个候选卖点词(不再固定分配1个)，
+        //   首图另抽一句高转化整句(运营精选主标题)。候选池已按tags收窄到语义相关分组，
+        //   交 buildSeriesPrompt 里的 AI 在候选内挑一个最贴合本张画面场景的、允许改写措辞——
+        //   解决"选错方向"(卖点库与构图库各自独立随机导致语义错配)，见 docs/卖点画面匹配修复方案.md。
         //   库未命中(GPT现编)时不抽，卖点仍由 GPT 现编/seriesPlan 分配(原逻辑不变)。
-        List<String> libSellPoints = List.of();
+        List<List<String>> libSellPointCandidates = List.of();
         String hiConvHeadline = "";
         if (fromLib) {
             try {
                 String skuHint = (ctx.getMainItem() == null ? "" : ctx.getMainItem());
-                libSellPoints = templateService.pickSellPoints(ctx.getCategory(), skuHint, mainTotal);
+                List<List<String>> cands = new ArrayList<>();
+                for (int i = 0; i < segPrompts.size(); i++) {
+                    List<String> tags = i < compTags.size() ? compTags.get(i) : List.of();
+                    cands.add(templateService.pickSellPointCandidates(ctx.getCategory(), skuHint, tags, 3));
+                }
+                libSellPointCandidates = cands;
                 hiConvHeadline = templateService.pickHiConvHeadline(ctx.getCategory());
-                if (!libSellPoints.isEmpty())
-                    log.info("0a 卖点库命中 {} 个跨组卖点(品类={}) 首图高转化句=[{}] → 注入画面文案,防卖点同质化",
-                            libSellPoints.size(), ctx.getCategory(), hiConvHeadline);
+                log.info("0a 卖点库按构图标签过滤候选(品类={}) 各张候选数={} 首图高转化句=[{}] → 注入画面文案,防卖点画面错配",
+                        ctx.getCategory(), cands.stream().map(List::size).toList(), hiConvHeadline);
             } catch (Exception e) { log.warn("0a 卖点库抽取失败(回退GPT现编卖点): {}", e.getMessage()); }
         }
-        return new MainAnalysis(segPrompts, fromLib, seriesPlan, libSellPoints, hiConvHeadline);
+        return new MainAnalysis(segPrompts, fromLib, seriesPlan, libSellPointCandidates, hiConvHeadline);
     }
 
     /**
@@ -1133,7 +1144,7 @@ public class FlowController {
             List<String> segPrompts = ma.segPrompts();
             final boolean fFromLib = ma.fromLib();
             final String fSeriesPlan = ma.seriesPlan();
-            final List<String> fLibSell = ma.libSellPoints();   // 0a卖点侧
+            final List<List<String>> fLibSell = ma.libSellPointCandidates();   // 0a卖点侧:每张候选词
             final String fHiConv = ma.hiConvHeadline();
 
             // 预填主图/详情 null 槽位(8d 流式,保序)
@@ -1278,11 +1289,19 @@ public class FlowController {
                 String baseForDetail = mainLocal != null ? mainLocal : white;
                 String out = new File(tmpOut, "detail-" + idx + ".jpg").getAbsolutePath();
                 String dp = buildDetailPrompt(ctx, idx);
-                if (baseForDetail != null && genWithRetry(dp, refs, baseForDetail, out, "9:16", 2))
+                if (baseForDetail != null && genWithRetry(dp, refs, baseForDetail, out, "9:16", 2)) {
                     streamDetailSlot(ctx, idx, uploadIfCos(out));
+                } else {
+                    // 07.31: 同 runStep2，补可见失败信号，不让详情图失败静默丢张。
+                    task.addResult(Map.of("message", "详情图 #" + (idx + 1) + " 生成失败"));
+                    log.warn("[step-all] 详情图 #{} 生成失败", idx);
+                }
             } finally { GEN_CONC.release(); }
         } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-        catch (Exception e) { log.warn("[step-all] 详情图 #{} 失败(跳过): {}", idx, e.getMessage()); }
+        catch (Exception e) {
+            task.addResult(Map.of("message", "详情图 #" + (idx + 1) + " 异常: " + e.getMessage()));
+            log.warn("[step-all] 详情图 #{} 失败(跳过): {}", idx, e.getMessage());
+        }
         finally { task.incrementProgress(); }
     }
 
@@ -1395,10 +1414,18 @@ public class FlowController {
                             if (baseForDetail != null && genWithRetry(dp, refs, baseForDetail, out, "9:16", 2)) {
                                 dKeys[idx] = uploadIfCos(out);
                                 streamDetailSlot(ctx, idx, dKeys[idx]);   // 8d:完成即写槽位+save,前端逐张可见
+                            } else {
+                                // 07.31: 失败原来静默留null槽位、最后被compact掉，用户只能数图片数量发现少了几张。
+                                // 补上跟主图一致的可见失败信号——前端轮询能看到、日志能查到，不用靠数数。
+                                task.addResult(Map.of("message", "详情图 #" + (idx + 1) + " 生成失败"));
+                                log.warn("详情图 #{} 生成失败(baseForDetail={})", idx, baseForDetail == null ? "null" : "非空");
                             }
                         } finally { GEN_CONC.release(); }
                     } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                    catch (Exception e) { log.warn("详情图 #{} 并发生成失败(跳过): {}", idx, e.getMessage()); }
+                    catch (Exception e) {
+                        task.addResult(Map.of("message", "详情图 #" + (idx + 1) + " 异常: " + e.getMessage()));
+                        log.warn("详情图 #{} 并发生成失败(跳过): {}", idx, e.getMessage());
+                    }
                     finally { task.incrementProgress(); }
                 }, imageGen.getExecutor()));
             }
@@ -1929,30 +1956,33 @@ public class FlowController {
      * @param structLock M19：刚性细杆/框架类品类——强制正面系角度 + 白底图强锁结构（防旋转臆造变形）
      */
     /**
-     * 0a卖点侧：取第 idx 张(0-based)主图分配的库卖点。首图(idx=0)优先用高转化整句(运营精选主标题)，
-     * 无高转化句则退回卖点池首个；其余张取 libSellPoints[idx]。库未命中(列表空)返回空串→buildSeriesPrompt 不注入。
+     * 0a卖点侧：取第 idx 张(0-based)主图的卖点候选词列表。首图(idx=0)优先用高转化整句(运营精选主标题，
+     * 单独一个候选)，无高转化句则退回该张候选池；其余张取 libSellPointCandidates[idx](已按该张构图tags
+     * 过滤，2-3个候选)。库未命中(列表空)返回空列表→buildSeriesPrompt 不注入。
      */
-    private String sellPointFor(int idx, List<String> libSellPoints, String hiConvHeadline) {
-        if (libSellPoints == null || libSellPoints.isEmpty()) return "";
-        if (idx == 0 && hiConvHeadline != null && !hiConvHeadline.isBlank()) return hiConvHeadline;
-        return idx < libSellPoints.size() ? libSellPoints.get(idx) : "";
+    private List<String> sellPointFor(int idx, List<List<String>> libSellPointCandidates, String hiConvHeadline) {
+        if (idx == 0 && hiConvHeadline != null && !hiConvHeadline.isBlank()) return List.of(hiConvHeadline);
+        if (libSellPointCandidates == null || idx >= libSellPointCandidates.size()) return List.of();
+        List<String> cands = libSellPointCandidates.get(idx);
+        return cands == null ? List.of() : cands;
     }
 
-    /** 旧签名重载(单图重生等不注入库卖点的调用走这里，libSellPoint=空)。 */
+    /** 旧签名重载(单图重生等不注入库卖点的调用走这里，libSellCandidates=空)。 */
     private String buildSeriesPrompt(String basePrompt, int currentIndex, int totalCount, String seriesPlan,
                                      String subjectLock, String negative, String styleReq, boolean withText,
                                      boolean structLock, boolean isShower, boolean fromLib) {
         return buildSeriesPrompt(basePrompt, currentIndex, totalCount, seriesPlan, subjectLock, negative,
-                styleReq, withText, structLock, isShower, fromLib, "");
+                styleReq, withText, structLock, isShower, fromLib, List.of());
     }
 
     /**
-     * @param libSellPoint 0a卖点侧：本张分配的库卖点(库命中时非空)。非空→作为【画面文案】主标题内容注入，
-     *   替代 GPT 现编/泛词，实现卖点防同质化(每张不同维度)。构图库定版式，此卖点定文字内容。空→不注入(原逻辑)。
+     * @param libSellCandidates 07.31：本张按构图tags过滤后的卖点候选词(2-3个，库命中时非空)。
+     *   非空→把候选词(不是单一答案)连同本张画面场景一起给AI，AI在候选内挑最贴合画面的一个、允许微调措辞，
+     *   而非照搬库文案——解决"卖点与画面语义错配"+"措辞生硬"。构图库定版式，候选词定内容方向。空→不注入(原逻辑)。
      */
     private String buildSeriesPrompt(String basePrompt, int currentIndex, int totalCount, String seriesPlan,
                                      String subjectLock, String negative, String styleReq, boolean withText,
-                                     boolean structLock, boolean isShower, boolean fromLib, String libSellPoint) {
+                                     boolean structLock, boolean isShower, boolean fromLib, List<String> libSellCandidates) {
         String base = basePrompt == null ? "" : basePrompt.trim();
         StringBuilder sb = new StringBuilder();
         // R5：品类主体一致性约束前置（最高优先级锚点，锁产品结构/材质/logo/物理合理性）
@@ -1972,13 +2002,16 @@ public class FlowController {
             sb.append("【总分析·产品与系列规划】\n").append(seriesPlan.trim()).append("\n\n");
         // 本张分析方案（含本图卖点、画面文案、场景构图）
         sb.append("【第 ").append(currentIndex).append(" 张方案】\n").append(base).append("\n");
-        // 0a 卖点侧：库卖点定本张【画面文案】主标题内容（每张不同维度卖点，防同质化）；构图库 base 只定版式/位置。
-        //   首图(第1张)用高转化整句作主标题，其余用分配到的单个卖点词。空则不注入(走 base 里 GPT 现编/泛词)。
-        if (libSellPoint != null && !libSellPoint.isBlank())
-            sb.append("\n【本图卖点·库指定·必须渲染】本图画面文案的主标题严格围绕这一个卖点：【")
-              .append(libSellPoint.trim())
-              .append("】。把它做成醒目主标题(≤10字)+一句副标题解释，只强调这个卖点，禁止与其他张的卖点重复或混用；"
-                    + "文字位置/字号/色块版式以上方【第 ").append(currentIndex).append(" 张方案】(构图库)指定的文字区为准。\n");
+        // 0a 卖点侧(07.31改)：给候选词+允许AI在候选内挑并微调措辞，而非照搬单一答案——
+        //   候选池已按本张构图的tags过滤到语义相关分组，AI在此范围内选最贴合上方【第N张方案】(构图库)所描绘画面场景的一个。
+        //   首图(第1张)候选通常只有高转化整句一个，其余张2-3个候选。空则不注入(走 base 里 GPT 现编/泛词)。
+        if (libSellCandidates != null && !libSellCandidates.isEmpty()) {
+            String candList = libSellCandidates.stream().map(w -> "【" + w.trim() + "】").reduce((a, b) -> a + b).orElse("");
+            sb.append("\n【本图卖点·参考基调】上方【第 ").append(currentIndex).append(" 张方案】描绘的画面场景是这张图要画的内容。"
+                    + "从以下候选卖点中选出最贴合这个画面场景的一个作为主标题基调：").append(candList)
+              .append("。可以在候选词原意基础上改写措辞使其更贴合画面(不要求逐字照搬)，做成醒目主标题(≤10字)+一句副标题解释，"
+                    + "只强调选中的这一个方向，禁止与其他张的卖点重复或混用；文字位置/字号/色块版式以上方方案指定的文字区为准。\n");
+        }
         // R5：改图风格直拼进生图 prompt（原来只喂分析）
         if (styleReq != null && !styleReq.isBlank()) sb.append("\n【画面风格】").append(styleReq.trim()).append("\n");
         // 系列连贯性 + 角度约束（R2 恢复多角度+防变形）

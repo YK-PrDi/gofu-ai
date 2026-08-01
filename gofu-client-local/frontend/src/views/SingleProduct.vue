@@ -110,8 +110,10 @@ async function pushWhite(code) {
   finally { pushing.value = '' }
 }
 
-// 单品上新与导入建品是两条独立流程,单品页直接读当前商品,不做导入接管逻辑。
-const pageCtx = computed(() => ctxStore.current)
+// 单品上新与导入建品是两条独立流程,单品页直接读当前商品,不做导入接管逻辑;
+// 但 ctxStore 是全局单例,开品/产品替换等其他页面 load 过 context 后 current 会被它们覆盖——
+// 单品页必须按 origin 挡掉非自己流程写入的 context,否则右侧预览会串成"开品商品"等异页占位内容。
+const pageCtx = computed(() => (ctxStore.origin === 'single' || !ctxStore.origin) ? ctxStore.current : null)
 
 // ── 方案/定价 ──
 const plans = computed(() => pageCtx.value?.structure?.plans || [])
@@ -319,10 +321,23 @@ onMounted(() => {
             <div class="wdrop" :class="{ over: dropOver }"
               @dragover.prevent="dropOver = true" @dragleave.prevent="dropOver = false" @drop.prevent="onDrop">
               <div v-if="entry.whites.length" class="pgrid pgrid-sm">
-                <img v-for="(w, i) in entry.whites" :key="'w' + i" :src="whiteThumb(w)" />
+                <div v-for="(w, i) in entry.whites" :key="'w' + i" class="pcell">
+                  <img :src="whiteThumb(w)" />
+                  <div class="img-btns"><el-button size="small" type="danger" circle @click="entry.removeWhite(i)">×</el-button></div>
+                </div>
               </div>
               <span v-else class="drop-hint">拖白底图到此，或点上方「补充白底图」</span>
             </div>
+            <!-- 配件白底图(选品自动搭配的配件,如052滤芯):独立于主件whites,之前只拉取未渲染,这里补显示 -->
+            <template v-if="entry.accWhites.length">
+              <div class="psec-t" style="margin-top:8px">配件白底图（{{ entry.accWhites.length }}）</div>
+              <div class="pgrid pgrid-sm">
+                <div v-for="(w, i) in entry.accWhites" :key="'aw' + i" class="pcell">
+                  <img :src="whiteThumb(w)" />
+                  <div class="img-btns"><el-button size="small" type="danger" circle @click="entry.removeAccWhite(i)">×</el-button></div>
+                </div>
+              </div>
+            </template>
             <!-- 缺图硬拦提示 + 导入/回传 -->
             <div v-if="entry.whiteCheck.missing.length" class="missing">
               <div class="miss-warn">⚠ 以下编码快麦无白底图，补齐或移除后才能生成（缺件会生出废图）：</div>

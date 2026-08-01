@@ -59,7 +59,7 @@ async function genSku(idx) {
   o.taskStatus = 'gen'; o.taskMsg = 'AI生成中…（建档→拉白底→出方案）'
   try {
     const contextId = await ensureContext(o)
-    await ctxStore.load(contextId)
+    await ctxStore.load(contextId, 'batch')
     gen.profitRate = batch.profitRate // 批量流利润率
     const plan0 = ctxStore.current?.structure?.plans?.[0] || null
     const missImg = plan0 ? (plan0.items || []).filter((it) => !it.imgDir).length : 0

@@ -61,15 +61,16 @@ export class AutomationService {
       ? await this.wpsGateway.downloadLatest(request.source.value)
       : await this.readFile(request.source.value);
     const orders = this.readOrderRows(sourceBytes);
-    const alreadyResentRows = new Set(
-      orders.filter((order) => order.reshipStatus === "已补发").map((order) => order.row),
-    );
     const summary = { processed: 0, success: 0, failed: 0 };
     onProgress?.({ stage: "start", message: `读取到 ${orders.length} 条订单`, summary: { ...summary } });
 
-    const remarkRecords = this.readRemarkRecords(sourceBytes)
-      .filter((record) => !alreadyResentRows.has(record.row));
+    // 优先级铁律(07.31 确认): 备注(1) > 订单号快麦未找到(2,仅对走到ERP查询的行) > 新地址(3) > 已补发(4)。
+    // 备注列有内容优先级最高——不管「已补发」「新地址」怎么写，都迁移到表2、不进ERP。
+    const remarkRecords = this.readRemarkRecords(sourceBytes);
     const remarkRows = new Set(remarkRecords.map((record) => record.row));
+    const alreadyResentRows = new Set(
+      orders.filter((order) => order.reshipStatus === "已补发").map((order) => order.row),
+    );
     if (request.target.kind === "wps") {
       const appendRemark = this.wpsGateway.appendRemark?.bind(this.wpsGateway)
         ?? this.wpsGateway.appendImageNote?.bind(this.wpsGateway);
@@ -103,7 +104,7 @@ export class AutomationService {
       orders.filter((order) => needsManualNewAddress(order.newAddressNote)).map((order) => order.row),
     );
 
-    if (orders.some((order) => !alreadyResentRows.has(order.row) && !remarkRows.has(order.row) && !newAddressRows.has(order.row))) {
+    if (orders.some((order) => !remarkRows.has(order.row) && !newAddressRows.has(order.row) && !alreadyResentRows.has(order.row))) {
       await this.runner.start(request.erp, (event) => onProgress?.({ ...event, summary: { ...summary } }));
     }
 
@@ -116,13 +117,15 @@ export class AutomationService {
       });
 
       let result;
-      if (newAddressRows.has(order.row)) {
-        // 「是否按新地址登记」列有文字→需人工按新地址补发,自动化处理不了。ok:false 触发下方标红,并计失败(供运营看红行)。
+      if (remarkRows.has(order.row)) {
+        // 优先级(1):备注列有内容→已迁移到 GOFU 表2,跳过 ERP。不管新地址/已补发怎么写都走这条。
+        result = { ok: true, code: "REMARK_ROUTED", message: "备注行已转 GOFU，跳过 ERP" };
+      } else if (newAddressRows.has(order.row)) {
+        // 优先级(3):「是否按新地址登记」列有文字→需人工按新地址补发,自动化处理不了。ok:false 触发下方标红,并计失败(供运营看红行)。
         result = { ok: false, code: "NEW_ADDRESS_MANUAL", message: `「是否按新地址登记」有内容(${order.newAddressNote})，需人工按新地址处理，已标红跳过` };
       } else if (alreadyResentRows.has(order.row)) {
+        // 优先级(4,最低):补发状态=已补发→跳过。
         result = { ok: true, code: "ALREADY_RESENT_SKIPPED", message: "补发状态为已补发，跳过" };
-      } else if (remarkRows.has(order.row)) {
-        result = { ok: true, code: "REMARK_ROUTED", message: "备注行已转 GOFU，跳过 ERP" };
       } else if (!order.merchantCode) {
         result = { ok: false, code: "MERCHANT_CODE_EMPTY", message: "主商家编码为空" };
       } else {

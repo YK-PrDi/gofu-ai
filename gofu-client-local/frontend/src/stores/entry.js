@@ -96,6 +96,9 @@ export const useEntryStore = defineStore('entry', {
     addWhites(dataUrls) {
       dataUrls.forEach((u) => { if (!this.whites.includes(u)) this.whites.push(u) })
     },
+    // 手动删单张白底图缩略图(主件/配件通用,误加进来的图靠这个删)
+    removeWhite(i) { this.whites.splice(i, 1) },
+    removeAccWhite(i) { this.accWhites.splice(i, 1) },
     // 自动拉主件白底图(源 autoFetchWhite)
     async autoFetchWhite() {
       const codes = this.mainCodes

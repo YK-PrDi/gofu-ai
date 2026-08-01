@@ -30,6 +30,11 @@ export function useGen() {
   async function pollFlowTask(taskId, total, lo = 5, hi = 98) {
     gen.flowTaskId = taskId
     const startAt = Date.now()
+    // ETA 用"已完成数/已用时"线性外推在冷启动+后端并发限流(GEN_CONC)下严重失真:
+    // 第1张往往因冷启动耗时远超均值,被当作单点样本乘到剩余张数上,导致刚开始估出30+分钟。
+    // 改为排除第1张单独计时,只用第2张起的平均耗时外推,首张完成前仍显示"估算中…"。
+    let firstDoneAt = null
+    let lastProgress = 0
     for (let tries = 0; tries < 1200; tries++) {
       await new Promise((r) => setTimeout(r, 1500))
       let t
@@ -37,9 +42,13 @@ export function useGen() {
       const pct = total > 0 ? Math.round((t.progress / total) * (hi - lo)) : 0
       gen.progress = Math.min(hi, lo + pct)
       const elapsed = (Date.now() - startAt) / 1000
+      if (lastProgress === 0 && t.progress >= 1) firstDoneAt = elapsed
+      lastProgress = t.progress
       let eta = '估算中…'
-      if (t.progress > 0 && t.progress < t.total) eta = fmtSec((elapsed / t.progress) * (t.total - t.progress))
-      else if (t.total > 0 && t.progress >= t.total) eta = '收尾中…'
+      if (t.progress >= 2 && t.progress < t.total && firstDoneAt != null) {
+        const perItem = (elapsed - firstDoneAt) / (t.progress - 1)
+        eta = fmtSec(perItem * (t.total - t.progress))
+      } else if (t.total > 0 && t.progress >= t.total) eta = '收尾中…'
       const cur = t.currentProduct || (t.progress < t.total ? `第 ${t.progress + 1} 张` : '')
       gen.msg = `生图中… ${t.progress}/${t.total} · 已用时 ${fmtSec(elapsed)} · 预计剩余 ${eta}` + (cur ? ` · 正在生成 ${cur}` : '')
       if (t.progress > 0) { try { await ctxStore.load(ctxStore.contextId) } catch (_) {} }
