@@ -104,6 +104,38 @@ else
   echo "  ⚠ 未找到 $REF_SRC，跳过（打包版将靠 classpath JSON 兜底）"
 fi
 
+echo "===================== [5.6/6] 拷云端库种子(迪士尼素材等) ====================="
+# 08.02 修：云端库路径是 jdbc:sqlite:${user.dir}/gofu-cloud.db，而 Launcher 把工作目录设成
+# app/data/ → 打包版首启会建一个**全新空库**。以前不拷 .db，导致源码态导好的迪士尼素材
+# (disney_asset 表)在打包版里查不到，开品模式报"未找到标签，请先导入素材"(用户08.02反馈)。
+# 现在把仓库根那个库作种子拷进 app/data/。图片本体在 COS(cos_key 是 COS key 不是本地路径,
+# COS 凭据随 application-local.yml 打进 cloud.jar)，所以换机器也能取到图。
+# 注意：只在目标不存在时拷，避免覆盖用户已积累的数据(重复打包/升级场景)。
+SEED_DB="$ROOT/gofu-cloud.db"
+SEED_DB_DST="$DIST/GOFU/app/data/gofu-cloud.db"
+if [ -f "$SEED_DB" ]; then
+  mkdir -p "$(dirname "$SEED_DB_DST")"
+  cp "$SEED_DB" "$SEED_DB_DST"
+  echo "  已拷云端库种子: $(du -h "$SEED_DB_DST" | cut -f1)"
+  # 报一下种子库里有什么，避免"拷了个空库"还以为齐了。
+  # 注意：Windows 的 python 打不开 git-bash 的 /d/... 路径，故先 cd 进目录再用相对文件名。
+  if command -v python >/dev/null 2>&1; then
+    ( cd "$(dirname "$SEED_DB_DST")" && python - <<'PYEOF' 2>/dev/null || true
+import sqlite3
+c = sqlite3.connect('gofu-cloud.db')
+tabs = [r[0] for r in c.execute("select name from sqlite_master where type='table'")]
+for t in ('disney_asset', 'product_context'):
+    n = c.execute('select count(*) from "%s"' % t).fetchone()[0] if t in tabs else None
+    print('    %s = %s' % (t, ('%d 行' % n) if n is not None else '表不存在'))
+c.close()
+PYEOF
+    )
+  fi
+else
+  echo "  ⚠ 未找到 $SEED_DB —— 打包版将是空库，开品模式会提示「素材库为空」，"
+  echo "    需打包后对 exe 的 5020 再跑一次: node packaging/import-disney.mjs <素材根目录>"
+fi
+
 echo "===================== [6/6] 完成 ====================="
 echo "exe 路径: $DIST/GOFU/GOFU.exe"
 du -sh "$DIST/GOFU"

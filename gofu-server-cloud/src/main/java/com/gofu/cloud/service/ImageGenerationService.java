@@ -844,6 +844,19 @@ public class ImageGenerationService {
         return agent.generateMulti(enforcedPrompt, refImagePaths, whiteBgPath, outputPath, aspect, task);
     }
 
+    /** 详情图专用：参考图用 contain(letterbox) 而非 cover，避免主图被裁边导致 AI 漏画内容。 */
+    public boolean generateImageMultiDetail(String prompt, List<String> refImagePaths,
+                                            String whiteBgPath, String outputPath, String aspect) {
+        ImageGeneratorAgent agent = resolveAgent(null);
+        String enforcedPrompt = enforceNoIntersectionPrompt(prompt);
+        log.info("[详情图生图] 使用智能体 [{}] refs={} fitContain=true", agent.getId(),
+                refImagePaths == null ? 0 : refImagePaths.size());
+        if (agent instanceof com.gofu.cloud.service.agent.GptImageAgent gpt) {
+            return gpt.generateMulti(enforcedPrompt, refImagePaths, whiteBgPath, outputPath, aspect, "medium", true);
+        }
+        return agent.generateMulti(enforcedPrompt, refImagePaths, whiteBgPath, outputPath, aspect, null);
+    }
+
     /**
      * 开品模式专用：走 GPT-Image，quality=low 减少单次生成耗时(避免 Read timed out)。
      * 07.30 曾想靠此法提速，但误调了 ImageGeneratorAgent 接口的5参数默认方法(该方法在

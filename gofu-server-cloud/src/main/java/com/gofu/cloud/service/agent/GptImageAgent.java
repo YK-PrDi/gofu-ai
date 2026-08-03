@@ -122,6 +122,12 @@ public class GptImageAgent implements ImageGeneratorAgent {
     /** quality 可传 "low"/"medium"/"high"，开品模式传 "low" 加快响应。 */
     public boolean generateMulti(String prompt, List<String> refImagePaths,
                                  String whiteBgPath, String outputPath, String aspect, String quality) {
+        return generateMulti(prompt, refImagePaths, whiteBgPath, outputPath, aspect, quality, false);
+    }
+
+    /** fitContain=true 时参考图用 contain(letterbox) 而非 cover，用于详情图生成避免主图参考被裁边。 */
+    public boolean generateMulti(String prompt, List<String> refImagePaths,
+                                 String whiteBgPath, String outputPath, String aspect, String quality, boolean fitContain) {
         List<String> keys = appProperties.getGptImage().getApiKeys();
         if (keys == null || keys.isEmpty()) {
             log.error("GPT-Image API Key 未配置");
@@ -132,9 +138,9 @@ public class GptImageAgent implements ImageGeneratorAgent {
         String size = pickSize(aspect);
         for (String apiKey : orderedKeys()) {
             String baseUrl = baseUrlForKey(apiKey);
-            log.info("GPT-Image 尝试 key [{}], baseUrl={}", maskKey(apiKey), baseUrl);
+            log.info("GPT-Image 尝试 key [{}], baseUrl={}, fitContain={}", maskKey(apiKey), baseUrl, fitContain);
             boolean ok = !imageFiles.isEmpty()
-                    ? generateWithImages(prompt, imageFiles, outputPath, apiKey, baseUrl, size, quality)
+                    ? generateWithImages(prompt, imageFiles, outputPath, apiKey, baseUrl, size, quality, fitContain)
                     : generateTextOnly(prompt, outputPath, apiKey, baseUrl, size);
             if (ok) return true;
             log.warn("GPT-Image key [{}] 失败，尝试下一个", maskKey(apiKey));
@@ -182,16 +188,21 @@ public class GptImageAgent implements ImageGeneratorAgent {
 
     private boolean generateWithImages(String prompt, List<File> imageFiles, String outputPath,
                                        String apiKey, String baseUrl, String size) {
-        return generateWithImages(prompt, imageFiles, outputPath, apiKey, baseUrl, size, "medium");
+        return generateWithImages(prompt, imageFiles, outputPath, apiKey, baseUrl, size, "medium", false);
     }
 
     private boolean generateWithImages(String prompt, List<File> imageFiles, String outputPath,
                                        String apiKey, String baseUrl, String size, String quality) {
+        return generateWithImages(prompt, imageFiles, outputPath, apiKey, baseUrl, size, quality, false);
+    }
+
+    private boolean generateWithImages(String prompt, List<File> imageFiles, String outputPath,
+                                       String apiKey, String baseUrl, String size, String quality, boolean fitContain) {
         List<File> tempFiles = new ArrayList<>();
         try {
             List<File> preparedFiles = new ArrayList<>();
             for (File f : imageFiles) {
-                File prepared = prepareInputImage(f, size);
+                File prepared = prepareInputImage(f, size, fitContain);
                 if (prepared != f) tempFiles.add(prepared);
                 preparedFiles.add(prepared);
             }
@@ -246,6 +257,10 @@ public class GptImageAgent implements ImageGeneratorAgent {
     }
 
     private File prepareInputImage(File src, String size) {
+        return prepareInputImage(src, size, false);
+    }
+
+    private File prepareInputImage(File src, String size, boolean fitContain) {
         try {
             int[] target = parseSize(size);
             if (target == null) return src;
@@ -256,14 +271,21 @@ public class GptImageAgent implements ImageGeneratorAgent {
             int sw = img.getWidth(), sh = img.getHeight();
             double srcRatio = (double) sw / sh;
             double tgtRatio = (double) tw / th;
-            if (Math.abs(srcRatio - tgtRatio) < 0.02) return src; // already close enough
+            if (Math.abs(srcRatio - tgtRatio) < 0.02) return src;
             BufferedImage canvas = new BufferedImage(tw, th, BufferedImage.TYPE_3BYTE_BGR);
             Graphics2D g = canvas.createGraphics();
             g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
             g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-            // 参考图改用 cover(铺满+居中裁剪)而非纯白 letterbox——白边会被模型复刻进成品(07.06反馈)。
-            // 参考图只提供产品外观/背景风格，边缘轻微裁剪可接受，换来成品无白边。
-            double scale = Math.max((double) tw / sw, (double) th / sh);
+            double scale;
+            if (fitContain) {
+                // contain: letterbox，保全内容，用浅灰填充空白——详情图参考图用此模式，避免裁边导致AI漏画内容
+                g.setColor(new java.awt.Color(0xF5, 0xF5, 0xF5));
+                g.fillRect(0, 0, tw, th);
+                scale = Math.min((double) tw / sw, (double) th / sh);
+            } else {
+                // cover: 铺满+居中裁剪——主图/SKU参考图用此模式，避免白边被模型复刻进成品(07.06反馈)
+                scale = Math.max((double) tw / sw, (double) th / sh);
+            }
             int dw = (int) Math.round(sw * scale);
             int dh = (int) Math.round(sh * scale);
             int dx = (tw - dw) / 2;
@@ -272,7 +294,7 @@ public class GptImageAgent implements ImageGeneratorAgent {
             g.dispose();
             File tmp = File.createTempFile("gptimg_input_", ".jpg", src.getParentFile());
             ImageIO.write(canvas, "jpeg", tmp);
-            log.info("prepareInputImage: {}x{} -> cover {}x{} ({})", sw, sh, tw, th, tmp.getName());
+            log.info("prepareInputImage: {}x{} -> {} {}x{} ({})", sw, sh, fitContain ? "contain" : "cover", tw, th, tmp.getName());
             return tmp;
         } catch (Exception e) {
             log.warn("prepareInputImage failed, using original: {}", e.getMessage());

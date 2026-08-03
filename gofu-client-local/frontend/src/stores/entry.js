@@ -8,7 +8,7 @@ const ROLE_LABELS = { main: '主件', accessory: '配件', batch: '批量件' }
 export const useEntryStore = defineStore('entry', {
   state: () => ({
     catPath: [], // 品类路径数组,如 ['家装主材','卫浴配件','花洒配件','花洒喷头']
-    brand: 'GOFU',
+    brand: '',
     agentId: 'gpt-image',
     skus: [], // [{ itemCode, name, cost, role }]
     whites: [], // 主件白底图(dataURL / 本地路径 / http)

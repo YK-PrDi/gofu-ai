@@ -29,6 +29,10 @@ export function useGen() {
   // 轮询异步生图任务,进度映射到[lo,hi],每拍刷新预览(源 pollFlowTask)
   async function pollFlowTask(taskId, total, lo = 5, hi = 98) {
     gen.flowTaskId = taskId
+    // 锁定本次生成的 context/owner:用户中途切页后 ctxStore.contextId 可能已被别页改掉,
+    // 若还照它 load 就会把别页的 context 反复重拉(甚至顶掉用户正在看的页面)。
+    const genCtxId = ctxStore.contextId
+    const genOwner = ctxStore.origin
     const startAt = Date.now()
     // ETA 用"已完成数/已用时"线性外推在冷启动+后端并发限流(GEN_CONC)下严重失真:
     // 第1张往往因冷启动耗时远超均值,被当作单点样本乘到剩余张数上,导致刚开始估出30+分钟。
@@ -55,7 +59,10 @@ export function useGen() {
       const succ = t.successCount ?? 0
       const failWarn = t.progress > 0 && succ === 0 ? ' · ⚠ 已尝试但全部失败,请检查生图服务/账户余额' : ''
       gen.msg = `生图中… 已尝试${t.progress}/${t.total}(成功${succ}) · 已用时 ${fmtSec(elapsed)} · 预计剩余 ${eta}` + (cur ? ` · 正在生成 ${cur}` : '') + failWarn
-      if (t.progress > 0) { try { await ctxStore.load(ctxStore.contextId) } catch (_) {} }
+      // 流式刷预览:只在本次生成的页面仍持有 current 时刷(切走了就别顶别页)
+      if (t.progress > 0 && genCtxId && ctxStore.origin === genOwner) {
+        try { await ctxStore.load(genCtxId, genOwner) } catch (_) {}
+      }
       if (t.status === 'done') { gen.flowTaskId = ''; return }
       if (t.status === 'stopped') { gen.msg = '已停止生成（已生成的图保留）'; gen.flowTaskId = ''; return }
       if (t.status === 'error') throw new Error((t.results || []).map((x) => x.message).join('；') || '生图失败')
@@ -109,10 +116,12 @@ export function useGen() {
       })
       if (d1.error) throw new Error(d1.error)
       if (!d1.taskId) throw new Error('step1 未返回 taskId')
+      // 生成一开始就登记归属,否则轮询期pageCtx因旧owner返null→预览空白,图全等结束才一次性出现(流式渲染失效)
       ctxStore.contextId = d1.contextId
-      ctxStore.origin = 'single' // 生成一开始就标single,否则轮询期pageCtx因旧origin=import返null→预览空白,图全等结束才一次性出现(流式渲染失效)
+      ctxStore.ownedIds.single = d1.contextId
+      ctxStore.origin = 'single'
       await pollFlowTask(d1.taskId, d1.total || 0, 12, 88)
-      await ctxStore.load(d1.contextId, 'single')
+      await ctxStore.adopt('single', d1.contextId)
       await fillCostAndPrice()
       gen.msg = '生成标题…'; await genTitle()
       await ctxStore.save?.(); await ctxStore.load(d1.contextId)
@@ -318,10 +327,12 @@ export function useGen() {
       })
       if (d.error) throw new Error(d.error)
       if (!d.taskId) throw new Error('step-all 未返回 taskId')
+      // 生成一开始就登记归属,否则轮询期预览空白(流式渲染失效),同 runLayout
       ctxStore.contextId = d.contextId
-      ctxStore.origin = 'single' // 生成一开始就标single,否则轮询期预览空白(流式渲染失效),同 runLayout
+      ctxStore.ownedIds.single = d.contextId
+      ctxStore.origin = 'single'
       await pollFlowTask(d.taskId, d.total || 0, 12, 98)
-      await ctxStore.load(d.contextId, 'single')
+      await ctxStore.adopt('single', d.contextId)
       await fillCostAndPrice()
       gen.msg = '生成标题…'; await genTitle()
       await ctxStore.save?.(); await ctxStore.load(d.contextId)

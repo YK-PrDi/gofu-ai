@@ -1,18 +1,14 @@
 <script setup>
 // 【开品模式】迪士尼素材库融合生图。物理隔离独立页面，删除时一把摘干净。
 // 流程:上传产品图+填写信息 → 外观分析(kaipin_analyze) → 确认/编辑分析卡片
-//      → 选迪士尼素材标签+生图(kaipin-generate) → 筛图 → 方案/定价/上新
+//      → 选迪士尼素材标签+生图(kaipin-generate) → 筛图（仅出图，不上新）
 import { reactive, computed, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '@/api.js'
 import { useContextStore } from '@/stores/context.js'
-import { useSettingsStore } from '@/stores/settings.js'
-import { useStoresStore } from '@/stores/stores-mgmt.js'
 import { useKaipinStore } from '@/stores/kaipin.js'
 
 const ctxStore = useContextStore()
-const settings = useSettingsStore()
-const storesStore = useStoresStore()
 const kpStore = useKaipinStore()
 
 const imgUrl = (r) => '/api/gen/img?ref=' + encodeURIComponent(r)
@@ -40,27 +36,40 @@ const styleOptions = [
 // ─── 局部进行中状态（不放 store，刷新/切页后这些进行中标志自然归零） ───
 const analyzing = ref(false)
 const generating = ref(false)
-const chaining = ref(false)
 
 // ─── 标签列表（局部，onMounted 加载一次） ───
 const tags = ref([])
+const tagsErr = ref('')   // 非空=拉取标签失败(与"真的没素材"区分开)
 
 // ─── 切页保留的状态统一读 kpStore ───
-const mainImages = computed(() => {
-  if (!kpStore.contextId || ctxStore.contextId !== kpStore.contextId) return []
-  return (ctxStore.current?.visual?.mainImages || []).filter(Boolean)
-})
+const mainImages = computed(() => (ctxStore.currentFor('kaipin')?.visual?.mainImages || []).filter(Boolean))
 const maxPick = computed(() => Math.min(6, mainImages.value.length || 6))
-const busy = computed(() => analyzing.value || generating.value || chaining.value)
+const busy = computed(() => analyzing.value || generating.value)
 
 // ─── 加载标签列表 ───
 onMounted(async () => {
+  // 恢复 context（切到别的页面再回来，current 被别页顶掉了，mainImages 会变空）
+  const own = ctxStore.ownedId('kaipin') || kpStore.contextId
+  if (own) {
+    try { await ctxStore.adopt('kaipin', own) } catch (_) {}
+  }
+  await loadTags()
+})
+
+// 标签加载:失败与"真的没素材"必须分开报。原来 catch 只 console.warn,页面一律显示
+// 「未找到标签，请先导入素材」——但请求失败(云端没起/连错库/网络断)时素材其实在，
+// 这条提示会把人引到"再导一遍素材"的错方向(08.02 用户实际踩到)。
+async function loadTags() {
+  tagsErr.value = ''
   try {
     const d = await api.get('/api/disney/tags')
     tags.value = (d.tags || []).map(t => ({ value: t.tag, label: t.tag + '（' + t.count + '张）' }))
     if (tags.value.length && !kpStore.selectedTag) kpStore.selectedTag = tags.value[0].value
-  } catch (e) { console.warn('[开品] 加载标签失败:', e.message) }
-})
+  } catch (e) {
+    tagsErr.value = e.message || String(e)
+    console.warn('[开品] 加载标签失败:', tagsErr.value)
+  }
+}
 
 // ─── 图片选取 ───
 function fileToB64(f) {
@@ -133,7 +142,7 @@ async function startGenerate() {
     })
     const contextId = ctx.id
     kpStore.contextId = contextId
-    await ctxStore.load(contextId, 'kaipin')
+    await ctxStore.adopt('kaipin', contextId)
 
     // 3) 调云端生图
     kpStore.genPhase = '生成中…'; kpStore.genPct = 20
@@ -167,11 +176,12 @@ async function pollGenTask(taskId, total) {
     kpStore.genPct = 20 + Math.round(78 * done / Math.max(1, total))
     const succ = t.successCount ?? 0
     kpStore.genPhase = `生图 已尝试${done}/${total}(成功${succ})…` + (done > 0 && succ === 0 ? ' ⚠ 全部失败,请检查生图服务/账户余额' : '')
-    if (kpStore.contextId) { try { await ctxStore.load(kpStore.contextId) } catch (_) {} }
+    // 本页还持有 current 才刷(用户切走了就别把别页顶掉)
+    if (kpStore.contextId && ctxStore.origin === 'kaipin') { try { await ctxStore.load(kpStore.contextId) } catch (_) {} }
     if (t.status === 'done' || t.status === 'error') {
       if (t.status === 'error') throw new Error(t.error || `云端生图失败（已尝试${done}张，成功${t.successCount??0}张）——若账户欠费请充值 api.linapi.net`)
       kpStore.genPct = 100; kpStore.genDone = true
-      kpStore.genMsg = `✓ 生图完成，共 ${mainImages.value.length} 张。请勾选后点「确认并上新」。`
+      kpStore.genMsg = `✓ 生图完成，共 ${mainImages.value.length} 张。请在下方筛选图片。`
       kpStore.genMsgType = 'ok'; return
     }
   }
@@ -195,85 +205,6 @@ function toggle(key) {
 }
 const isPicked = (key) => kpStore.picked.includes(key)
 
-// ─── 上新链 ───
-async function confirmAndList() {
-  if (!kpStore.picked.length) { ElMessage.warning('请先勾选主图'); return }
-  if (!kpStore.contextId) { ElMessage.error('缺 contextId'); return }
-  chaining.value = true; kpStore.chainLog = ''
-  const logFn = (msg) => { kpStore.chainLog = msg }
-  try {
-    logFn('① 覆写选定主图…')
-    const p = await api.post('/api/product-replace/pick', { contextId: kpStore.contextId, keys: kpStore.picked })
-    if (p.error) throw new Error(p.error)
-    logFn('② 生成方案/标题/定价…')
-    const rec = {}
-    const started = await api.post('/api/semi-auto/generate-layout', {
-      contextId: kpStore.contextId, category: rec.category || '',
-      productName: rec.productName || input.productA || '开品商品',
-      skus: rec.skus || [], sku: [],
-      planCount: settings.settings.defaultPlanCount || 1, profitRate: 0,
-    })
-    if (started.error) throw new Error(started.error)
-    if (started.importId) {
-      const genResult = await pollGenLayout(started.importId, logFn)
-      if ((genResult?.skuPlanCount ?? 0) === 0)
-        throw new Error('快麦未找到对应商品编码，无法生成SKU方案。请在快麦ERP补充编码后重试。')
-    }
-    await ctxStore.load(kpStore.contextId)
-    logFn('③ 生成详情图 + SKU图…')
-    const planIdx = ctxStore.current?.structure?.selectedPlanIndex || 0
-    const d2 = await api.post('/api/flow/step2', {
-      contextId: kpStore.contextId, planIndex: planIdx,
-      accWhiteImages: [], templateId: '', genDetail: true, genSku: true, skuOnlyMissing: true,
-    })
-    if (d2.error) throw new Error(d2.error)
-    if (!d2.taskId) throw new Error('step2 未返回 taskId')
-    await pollStep2Task(d2.taskId, d2.total || 0, logFn)
-    await ctxStore.load(kpStore.contextId)
-    logFn('④ 上新中…')
-    if (settings.settings.confirmBeforeListing && !confirm('将真实提交上新到拼多多，确认继续?')) {
-      logFn('已取消上新（方案已生成，可到单品页手动上新）。'); return
-    }
-    const d = await api.post('/api/listing/from-context', {
-      contextId: kpStore.contextId, planIndex: planIdx, dryRun: false, brand: '',
-      storeProfile: storesStore.targetProfile || '',
-    })
-    if (d.error) throw new Error(d.error)
-    if (!d.taskId) throw new Error('上新未返回 taskId')
-    await pollListingTask(d.taskId, logFn, 0)
-    kpStore.genMsg = '✓ 全自动完成：开品生图→筛图→方案→定价→上新成功。'; kpStore.genMsgType = 'ok'
-  } catch (e) {
-    kpStore.chainLog = (kpStore.chainLog || '') + '\n✗ 失败：' + e.message
-    kpStore.genMsg = '上新链失败：' + e.message; kpStore.genMsgType = 'err'
-  } finally { chaining.value = false }
-}
-async function pollGenLayout(importId, logFn) {
-  while (true) {
-    await new Promise((r) => setTimeout(r, 1500))
-    let t
-    try { t = await api.get('/api/semi-auto/import-progress/' + importId) } catch (_) { continue }
-    logFn(`② 生成中 ${t.pct || 0}% · ${t.phase || ''}`)
-    if (t.done) { if (t.error) throw new Error(t.error); return t.result }
-  }
-}
-async function pollStep2Task(taskId, total, logFn) {
-  for (let tries = 0; tries < 1200; tries++) {
-    await new Promise((r) => setTimeout(r, 2000))
-    let t
-    try { t = await api.get('/api/flow/task/' + taskId) } catch (_) { continue }
-    logFn(`③ 详情/SKU图 ${t.progress || 0}/${total || '?'}…`)
-    if (t.status === 'done') return
-    if (t.status === 'error') throw new Error(t.error || 'step2 失败')
-  }
-  throw new Error('step2 轮询超时')
-}
-async function pollListingTask(taskId, logFn, tries) {
-  if (tries > 1200) { logFn('✗ 上新轮询超时'); return }
-  const t = await api.get('/api/task/' + taskId)
-  logFn('④ 上新日志:\n' + (t.results || []).map((x) => x.message || '').join('\n'))
-  if (t.status === 'running') { await new Promise((r) => setTimeout(r, 1500)); return pollListingTask(taskId, logFn, tries + 1) }
-  if (t.status !== 'done') throw new Error('上新未成功：' + t.status)
-}
 </script>
 
 <template>
@@ -342,7 +273,12 @@ async function pollListingTask(taskId, logFn, tries) {
           <el-select v-model="kpStore.selectedTag" size="small" style="width:160px" placeholder="选标签">
             <el-option v-for="t in tags" :key="t.value" :value="t.value" :label="t.label" />
           </el-select>
-          <span v-if="!tags.length" class="hint">（未找到标签，请先导入素材）</span>
+          <!-- 拉取失败 ≠ 没素材:失败时给出真实原因+重试,不再误导用户去重新导素材 -->
+          <span v-if="tagsErr" class="hint">
+            （读取素材库失败：{{ tagsErr }}——素材可能是在的，先确认云端 5020 已启动且连的是同一个 gofu-cloud.db
+            <el-button link type="primary" size="small" @click="loadTags">重试</el-button>）
+          </span>
+          <span v-else-if="!tags.length" class="hint">（素材库为空，请先导入迪士尼素材）</span>
         </el-col>
         <el-col :span="4">
           <span class="label">抽样张数</span>
@@ -367,7 +303,7 @@ async function pollListingTask(taskId, logFn, tries) {
       <p v-if="kpStore.genMsg" :class="['msg', kpStore.genMsgType]">{{ kpStore.genMsg }}</p>
     </el-card>
 
-    <!-- ③ 筛图 + 上新链 -->
+    <!-- ③ 筛图 -->
     <el-card v-if="mainImages.length" class="step">
       <template #header>③ 筛选主图（已选 {{ kpStore.picked.length }} / {{ maxPick }}，共 {{ mainImages.length }} 张）</template>
       <div class="grid">
@@ -376,12 +312,6 @@ async function pollListingTask(taskId, logFn, tries) {
           <span v-if="isPicked(m)" class="badge">{{ kpStore.picked.indexOf(m) + 1 }}</span>
         </div>
       </div>
-      <div class="actions foot">
-        <el-button type="success" :disabled="kpStore.picked.length === 0 || busy" :loading="chaining" @click="confirmAndList">
-          {{ chaining ? '处理中…' : `确认并全自动上新（${kpStore.picked.length} 张）` }}
-        </el-button>
-      </div>
-      <pre v-if="kpStore.chainLog" class="chainlog">{{ kpStore.chainLog }}</pre>
     </el-card>
   </div>
 </template>
@@ -413,7 +343,5 @@ async function pollListingTask(taskId, logFn, tries) {
 .cell { position: relative; cursor: pointer; border: 3px solid transparent; border-radius: 6px; overflow: hidden; aspect-ratio: 1; }
 .cell.on { border-color: #67c23a; }
 .cell .el-image { width: 100%; height: 100%; }
-.badge { position: absolute; top: 4px; right: 4px; background: #67c23a; color: #fff; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: bold; }
-.chainlog { margin-top: 12px; background: #f5f7fa; padding: 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; max-height: 300px; overflow: auto; }
-</style>
+.badge { position: absolute; top: 4px; right: 4px; background: #67c23a; color: #fff; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: bold; }</style>
 

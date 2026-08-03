@@ -16,6 +16,7 @@ export const useBatchStore = defineStore('batch', {
     msg: '',
     msgType: '',
     profitRate: 0.45, // 批量流默认在33/45/53随机
+    // 上传后后端重建的临时目录仍在,刷新后可直接接着跑,不必重新上传整个文件夹。
   }),
   getters: {
     readyCount: (s) => s.outcomes.filter((o) => o.status === 'ready' || o.status === 'listing_started').length,
@@ -157,4 +158,6 @@ export const useBatchStore = defineStore('batch', {
       return 'warn'
     },
   },
+  // 不持久化(08.03 二次修正,同 context.js):预检结果是干活中间态,切页靠内存态就够(hash 路由切页
+  // 不重载页面),F5 该是干净重来。另 rootPath 指向后端临时目录,重启后端即失效,留着也只是失效路径。
 })

@@ -239,13 +239,15 @@ public class ShowerCompositor {
         g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
 
-        // 主件框：放「左侧功能栏与中间主体之间、偏下」的空位（架类版式：最左功能小图栏≈0~26%，
-        // 中间主体≈30%~75%）。卡片缩窄至 W*0.24 塞进这条竖缝，靠下但不压底部通栏，尽量不遮主体。
-        int cardW = (int)(W * 0.24);
+        // 主件框位置（08.03 修 #6：原来放在 W*0.27 / H*0.84-cardH，实测压住了左侧功能小图那一竖列的
+        // 文字说明——架类版式左栏 0~26% 正是"功能小图+说明文字"区，卡片贴着它右边缘且偏下，把最下面
+        // 那张小图的文字盖掉了。改放**右下角**：架类版式右下通常是场景留白（主体居中偏左/居中，
+        // 功能小图在左栏、标题在左上、底部通栏在 90% 以下），右下角是全图最空的地方。
+        // 同时把卡片再缩小一档（0.24→0.20），并留出右边距与底边距，不压底部通栏也不出画。
+        int cardW = (int)(W * 0.20);
         int cardH = (int)(cardW * 3.0 / 4.0);
-        int cx = (int)(W * 0.27);                 // 左栏(≈26%)右侧起，落在功能栏与主体之间的缝隙
-        int cy = (int)(H * 0.84) - cardH;         // 偏下，卡底不压底部通栏(84%线)
-        if (cy < (int)(H * 0.45)) cy = (int)(H * 0.45);   // 不上探到主体核心区(45%线以下)
+        int cx = W - cardW - (int)(W * 0.04);     // 贴右边，留 4% 右边距
+        int cy = (int)(H * 0.86) - cardH;         // 卡底落在 86% 线，底部通栏(≥90%)之上
         int arc = (int)(Math.min(cardW, cardH) * 0.10);
         int sh  = (int)(Math.min(cardW, cardH) * 0.025);
         g.setColor(new Color(0, 0, 0, 45));

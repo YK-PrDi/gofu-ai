@@ -2,7 +2,7 @@
 // 【权宜模块·产品替换】独立页面,不复用 ImportProduct.vue,便于后续生图质量起来后整体删除。
 // 流程A(单商品):选文件夹(白底+N张参考图) → 抽卡 → 人工筛6 → step2(详情图+SKU图) → 上新。
 // 流程B(批量):选「店铺/商品」两级根目录 → 解析分组+店铺精确匹配 → 逐商品顺序走流程A(筛图停等人工)。
-import { reactive, computed, ref } from 'vue'
+import { reactive, computed, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '@/api.js'
 import { useContextStore } from '@/stores/context.js'
@@ -21,33 +21,58 @@ const imgUrl = (r) => '/api/gen/img?ref=' + encodeURIComponent(r)
 const mode = ref('single')  // 'single' | 'batch'
 
 // -------------------- 单商品状态（切页不丢的字段挂 prStore，其余局部）--------------------
-// white/refs 含 base64 太大，不进 store，切页后需重选文件夹（提示用 prStore.folderName 显示上次名字）
 const st = reactive({
-  white: [],        // [{name,b64,ext}] 产品白底图（局部，切页丢失）
-  refs: [],         // [{name,b64,ext}] N张构图参考图（局部，切页丢失）
-  running: false,
-  chaining: false,
+  white: [], refs: [], running: false, chaining: false,
 })
-// 切页保留字段直接用 prStore（folderName/refsCount/count/msg/msgType/phase/pct/gachaDone/picked/cloudTaskId/contextId/chainLog）
-const mainImages = computed(() => {
-  if (!prStore.contextId || ctxStore.contextId !== prStore.contextId) return []
-  return (ctxStore.current?.visual?.mainImages || []).filter(Boolean)
+// 本页 context(经 ctxStore 归属登记,别页 load 顶不掉本页预览)
+const pageCtx = computed(() => ctxStore.currentFor('product-replace'))
+// 筛选区读抽卡全集快照:/pick 覆写 mainImages 后仍完整,链路失败还能重选
+const gachaImages = computed(() => prStore.gachaImages)
+// 成品预览读 context 实况(选定主图 → 详情图 → SKU 图,随 step2 流式刷入)
+const pickedMains = computed(() => (pageCtx.value?.visual?.mainImages || []).filter(Boolean))
+const detailImages = computed(() => (pageCtx.value?.visual?.detailImages || []).filter(Boolean))
+const skuItems = computed(() => {
+  const stc = pageCtx.value?.structure
+  return (stc?.plans?.[stc.selectedPlanIndex || 0]?.items || []).filter((it) => it.imgDir)
 })
 const busy = computed(() => st.running || st.chaining)
 
 // -------------------- 批量状态 --------------------
-// item: { shopName, productName, white, refs, status, profile?, skipReason?,
-//         contextId?, cloudTaskId?, pct, phase, gachaDone, picked, chainLog }
-const batch = reactive({
-  items: [],
-  curIdx: -1,     // 当前正在处理的 item index (-1=idle/全部完成)
-  running: false,
-})
+const batch = reactive({ items: [], curIdx: -1, running: false })
 const batchCurItem = computed(() => batch.curIdx >= 0 ? batch.items[batch.curIdx] : null)
-const batchMainImages = computed(() => {
-  const item = batchCurItem.value
-  if (!item?.contextId || ctxStore.contextId !== item.contextId) return []
-  return (ctxStore.current?.visual?.mainImages || []).filter(Boolean)
+const batchGachaImages = computed(() => batchCurItem.value?.gachaImages || [])
+
+// 抽卡全集快照:直接拉 context 取已出的图写进 target。
+// 不经 ctxStore —— 批量并行时多个商品各自轮询,谁都不该顶掉用户正在看的那行预览。
+// 传 ctx 可复用已拉到的快照,省一次请求。
+async function snapGacha(target, contextId, ctx = null) {
+  if (!contextId) return
+  try {
+    const c = ctx || await api.get('/api/context/' + contextId)
+    const imgs = (c?.visual?.mainImages || []).filter(Boolean)
+    if (imgs.length) target.gachaImages = imgs
+  } catch (_) {}
+}
+
+// -------------------- 切页恢复 --------------------
+onMounted(async () => {
+  // 单商品：切页回来把本页 context 重新调回 current(否则被别页顶掉,成品预览空)
+  const ownId = ctxStore.ownedId('product-replace') || prStore.contextId
+  if (ownId) {
+    try { await ctxStore.adopt('product-replace', ownId) } catch (_) {}
+  }
+  // 批量：从 store 恢复元数据（base64 已丢，pending 行白底/参考需重新解析）
+  if (prStore.batchItems.length) {
+    batch.items = prStore.batchItems.map((item) => ({
+      ...item, white: [], refs: [],
+      // 抽卡还没起跑的行,图片 base64 随刷新丢了 → 必须重新解析才能跑
+      needReparse: item.status === 'pending',
+    }))
+    batch.curIdx = prStore.batchCurIdx
+    if (batch.curIdx >= 0 && batch.items[batch.curIdx]?.contextId) {
+      try { await ctxStore.adopt('product-replace', batch.items[batch.curIdx].contextId) } catch (_) {}
+    }
+  }
 })
 
 function fileToB64(f) {
@@ -153,11 +178,15 @@ async function parseBatchFiles(files) {
     if (!g.white.length || !g.refs.length) { status = 'warn'; warnReason = `结构不完整（白底${g.white.length}·参考${g.refs.length}）——请检查文件夹内是否有「白底图」「参考图」子目录` }
     items.push({ shopName: g.shopName, productName: g.productName, white: g.white, refs: g.refs,
                  status, profile, warnReason, contextId: '', cloudTaskId: '',
-                 pct: 0, phase: '', gachaDone: false, picked: [], chainLog: '' })
+                 pct: 0, phase: '', gachaDone: false, picked: [], gachaImages: [], chainLog: '',
+                 needReparse: false })
   }
   batch.items = items
   batch.curIdx = -1
   batch.running = false
+  // 持久化元数据到 store（base64 不存）
+  prStore.batchItems = items.map(({ white, refs, ...rest }) => ({ ...rest, refsCount: refs.length, whiteCount: white.length }))
+  prStore.batchCurIdx = -1
   const pending = items.filter((x) => x.status === 'pending').length
   const warned = items.filter((x) => x.status === 'warn').length
   if (warned > 0) ElMessage.warning(`解析完成：${items.length} 个商品，其中 ${warned} 个有警告（橙色项请按提示修正后重新解析），${pending} 个待处理`)
@@ -167,10 +196,13 @@ async function parseBatchFiles(files) {
 // 批量启动：并行对所有 pending 商品同时抽卡，抽完各自进 waiting-pick 等用户筛图
 async function startBatch() {
   if (batch.running) return
-  const pendingIdxs = batch.items.map((x, i) => x.status === 'pending' ? i : -1).filter((i) => i >= 0)
+  // needReparse 行的图片 base64 已随刷新丢失,跑必失败,排除在外
+  const pendingIdxs = batch.items.map((x, i) => (x.status === 'pending' && !x.needReparse) ? i : -1).filter((i) => i >= 0)
   if (!pendingIdxs.length) {
     const warned = batch.items.filter((x) => x.status === 'warn').length
-    ElMessage.warning(warned > 0 ? `没有待处理商品，有 ${warned} 个警告项需先按提示修正后重新解析` : '没有待处理的商品了')
+    const stale = batch.items.filter((x) => x.needReparse).length
+    if (stale > 0) ElMessage.warning(`有 ${stale} 个商品的图片数据已随页面刷新丢失，请重新选根目录解析后再跑`)
+    else ElMessage.warning(warned > 0 ? `没有待处理商品，有 ${warned} 个警告项需先按提示修正后重新解析` : '没有待处理的商品了')
     return
   }
   batch.running = true
@@ -200,9 +232,11 @@ async function runBatchItem(idx) {
     item.contextId = info.contextId
     item.cloudTaskId = info.cloudTaskId
     item.recognized = info.recognized || null
+    prStore.syncBatchItem(idx, item)
     await pollBatchGacha(idx, info.cloudTaskId)
     item.status = 'waiting-pick'
-    item.phase = `抽卡完成，请勾选最多 ${item.refs.length} 张后点「确认并上新」。`
+    item.phase = `抽卡完成，请勾选最多 ${item.refs.length || item.refsCount} 张后点「确认并上新」。`
+    prStore.syncBatchItem(idx, item)
     // 自动切换筛图面板到第一个完成的商品
     if (batch.curIdx < 0 || !['waiting-pick', 'running-list'].includes(batch.items[batch.curIdx]?.status)) {
       await selectBatchItem(idx)
@@ -215,9 +249,12 @@ async function runBatchItem(idx) {
 // 切换当前筛图商品：加载该商品的 context 到 ctxStore
 async function selectBatchItem(idx) {
   const item = batch.items[idx]
-  if (!item?.contextId) return
+  if (!item) return
   batch.curIdx = idx
-  try { await ctxStore.load(item.contextId, 'product-replace') } catch (_) {}
+  prStore.batchCurIdx = idx
+  if (item.contextId) {
+    try { await ctxStore.adopt('product-replace', item.contextId) } catch (_) {}
+  }
 }
 
 async function pollBatchStart(idx, replaceId) {
@@ -234,7 +271,8 @@ async function pollBatchStart(idx, replaceId) {
 async function pollBatchGacha(idx, taskId) {
   const item = batch.items[idx]
   while (true) {
-    await new Promise((r) => setTimeout(r, 2500))
+    // 08.03 #1/#3:同单商品,2500→1200ms,让首张落地后尽快显示
+    await new Promise((r) => setTimeout(r, 1200))
     let t
     try { t = await api.get('/api/flow/task/' + taskId) } catch (_) { continue }
     const done = t.progress || 0, total = t.total || prStore.count
@@ -242,9 +280,12 @@ async function pollBatchGacha(idx, taskId) {
     // 07.31: progress只是已尝试数,跟成功数脱钩(欠费/超时时全部失败也照样跑到接近total)。
     const succ = t.successCount ?? 0
     item.phase = `抽卡替换中 已尝试${done}/${total}(成功${succ})…` + (done > 0 && succ === 0 ? ' ⚠ 全部失败,请检查生图服务/账户余额' : '')
-    if (item.contextId) { try { await ctxStore.load(item.contextId) } catch (_) {} }
+    // 每行独立快照(不经 ctxStore,并行的多个商品互不干扰),筛选区边生边出
+    await snapGacha(item, item.contextId)
     if (t.status === 'done' || t.status === 'error') {
       if (t.status === 'error') throw new Error(t.error || `云端生图失败（已尝试${done}/${total}张，成功${succ}张）——若账户欠费请充值 api.linapi.net`)
+      await snapGacha(item, item.contextId)   // 收尾补齐最后几张
+      prStore.syncBatchItem(idx, item)
       item.pct = 100; item.gachaDone = true; return
     }
   }
@@ -252,13 +293,14 @@ async function pollBatchGacha(idx, taskId) {
 
 function toggleBatch(key) {
   const item = batchCurItem.value; if (!item) return
-  const maxPick = item.refs.length
+  const maxPick = item.refs.length || item.refsCount || 6
   const i = item.picked.indexOf(key)
   if (i >= 0) item.picked.splice(i, 1)
   else {
     if (item.picked.length >= maxPick) { ElMessage.warning(`最多选 ${maxPick} 张（与参考图张数一致）`); return }
     item.picked.push(key)
   }
+  prStore.syncBatchItem(batch.curIdx, item)   // 勾选落盘,刷新/切页不丢
 }
 const isBatchPicked = (key) => batchCurItem.value?.picked.includes(key) ?? false
 
@@ -266,6 +308,7 @@ async function confirmBatchAndList() {
   const item = batchCurItem.value; if (!item) return
   if (!item.picked.length) { ElMessage.warning('请先勾选主图'); return }
   item.status = 'running-list'; item.chainLog = ''
+  const idx = batch.curIdx
   const log = (msg) => { item.chainLog = msg }
   try {
     await doChain({ contextId: item.contextId, pickedKeys: item.picked, storeProfile: item.profile, folderName: item.productName, recognized: item.recognized, log })
@@ -273,6 +316,7 @@ async function confirmBatchAndList() {
   } catch (e) {
     item.status = 'failed'; item.chainLog = (item.chainLog || '') + '\n✗ 失败：' + e.message
   }
+  prStore.syncBatchItem(idx, item)
   // 自动切到下一个 waiting-pick 商品（如果有）
   const nextIdx = batch.items.findIndex((x, i) => i !== batch.curIdx && x.status === 'waiting-pick')
   if (nextIdx >= 0) await selectBatchItem(nextIdx)
@@ -289,7 +333,7 @@ function pickFolder2() { pickFolder() }   // alias，template 里用
 
 async function startGacha() {
   if (!st.white.length || !st.refs.length) return
-  st.running = true; prStore.gachaDone = false; prStore.picked = []; prStore.cloudTaskId = ''
+  st.running = true; prStore.gachaDone = false; prStore.picked = []; prStore.gachaImages = []; prStore.cloudTaskId = ''
   prStore.refsCount = st.refs.length   // 快照:抽卡完成后 refs 可能被清,用快照保住上限数字
   prStore.pct = 0; prStore.phase = '启动中…'; prStore.msg = ''; prStore.msgType = ''
   try {
@@ -303,7 +347,7 @@ async function startGacha() {
     prStore.recognizedCategory = info.recognized?.category || ''
     prStore.recognizedProductName = info.recognized?.productName || ''
     prStore.recognizedSkus = info.recognized?.skus || []
-    await ctxStore.load(info.contextId, 'product-replace')
+    await ctxStore.adopt('product-replace', info.contextId)
     prStore.cloudTaskId = info.cloudTaskId
     prStore.contextId = info.contextId
     await pollCloudGacha(info.cloudTaskId)
@@ -326,18 +370,29 @@ async function pollStart(replaceId) {
 
 async function pollCloudGacha(taskId) {
   while (true) {
-    await new Promise((r) => setTimeout(r, 2500))
+    // 08.03 #1/#3:2500ms→1200ms。首张落地后要让用户尽快看到,轮询太慢会显得"图出了但界面没动"。
+    await new Promise((r) => setTimeout(r, 1200))
     let t
     try { t = await api.get('/api/flow/task/' + taskId) } catch (_) { continue }
     const done = t.progress || 0, total = t.total || prStore.count
     prStore.pct = 60 + Math.round(38 * done / Math.max(1, total))
     const succ = t.successCount ?? 0
     prStore.phase = `抽卡替换中 已尝试${done}/${total}(成功${succ})…` + (done > 0 && succ === 0 ? ' ⚠ 全部失败,请检查生图服务/账户余额' : '')
-    if (prStore.contextId) { try { await ctxStore.load(prStore.contextId) } catch (_) {} }
+    // 本页还持有 current 就顺带刷 ctxStore(复用同一份快照,不多打一次请求);
+    // 切走了只更新全集快照,不去顶别页的 current。
+    if (prStore.contextId) {
+      if (ctxStore.origin === 'product-replace') {
+        try { await ctxStore.load(prStore.contextId) } catch (_) {}
+        await snapGacha(prStore, prStore.contextId, ctxStore.current)
+      } else {
+        await snapGacha(prStore, prStore.contextId)
+      }
+    }
     if (t.status === 'done' || t.status === 'error') {
       if (t.status === 'error') throw new Error(t.error || `云端生图失败（已尝试${done}/${total}张，成功${succ}张）——若账户欠费请充值 api.linapi.net`)
+      await snapGacha(prStore, prStore.contextId)   // 收尾补齐最后几张
       prStore.pct = 100; prStore.gachaDone = true
-      prStore.msg = `✓ 抽卡完成，共 ${mainImages.value.length} 张。请从下方勾选 6 张，点「确认并全自动上新」。`
+      prStore.msg = `✓ 抽卡完成，共 ${prStore.gachaImages.length} 张。请勾选后点「确认并全自动上新」。`
       prStore.msgType = 'ok'; return
     }
   }
@@ -363,11 +418,12 @@ const isPicked = (key) => prStore.picked.includes(key)
 // -------------------- 确认筛选 → step2(详情+SKU图) → 上新 --------------------
 async function confirmAndList() {
   if (prStore.picked.length === 0) { ElMessage.warning('请先勾选主图'); return }
-  if (!ctxStore.contextId) { ElMessage.error('缺 contextId'); return }
+  // 用本页自己的 contextId(不用 ctxStore.contextId —— 它可能被别页顶掉了)
+  if (!prStore.contextId) { ElMessage.error('缺 contextId'); return }
   st.chaining = true; prStore.chainLog = ''
   const log = (msg) => { prStore.chainLog = msg }
   try {
-    await doChain({ contextId: ctxStore.contextId, pickedKeys: prStore.picked, storeProfile: storesStore.targetProfile || '', folderName: prStore.folderName, recognized: { category: prStore.recognizedCategory, productName: prStore.recognizedProductName, skus: prStore.recognizedSkus }, log })
+    await doChain({ contextId: prStore.contextId, pickedKeys: prStore.picked, storeProfile: storesStore.targetProfile || '', folderName: prStore.folderName, recognized: { category: prStore.recognizedCategory, productName: prStore.recognizedProductName, skus: prStore.recognizedSkus }, log })
     prStore.msg = '✓ 全自动完成：抽卡→筛图→详情/SKU图→方案→定价→上新成功。'; prStore.msgType = 'ok'
   } catch (e) {
     prStore.chainLog = '✗ 失败：' + e.message; prStore.msg = '全自动链失败：' + e.message; prStore.msgType = 'err'
@@ -401,7 +457,7 @@ async function doChain({ contextId, pickedKeys, storeProfile, folderName, recogn
     const skuCount = genResult?.skuPlanCount ?? 0
     if (skuCount === 0) throw new Error('快麦未找到对应商品编码，无法生成SKU方案。请在快麦ERP补充该商品白底图编码后重试，或到单品页手动选品上新。')
   }
-  await ctxStore.load(contextId)
+  await ctxStore.adopt('product-replace', contextId)
 
   // 3) step2: 生成详情图 + 逐SKU专属图
   log('③ 生成详情图 + SKU图…')
@@ -413,8 +469,8 @@ async function doChain({ contextId, pickedKeys, storeProfile, folderName, recogn
   })
   if (d2.error) throw new Error(d2.error)
   if (!d2.taskId) throw new Error('step2 未返回 taskId')
-  await pollStep2(d2.taskId, d2.total || 0, log)
-  await ctxStore.load(contextId)
+  await pollStep2(d2.taskId, d2.total || 0, log, contextId)
+  await ctxStore.adopt('product-replace', contextId)
 
   // 4) from-context 上新
   log('④ 上新中…')
@@ -439,12 +495,16 @@ async function pollGen(importId, log) {
   }
 }
 
-async function pollStep2(taskId, total, log) {
+async function pollStep2(taskId, total, log, contextId) {
   for (let tries = 0; tries < 1200; tries++) {
     await new Promise((r) => setTimeout(r, 2000))
     let t
     try { t = await api.get('/api/flow/task/' + taskId) } catch (_) { continue }
     log(`③ 详情/SKU图 ${t.progress || 0}/${total || '?'}…`)
+    // 成品预览区流式出图:详情/SKU 每出一张就刷进来(本页还持有 current 才刷)
+    if (contextId && ctxStore.origin === 'product-replace') {
+      try { await ctxStore.load(contextId) } catch (_) {}
+    }
     if (t.status === 'done') return
     if (t.status === 'error') throw new Error(t.error || 'step2 失败')
   }
@@ -504,11 +564,23 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
         <p v-if="prStore.msg" :class="['msg', prStore.msgType]">{{ prStore.msg }}</p>
       </el-card>
 
-      <el-card v-if="mainImages.length" class="step">
-        <template #header>② 筛选主图（已选 {{ prStore.picked.length }} / {{ prStore.refsCount || st.refs.length }}，共 {{ mainImages.length }} 张）</template>
-        <div class="grid">
-          <div v-for="(m, i) in mainImages" :key="i" :class="['cell', { on: isPicked(m) }]" @click="toggle(m)">
-            <el-image :src="imgUrl(m)" fit="cover" loading="lazy" />
+      <!-- ② 筛选主图:抽卡出的全集,边生边筛。点图=开大图,左上复选框=勾选 -->
+      <el-card v-if="gachaImages.length || st.running" class="step">
+        <template #header>
+          ② 筛选主图（已选 {{ prStore.picked.length }} / {{ prStore.refsCount || st.refs.length }}，共 {{ gachaImages.length }} 张）
+          <span v-if="st.running" class="gen-hint">· 生成中…</span>
+        </template>
+        <!-- 08.03 #1/#3:实测首张落地要 40~60 秒(N 张全并发跑,谁都没先完成),这段时间前端只能空着。
+             不写清楚就像"卡住/没流式"。写明预期 + 已尝试数,让用户知道在跑。 -->
+        <div v-if="!gachaImages.length" class="gen-empty">
+          生成中，首张约需 40~60 秒（{{ prStore.count }} 张并行跑，出图后会逐张出现在这里）…
+          <span v-if="prStore.phase" style="display:block;margin-top:6px">{{ prStore.phase }}</span>
+        </div>
+        <div v-else class="grid">
+          <div v-for="(m, i) in gachaImages" :key="i" :class="['cell', { on: isPicked(m) }]">
+            <el-image :src="imgUrl(m)" fit="cover" loading="lazy" :preview-src-list="gachaImages.map(imgUrl)"
+              :initial-index="i" preview-teleported hide-on-click-modal />
+            <el-checkbox class="pickbox" :model-value="isPicked(m)" @click.stop @change="toggle(m)" />
             <span v-if="isPicked(m)" class="badge">{{ prStore.picked.indexOf(m) + 1 }}</span>
           </div>
         </div>
@@ -518,6 +590,40 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
           </el-button>
         </div>
         <pre v-if="prStore.chainLog" class="chainlog">{{ prStore.chainLog }}</pre>
+      </el-card>
+
+      <!-- ③ 成品预览:确认后才出现。选定主图 → 详情图 → SKU 图,随生成流式刷入 -->
+      <el-card v-if="st.chaining || pickedMains.length || detailImages.length" class="step">
+        <template #header>③ 成品预览<span v-if="st.chaining" class="gen-hint">· 生成中…</span></template>
+        <!-- 上新标题:加标签明示这是要提交到平台的标题 -->
+        <div class="ptitle-row">
+          <span class="ptitle-l">上新标题</span>
+          <span v-if="pageCtx?.visual?.title" class="ptitle">{{ pageCtx.visual.title }}</span>
+          <span v-else class="ptitle-empty">未生成（②生成方案/标题时出）</span>
+        </div>
+        <div v-if="pickedMains.length" class="psec">
+          <div class="psec-t">选定主图（{{ pickedMains.length }}）· 点击看大图</div>
+          <div class="pgrid">
+            <el-image v-for="(m, i) in pickedMains" :key="'m' + i" :src="imgUrl(m)"
+              :preview-src-list="pickedMains.map(imgUrl)" :initial-index="i" fit="contain" preview-teleported hide-on-click-modal />
+          </div>
+        </div>
+        <div v-if="detailImages.length" class="psec">
+          <div class="psec-t">详情图（{{ detailImages.length }}）· 点击看大图</div>
+          <div class="pgrid">
+            <el-image v-for="(d, i) in detailImages" :key="'d' + i" :src="imgUrl(d)"
+              :preview-src-list="detailImages.map(imgUrl)" :initial-index="i" fit="contain" preview-teleported hide-on-click-modal />
+          </div>
+        </div>
+        <div v-if="skuItems.length" class="psec">
+          <div class="psec-t">SKU 图（{{ skuItems.length }}）· 点击看大图</div>
+          <div class="pgrid">
+            <el-image v-for="(it, i) in skuItems" :key="'s' + i" :src="imgUrl(it.imgDir)"
+              :preview-src-list="skuItems.map((x) => imgUrl(x.imgDir))" :initial-index="i"
+              fit="contain" preview-teleported hide-on-click-modal :title="it.skuDisplayName || it.name" />
+          </div>
+        </div>
+        <div v-if="st.chaining && !pickedMains.length && !detailImages.length" class="gen-empty">等待成品图生成中…</div>
       </el-card>
     </template>
 
@@ -544,12 +650,13 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
         <div v-if="batch.items.length" class="batch-list">
           <div v-for="(item, i) in batch.items" :key="i"
                :class="['batch-row', item.status, { active: batch.curIdx === i }]"
-               :style="item.status === 'waiting-pick' ? 'cursor:pointer' : ''"
-               @click="item.status === 'waiting-pick' ? selectBatchItem(i) : null">
+               :style="item.contextId ? 'cursor:pointer' : ''"
+               @click="item.contextId ? selectBatchItem(i) : null">
             <el-tag :type="statusType(item.status)" size="small">{{ statusLabel(item.status) }}</el-tag>
             <span class="bname">{{ item.shopName }} / {{ item.productName }}</span>
-            <span class="binfo">白底{{ item.white.length }}·参考{{ item.refs.length }}</span>
+            <span class="binfo">白底{{ item.white.length || item.whiteCount || 0 }}·参考{{ item.refs.length || item.refsCount || 0 }}</span>
             <span v-if="item.status === 'waiting-pick' && batch.curIdx !== i" class="bwarn" style="color:#409eff">← 点击筛图</span>
+            <span v-if="item.needReparse" class="bwarn">图片数据已随页面刷新丢失，请重新选根目录解析</span>
             <span v-if="item.warnReason" class="bwarn">{{ item.warnReason }}</span>
             <el-progress v-if="['running-gacha','waiting-pick','running-list'].includes(item.status)"
               :percentage="item.pct" :status="item.gachaDone ? 'success' : ''" style="flex:1;max-width:200px" />
@@ -557,25 +664,71 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
         </div>
       </el-card>
 
-      <!-- 当前处理商品的筛图面板 -->
-      <el-card v-if="batchCurItem && ['waiting-pick','running-list'].includes(batchCurItem.status)" class="step">
+      <!-- ② 当前商品筛图:抽卡中就能边生边筛。点图=开大图,左上复选框=勾选 -->
+      <!-- 08.03 修 #2:done/failed 也要能点回来看(原来只有 running-gacha/waiting-pick/running-list
+           三态显示,上新成功后点回该行整个面板消失,回不去) -->
+      <el-card v-if="batchCurItem && batchGachaImages.length" class="step">
         <template #header>
           ② 筛选主图 — {{ batchCurItem.shopName }} / {{ batchCurItem.productName }}
-          （已选 {{ batchCurItem.picked.length }} / {{ batchCurItem.refs.length }}，共 {{ batchMainImages.length }} 张）
+          （已选 {{ batchCurItem.picked.length }} / {{ batchCurItem.refs.length || batchCurItem.refsCount || 6 }}，共 {{ batchGachaImages.length }} 张）
+          <span v-if="batchCurItem.status === 'running-gacha'" class="gen-hint">· 生成中…</span>
         </template>
         <p class="phase">{{ batchCurItem.phase }}</p>
-        <div class="grid">
-          <div v-for="(m, i) in batchMainImages" :key="i" :class="['cell', { on: isBatchPicked(m) }]" @click="toggleBatch(m)">
-            <el-image :src="imgUrl(m)" fit="cover" loading="lazy" />
+        <div v-if="!batchGachaImages.length" class="gen-empty">
+          生成中，首张约需 40~60 秒（并行跑，出图后会逐张出现在这里）…
+        </div>
+        <div v-else class="grid">
+          <div v-for="(m, i) in batchGachaImages" :key="i" :class="['cell', { on: isBatchPicked(m) }]">
+            <el-image :src="imgUrl(m)" fit="cover" loading="lazy" :preview-src-list="batchGachaImages.map(imgUrl)"
+              :initial-index="i" preview-teleported hide-on-click-modal />
+            <el-checkbox class="pickbox" :model-value="isBatchPicked(m)" @click.stop @change="toggleBatch(m)" />
             <span v-if="isBatchPicked(m)" class="badge">{{ batchCurItem.picked.indexOf(m) + 1 }}</span>
           </div>
         </div>
         <div class="actions foot">
-          <el-button type="success" :disabled="batchCurItem.picked.length === 0" :loading="batchCurItem.status === 'running-list'" @click="confirmBatchAndList">
+          <el-button v-if="batchCurItem.status !== 'done'" type="success"
+            :disabled="batchCurItem.picked.length === 0 || batchCurItem.status !== 'waiting-pick'"
+            :loading="batchCurItem.status === 'running-list'" @click="confirmBatchAndList">
             {{ batchCurItem.status === 'running-list' ? '处理中…' : `确认并上新（${batchCurItem.picked.length} 张）` }}
           </el-button>
+          <span v-if="batchCurItem.status === 'running-gacha'" class="cnt-hint">抽卡还在跑，可先勾选，跑完再点确认</span>
+          <span v-if="batchCurItem.status === 'done'" class="cnt-hint" style="color:#67c23a">✓ 该商品已上新完成（下方为成品预览，可回看）</span>
         </div>
         <pre v-if="batchCurItem.chainLog" class="chainlog">{{ batchCurItem.chainLog }}</pre>
+      </el-card>
+
+      <!-- ③ 成品预览:确认上新后出现,与单商品同构 -->
+      <el-card v-if="batchCurItem && ['running-list','done'].includes(batchCurItem.status)" class="step">
+        <template #header>③ 成品预览 — {{ batchCurItem.productName }}<span v-if="batchCurItem.status === 'running-list'" class="gen-hint">· 生成中…</span></template>
+        <!-- 08.03 修 #4:批量模式原来没有上新标题预览(只有单商品模式有) -->
+        <div class="ptitle-row">
+          <span class="ptitle-l">上新标题</span>
+          <span v-if="pageCtx?.visual?.title" class="ptitle">{{ pageCtx.visual.title }}</span>
+          <span v-else class="ptitle-empty">未生成（②生成方案/标题时出）</span>
+        </div>
+        <div v-if="pickedMains.length" class="psec">
+          <div class="psec-t">选定主图（{{ pickedMains.length }}）· 点击看大图</div>
+          <div class="pgrid">
+            <el-image v-for="(m, i) in pickedMains" :key="'bm' + i" :src="imgUrl(m)"
+              :preview-src-list="pickedMains.map(imgUrl)" :initial-index="i" fit="contain" preview-teleported hide-on-click-modal />
+          </div>
+        </div>
+        <div v-if="detailImages.length" class="psec">
+          <div class="psec-t">详情图（{{ detailImages.length }}）· 点击看大图</div>
+          <div class="pgrid">
+            <el-image v-for="(d, i) in detailImages" :key="'bd' + i" :src="imgUrl(d)"
+              :preview-src-list="detailImages.map(imgUrl)" :initial-index="i" fit="contain" preview-teleported hide-on-click-modal />
+          </div>
+        </div>
+        <div v-if="skuItems.length" class="psec">
+          <div class="psec-t">SKU 图（{{ skuItems.length }}）· 点击看大图</div>
+          <div class="pgrid">
+            <el-image v-for="(it, i) in skuItems" :key="'bs' + i" :src="imgUrl(it.imgDir)"
+              :preview-src-list="skuItems.map((x) => imgUrl(x.imgDir))" :initial-index="i"
+              fit="contain" preview-teleported hide-on-click-modal :title="it.skuDisplayName || it.name" />
+          </div>
+        </div>
+        <div v-if="!pickedMains.length && !detailImages.length" class="gen-empty">等待成品图生成中…</div>
       </el-card>
     </template>
   </div>
@@ -596,10 +749,21 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
 .msg.ok { color: #67c23a; }
 .msg.err { color: #f56c6c; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-top: 8px; }
-.cell { position: relative; cursor: pointer; border: 3px solid transparent; border-radius: 6px; overflow: hidden; aspect-ratio: 1; }
+/* 点图=开大图(zoom-in),勾选只认左上角复选框 —— 两者不再抢同一次点击 */
+.cell { position: relative; cursor: zoom-in; border: 3px solid transparent; border-radius: 6px; overflow: hidden; aspect-ratio: 1; }
 .cell.on { border-color: #67c23a; }
 .cell .el-image { width: 100%; height: 100%; }
+.pickbox { position: absolute; top: 2px; left: 6px; z-index: 2; background: rgba(255,255,255,.85); border-radius: 4px; padding: 0 4px; height: 22px; }
 .badge { position: absolute; top: 4px; right: 4px; background: #67c23a; color: #fff; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: bold; }
+/* 成品预览区(与单品页 SingleProduct 同一套 class 语义) */
+.ptitle-row { display: flex; gap: 8px; align-items: baseline; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid #ebeef5; }
+.ptitle-l { flex: 0 0 auto; font-size: 12px; color: #909399; }
+.ptitle { font-size: 14px; font-weight: 600; line-height: 1.5; }
+.ptitle-empty { font-size: 13px; color: #c0c4cc; }
+.psec { margin-bottom: 16px; }
+.psec-t { font-size: 13px; color: #909399; margin-bottom: 8px; }
+.pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+.pgrid :deep(.el-image) { width: 100%; aspect-ratio: 1; border: 1px solid #ebeef5; border-radius: 4px; cursor: zoom-in; display: block; }
 .chainlog { margin-top: 12px; background: #f5f7fa; padding: 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; max-height: 300px; overflow: auto; }
 .batch-list { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
 .batch-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px; background: #f9f9fb; flex-wrap: wrap; }
@@ -611,5 +775,8 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
 .bname { font-size: 13px; font-weight: 500; }
 .binfo { font-size: 12px; color: #909399; }
 .bwarn { font-size: 12px; color: #e6a23c; flex: 1; }
+.gen-empty { color: #909399; font-size: 13px; padding: 20px 0; text-align: center; }
+.gen-hint { font-size: 12px; color: #909399; margin-left: 4px; }
+.gen-hint.ok { color: #67c23a; }
 </style>
 

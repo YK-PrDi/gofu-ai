@@ -102,7 +102,7 @@ async function pollImport(importId) {
     imp.progress = t.pct || 0
     imp.msg = `导入中 ${t.pct || 0}% · ${t.phase || '处理中…'}`; imp.msgType = ''
     // 建完context即中途载入并持续刷新,右侧预览实时出图(主图/详情先显示,方案/SKU随后陆续刷入),不必等100%
-    if (t.contextId) { try { await ctxStore.load(t.contextId, 'import') } catch (_) {} }
+    if (t.contextId) { try { await ctxStore.adopt('import', t.contextId) } catch (_) {} }
     if (t.done) { if (t.error) throw new Error(t.error); return t.result }
   }
 }
@@ -130,7 +130,7 @@ async function runImport() {
     imp.recWarnings = d.warnings || []
     imp.lastImportedFolder = imp.folderName
     imp.recognized = true
-    await ctxStore.load(d.contextId, 'import')
+    await ctxStore.adopt('import', d.contextId)
     imp.msg = `✓ 已识别「${imp.recProductName}」（品类${d.category || '未识别'}·SKU ${imp.recSkus.length}）。核对无误后点「确认并生成布局」。`
     imp.msgType = 'ok'
   } catch (e) {
@@ -142,12 +142,12 @@ async function runImport() {
 
 // 生成段:用户确认识别结果后调,出方案+标题+挂图+后端算价,再进自动链(补图→风格→上新)。
 async function runGenerate() {
-  if (!imp.recognized || !ctxStore.contextId || !imp.groups) return
+  if (!imp.recognized || !pageCtxId.value || !imp.groups) return
   imp.running = true; imp.progress = 0; imp.done = false
   imp.msg = '生成中（出方案→AI标题→挂图→算价）…'; imp.msgType = ''
   try {
     const started = await api.post('/api/semi-auto/generate-layout', {
-      contextId: ctxStore.contextId, category: imp.recCategory, productName: imp.recProductName,
+      contextId: pageCtxId.value, category: imp.recCategory, productName: imp.recProductName,
       skus: imp.recSkus, sku: imp.groups.sku,
       planCount: settings.settings.defaultPlanCount || 1, profitRate: gen.profitRate,
     })
@@ -156,7 +156,7 @@ async function runGenerate() {
     const d = await pollImport(started.importId)
     if (d?.warnings?.length) d.warnings.forEach((w) => console.warn('[导入·生成]', w))
     imp.recognized = false
-    await ctxStore.load(ctxStore.contextId)
+    await ctxStore.adopt('import', pageCtxId.value)
     // 生成完(含后端算价)进自动链:补SKU图→风格迁移→上新(不再前端补算定价)
     await autoAfterImport()
   } catch (e) {
@@ -169,11 +169,11 @@ async function runGenerate() {
 // 生成后自动链(源 autoAfterImport):补缺SKU图→自动随机风格迁移→上新。
 // 定价已由后端 generate-layout 算好回填,这里不再前端补算(只保留零价检查兜底)。
 async function autoAfterImport() {
-  const plans = () => ctxStore.current?.structure?.plans || []
+  const plans = () => pageCtx.value?.structure?.plans || []
   imp.running = true
   try {
     // 1/3 补生缺失SKU图(方案有item但无成品图),需白底图参考
-    const hasWhite = (ctxStore.current?.visual?.whiteImages || []).length > 0
+    const hasWhite = (pageCtx.value?.visual?.whiteImages || []).length > 0
     const missing = plans().reduce((n, p) => n + (p.items || []).filter((it) => !it.imgDir).length, 0)
     if (missing > 0 && hasWhite) {
       imp.msg = `步骤1/3 补生缺失的 SKU 图中…（${missing} 张）`; imp.msgType = ''
@@ -212,23 +212,34 @@ async function manualStyle() {
 // 统一进度:导入阶段用 imp.progress,补图/风格迁移阶段用 gen.progress(它才是真实生图进度)
 const busy = computed(() => imp.running || gen.running || style.running || listing.value.running)
 const liveProgress = computed(() => (gen.running || style.running) ? gen.progress : imp.progress)
+// ctxStore 是全局单例,产品替换/开品/单品等页 load 过 context 后 current 会被它们覆盖 ——
+// 预览统一按 owner 取,否则本页会把别页的商品当成自己的渲染(串页)。
+const pageCtx = computed(() => ctxStore.currentFor('import'))
+const pageCtxId = computed(() => ctxStore.ownedId('import'))
+// 概览字段也从 pageCtx 取(ctxStore.title/category/skuItems 读的是全局 current,会串页)
+const pageTitle = computed(() => pageCtx.value?.basic?.title || pageCtx.value?.mainItem || pageCtxId.value || '未选择商品')
+const pageCategory = computed(() => pageCtx.value?.category || '')
+const pageSkuItems = computed(() => {
+  const stc = pageCtx.value?.structure
+  return stc?.plans?.length ? (stc.plans[stc.selectedPlanIndex || 0]?.items || []) : []
+})
 // SKU 方案(15套):展示用
-const plans = computed(() => ctxStore.current?.structure?.plans || [])
+const plans = computed(() => pageCtx.value?.structure?.plans || [])
 const selPlan = computed({
-  get: () => ctxStore.current?.structure?.selectedPlanIndex || 0,
-  set: (i) => { if (ctxStore.current?.structure) ctxStore.current.structure.selectedPlanIndex = i },
+  get: () => pageCtx.value?.structure?.selectedPlanIndex || 0,
+  set: (i) => { if (pageCtx.value?.structure) pageCtx.value.structure.selectedPlanIndex = i },
 })
 const curItems = computed(() => plans.value[selPlan.value]?.items || [])
 // 8d流式:过滤生成中的null占位槽
-const mainImages = computed(() => (ctxStore.current?.visual?.mainImages || []).filter(Boolean))
-const detailImages = computed(() => (ctxStore.current?.visual?.detailImages || []).filter(Boolean))
+const mainImages = computed(() => (pageCtx.value?.visual?.mainImages || []).filter(Boolean))
+const detailImages = computed(() => (pageCtx.value?.visual?.detailImages || []).filter(Boolean))
 
 // 上新(dryRun=false 正式)。源 submitListing。二次确认由全局设置 confirmBeforeListing 统一管。
 const listing = ref({ running: false, log: '' })
 async function submitListing(dryRun) {
-  if (!ctxStore.current) return
+  if (!pageCtx.value) return
   // reviewImages(生图后必须人工过图):无主图不让上
-  if (settings.settings.reviewImages && !dryRun && !(ctxStore.current.visual?.mainImages || []).length) {
+  if (settings.settings.reviewImages && !dryRun && !(pageCtx.value.visual?.mainImages || []).length) {
     imp.msg = '设置要求生图后人工过图:当前无主图,不允许上新'; imp.msgType = 'err'; return
   }
   // 上新前二次确认(全局设置):勾了才弹。导入自动链也走这里,不再额外停一次。
@@ -236,7 +247,7 @@ async function submitListing(dryRun) {
   listing.value.running = true
   try {
     const d = await api.post('/api/listing/from-context', {
-      contextId: ctxStore.contextId, planIndex: ctxStore.current?.structure?.selectedPlanIndex || 0,
+      contextId: pageCtxId.value, planIndex: pageCtx.value?.structure?.selectedPlanIndex || 0,
       dryRun, brand: '', storeProfile: storesStore.targetProfile || '',
     })
     if (d.error) throw new Error(d.error)
@@ -259,7 +270,12 @@ async function pollListing(taskId, tries = 0) {
   } catch (e) { imp.msg = '上新轮询失败：' + e.message; imp.msgType = 'err'; listing.value.running = false }
 }
 
-onMounted(() => { settings.init(); storesStore.loadStores() })
+onMounted(async () => {
+  settings.init(); storesStore.loadStores()
+  // 切页回来:把本页上次的 context 调回 current(可能被产品替换/开品等页顶掉了)
+  const own = ctxStore.ownedId('import')
+  if (own && ctxStore.origin !== 'import') { try { await ctxStore.adopt('import', own) } catch (_) {} }
+})
 </script>
 <template>
   <div class="import">
@@ -319,7 +335,7 @@ onMounted(() => { settings.init(); storesStore.loadStores() })
         </el-card>
 
         <!-- 手动风格迁移(旧版🎨) -->
-        <el-card v-if="ctxStore.current" class="sec">
+        <el-card v-if="pageCtx" class="sec">
           <template #header>🎨 风格迁移（测哪种风格销量好，可反复换）</template>
           <p class="desc">对当前商品整套换视觉基调（产品/构图/文案不变，只换风格），换完覆盖回写，可接着上新。</p>
           <div class="style-bar">
@@ -333,7 +349,7 @@ onMounted(() => { settings.init(); storesStore.loadStores() })
         </el-card>
 
         <!-- 手动上新 -->
-        <el-card v-if="ctxStore.current" class="sec">
+        <el-card v-if="pageCtx" class="sec">
           <template #header>上新</template>
           <el-button type="primary" :disabled="busy" :loading="listing.running" @click="submitListing(false)">上新到平台</el-button>
           <pre v-if="listing.log" class="log">{{ listing.log }}</pre>
@@ -343,21 +359,28 @@ onMounted(() => { settings.init(); storesStore.loadStores() })
       <!-- 右栏:预览(品类/SKU概览 + 主图 + 详情 + SKU方案) -->
       <div class="right">
         <el-card class="preview">
-          <template #header>预览{{ ctxStore.current ? '：' + ctxStore.title : '' }}</template>
-          <el-empty v-if="!ctxStore.current" description="选文件夹导入后在此预览" :image-size="60" />
+          <template #header>预览{{ pageCtx ? '：' + pageTitle : '' }}</template>
+          <el-empty v-if="!pageCtx" description="选文件夹导入后在此预览" :image-size="60" />
           <template v-else>
+            <!-- 上新标题:原来只在卡片头显示 mainItem(商品编码名),要提交到平台的营销标题压根没露出来 -->
+            <div class="ov">
+              <span class="ov-l">上新标题</span>
+              <span class="ov-v" :class="{ empty: !pageCtx.visual?.title }">
+                {{ pageCtx.visual?.title || '未生成（生成布局时出 AI 标题）' }}
+              </span>
+            </div>
             <!-- 品类 + 选品概览 -->
             <div class="ov">
               <span class="ov-l">品类</span>
-              <span class="ov-v" :class="{ empty: !ctxStore.category }">{{ ctxStore.category || '未识别（文件夹名未按品类-主件名）' }}</span>
+              <span class="ov-v" :class="{ empty: !pageCategory }">{{ pageCategory || '未识别（文件夹名未按品类-主件名）' }}</span>
             </div>
             <div class="ov">
               <span class="ov-l">选品</span>
               <span class="ov-v">
-                <el-tag v-for="(s, i) in ctxStore.skuItems" :key="i" :type="String(s.role).toLowerCase() === 'main' ? 'success' : 'info'" class="stag">
+                <el-tag v-for="(s, i) in pageSkuItems" :key="i" :type="String(s.role).toLowerCase() === 'main' ? 'success' : 'info'" class="stag">
                   {{ roleLabel(s.role) }} · {{ s.name }}
                 </el-tag>
-                <span v-if="!ctxStore.skuItems.length" class="empty">未识别到 SKU 单品</span>
+                <span v-if="!pageSkuItems.length" class="empty">未识别到 SKU 单品</span>
               </span>
             </div>
 
@@ -410,7 +433,7 @@ onMounted(() => { settings.init(); storesStore.loadStores() })
       </div>
     </div>
     <InpaintDialog v-model="inpaint.open" :img-ref="inpaint.imgRef" :kind="inpaint.kind"
-      :index="inpaint.index" @done="ctxStore.load(ctxStore.contextId)" />
+      :index="inpaint.index" @done="ctxStore.adopt('import', pageCtxId)" />
   </div>
 </template>
 
@@ -432,7 +455,7 @@ onMounted(() => { settings.init(); storesStore.loadStores() })
 .stag { margin: 2px 6px 2px 0; }
 .style-bar { display: flex; gap: 12px; align-items: center; }
 .ov { display: flex; gap: 10px; margin-bottom: 10px; font-size: 13px; }
-.ov-l { width: 42px; flex-shrink: 0; color: #909399; }
+.ov-l { width: 56px; flex-shrink: 0; color: #909399; }   /* 56px 容得下「上新标题」四字不换行 */
 .ov-v { flex: 1; }
 .ov-v.empty, .empty { color: #c0c4cc; }
 .psec { margin-top: 16px; }

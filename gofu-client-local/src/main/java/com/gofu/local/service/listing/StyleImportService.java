@@ -445,7 +445,7 @@ public class StyleImportService {
             try {
                 Map<String, Object> req = new LinkedHashMap<>();
                 req.put("contextId", contextId); req.put("category", category == null ? "" : category);
-                req.put("productName", productName); req.put("brand", "GOFU");
+                req.put("productName", productName); req.put("brand", "");
                 req.put("skus", mainSkus); req.put("planCount", Math.max(1, planCount));   // 套数由前端设置传入(默认1,测试省算力)
                 Map<String, Object> r = postJson("/api/gen/sku-plans", req);
                 if (r.get("savedItemCount") instanceof Number n) itemCount = n.intValue();
@@ -458,7 +458,7 @@ public class StyleImportService {
             Map<String, Object> req = new LinkedHashMap<>();
             req.put("contextId", contextId); req.put("mode", "ai");
             req.put("category", category == null ? "" : category); req.put("productType", category == null ? "" : category);
-            req.put("productName", productName); req.put("brand", "GOFU"); req.put("skuNames", skuNames);
+            req.put("productName", productName); req.put("brand", ""); req.put("skuNames", skuNames);
             postJson("/api/gen/title", req);
         } catch (Exception e) { log.warn("导入·AI标题生成失败(不阻断，留主件名): {}", e.getMessage()); }
         // 4c) sku 图按尺寸名次挂方案：上传 sku 图→云端接口按尺寸配对写回 item.imgDir（复用云端 #2 名次配对思路）

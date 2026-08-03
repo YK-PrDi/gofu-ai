@@ -120,6 +120,67 @@ public class ImageGenService {
         return seg.length > 0 && !seg[0].isEmpty() ? seg[0].trim() : s;
     }
 
+    /**
+     * 从构图库文字里剥掉"别款商品"的产品描述，只留与产品无关的构图信息（08.03 #5）。
+     *
+     * <p>背景：`shelf-prompts.json` 每条构图 prompt 都是对着某张具体参考图写的，里面把那款商品
+     * 写得极细（如杯架那条："枪灰色碳钢杯架…上层左侧两只白色保温杯、中右两只带棕色杯套的透明
+     * 玻璃杯…"）。当白底图是筷子筒时，模型照这段文字画，就画成了杯架。两轮"保留文字+想办法压住"
+     * 都失败（追加作废声明无效；挪到末尾隔离仍失败），故改为从源头剥离。
+     *
+     * <p>做法：按句切分（。；！以及换行），逐句判定——只要句子里出现"产品实体描述词"就整句丢掉；
+     * 保留明确属于构图/版式/文案分区的句子。这是保守策略：宁可多丢几句（构图信息在参考图里本来
+     * 就有），也不能漏放一句产品描述进去。
+     *
+     * <p>保留的信息类型：视角/俯仰角/景别、主体在画面中的位置与占比、左右上下信息栏分区比例、
+     * 功能小图数量与排布、标题/卖点标签位置、布光、禁止项（无人物/无水印/不生成文字等）。
+     */
+    static String stripProductWordsFromComposition(String seg) {
+        if (seg == null || seg.isBlank()) return "";
+        // 产品实体描述词：颜色词、材质词、结构件名、被收纳物名。命中即丢句。
+        String[] productWords = {
+            // 颜色
+            "枪灰", "奶白", "米白", "黑色", "白色", "银色", "银灰", "深灰", "灰色", "浅蓝", "浅黄", "浅粉",
+            "黄色", "黄绿", "红色", "红白", "金色", "咖色", "杏色", "棕色", "透明", "镀铬", "原木", "浅木", "木纹", "木质",
+            // 材质/工艺
+            "碳钢", "不锈钢", "金属", "塑料", "硅胶", "陶瓷", "太空铝", "钢丝",
+            // 结构件/款式
+            "杯架", "杯位", "刀架", "刀槽", "锅盖架", "肥皂", "皂面", "收纳篮", "收纳盒", "置物架", "沥水架",
+            "接水盘", "底托", "底座", "层板", "挂钩", "吸盘", "围杆", "立柱", "抹布杆", "晾布杆", "分隔支架",
+            // 被收纳物
+            "保温杯", "玻璃杯", "马克杯", "耳杯", "锅盖", "砧板", "菜板", "刀具", "剪刀", "锅铲", "汤勺", "餐叉",
+            "筷子", "海绵", "香皂", "滤网", "钢丝球", "毛巾", "洗洁精", "洗护", "泵瓶", "喷瓶", "乳液", "沐浴球",
+            "清洁刷", "打蛋器", "外套", "耳机", "手提包", "牙刷", "水龙头", "水槽",
+        };
+        // 明确属于"构图/版式"的词：句中含这些且不含产品词时保留
+        String[] layoutWords = {
+            "视角", "俯拍", "俯视", "平视", "仰视", "景别", "画面", "构图", "版式", "分区", "信息栏", "信息条",
+            "标题", "卖点", "标签", "功能窗", "功能小图", "小窗", "留白", "占画面", "比例为", "正方形", "1:1",
+            "布光", "光影", "阴影", "高光", "无人物", "无水印", "无尺寸线", "不生成文字", "后期添加", "铺满", "背景",
+        };
+        StringBuilder kept = new StringBuilder();
+        int dropped = 0, total = 0;
+        for (String sentence : seg.split("(?<=[。；！\\n])")) {
+            String s = sentence.trim();
+            if (s.isEmpty()) continue;
+            total++;
+            boolean hasProduct = false;
+            for (String w : productWords) if (s.contains(w)) { hasProduct = true; break; }
+            if (hasProduct) { dropped++; continue; }   // 含产品描述 → 整句丢
+            boolean hasLayout = false;
+            for (String w : layoutWords) if (s.contains(w)) { hasLayout = true; break; }
+            if (hasLayout) kept.append(s);             // 纯构图句 → 保留
+            else dropped++;                            // 既无产品词也无构图词 → 宁可丢(多为产品细节铺陈)
+        }
+        String out = kept.toString().trim();
+        // 兜底：剥得一句不剩(该条几乎全是产品描述)时，给一句通用构图指令，别把 prompt 里的构图段留空。
+        if (out.isEmpty()) {
+            out = "1:1 正方形电商主图构图：主体产品居中偏右呈现，左侧或底部预留信息栏放标题与功能标签，"
+                + "竖排或横排若干功能展示小图；柔和均匀布光，写实场景铺满画面，无人物、无水印、无尺寸线。";
+        }
+        return out;
+    }
+
     /** 人像参考图：从 classpath assets/portrait.png 落地到用户目录一次，返回文件。失败返回 null。 */
     private File portraitRefFile() {
         try {
@@ -410,6 +471,16 @@ public class ImageGenService {
             if (pick == null)
                 throw new RuntimeException("架类构图缺失(叶子类目=" + leaf + ")，请检查 shelf-prompts.json 是否含该类目");
             String shelfSeg = pick.prompt();
+            // 修(#5 08.03 三轮·用户指示"提示词里不用描述参考图的产品，只要参考图的构图就行了")：
+            //   前两轮都在"保留别款商品描述 + 想办法压住它"，实测都压不住(一轮追加作废声明无效、
+            //   二轮挪到末尾隔离仍被用户实测到 SKU 又变产品)。既然参考*图片*本身已经承载了构图信息，
+            //   那段描述别款商品的*文字*就是纯负担 —— 直接从源头剥掉，只留与产品无关的构图信息。
+            //   有白底图时才剥(无白底图得靠文字画,不能剥)。
+            if (hasWhiteBg) {
+                String stripped = stripProductWordsFromComposition(shelfSeg);
+                log.info("架类构图文字剥离产品描述: {} 字 → {} 字", shelfSeg.length(), stripped.length());
+                shelfSeg = stripped;
+            }
             String shelfTpl = PromptLoader.load("prompt/image-shelf-main.txt");
             String shelfPrompt = shelfTpl
                 .replace("{{shelfPrompt}}", shelfSeg)
@@ -451,6 +522,20 @@ public class ImageGenService {
                         floorlidComposed = true;
                         shelfPrompt = PromptLoader.load("prompt/image-shelf-floorlid.txt")
                                 .replace("{{shelfPrompt}}", shelfSeg).replace("{{colorName}}", colorOnly);
+                        // 修(08.02 序号错位):本分支的进入条件含 !hasWhiteBg,所以 shelfRefs 里其实
+                        //   **只有构图底一张**,而 image-shelf-floorlid.txt 却写着"第一张是白底图、
+                        //   第二张是构图底" —— 模型会把构图底当成"本款白底图"照抄那个米奇预制款
+                        //   (与用户反馈的"SKU图跟白底图不一样"同一类图文错位)。无白底图时改写这两段
+                        //   序号说明,如实告诉模型"只有一张构图底、且它是别款、造型不可照抄"。
+                        if (!hasWhiteBg) {
+                            shelfPrompt = shelfPrompt
+                                .replace("第一张参考图是本款产品的白底图（真实实物）。",
+                                         "本次**没有提供本款产品的白底图**，唯一一张参考图是用【别款】落地架拼的构图底。")
+                                .replace("第二张参考图是用【别款】落地架拼的\"构图底\"，",
+                                         "这张构图底")
+                                .replace("架体一律以第一张白底图为准。",
+                                         "架体只能按本品种方案的文字描述来画,**不得照搬构图底里那款架体的造型细节**。");
+                        }
                         log.info("落地锅盖架 路线2：白底图优先={}, 构图底={}", hasWhiteBg, baseImg);
                     }
                 } catch (Exception ce) {
@@ -467,6 +552,46 @@ public class ImageGenService {
                 if (shelfBase != null && shelfBase.isFile() && !dropPresetRef) shelfRefs.add(shelfBase);   // 预制图作版式参考,放白底之后
                 if (!hasWhiteBg && hasRef) shelfRefs.add(ref);
             }
+            // 主图追加为背景参考：白底图已锁主体，主图放最末只用于背景色调/氛围参考，权重最低。
+            // 修(#1 08.02)：原来只给图不给文字描述，模型容易忽略最后一张图的背景而自行另编场景。
+            //   补上主图背景的**文字**描述(bgStyleOverride = analyzeBackgroundStyleOnce(选定主图) 的产出，
+            //   整批只分析一次)，图+文双管：背景以选定主图为准，构图库只管版式。
+            String mainImgBgHint = "";
+            if (hasRef && hasWhiteBg) {
+                shelfRefs.add(ref);
+                mainImgBgHint = "【背景基调·严格参照最后一张主图】最后一张参考图是本商品的营销主图，**背景色调、光影层次与氛围必须与其保持一致**（颜色、冷暖、深浅、场景氛围）。白底图只锁定产品主体，背景严格跟主图走，不要另换颜色或改成纯色影棚背景。";
+                if (bgStyleOverride != null && !bgStyleOverride.isBlank()) {
+                    mainImgBgHint += "\n该主图的背景基调为：" + bgStyleOverride
+                                   + "\n若上面【构图·按本品种方案】的文字描述了不同的场景/背景/台面/墙面颜色，**一律以本段主图背景基调为准**。";
+                }
+            }
+            // 构图参考图说明：只在有真实预制参考图时才提示AI"参考图里的商品是别款/换成本款"；
+            // 无预制图时只有白底图，绝不能出现这段说明——否则AI会把白底图产品当"别款"替换掉。
+            String compositionRefHint = "";
+            boolean hasPresetInRefs = shelfBase != null && shelfBase.isFile() && !dropPresetRef;
+            if (hasPresetInRefs || floorlidComposed) {
+                compositionRefHint = "【构图参考图·只借版式·不借产品】\n所给参考图中**除白底图以外**的那张构图参考图，只用来锁定排布：主体产品的摆放位置、拍摄视角、功能展示小图与文案标签的分区布局，做出同样专业的电商主图版式。它**仅用于锁定\"版式与构图\"**，其中出现的具体商品是别的产品，**绝对不要照搬**——所有位置（含功能小图、细节图）画的产品都必须是上方白底图那一款。";
+            }
+            // 修(#1 08.02 二轮)：构图库 prompt 文本把「另一款商品」写得极细（如杯架方案写死
+            //   "枪灰色碳钢杯架/上下两层/白色保温杯+玻璃杯+马克杯"）。预制*图片*在有白底图时已被
+            //   dropPresetRef 丢掉，但这段*文字*仍整段留着 → 筷子筒被画成杯架(用户08.02反馈)。
+            //   一轮只在文字后面追加一段"作废声明"，实测无效(shots/ab-A-current.jpg 仍是杯架+杯子)：
+            //   根因是**位置**而非措辞 —— 别款商品的完整描述在第43字(最高权威位)，作废声明是第270字
+            //   的事后追认，模型按先入为主执行。
+            //   二轮改法：模板结构重排(白底图主体锁提到最前、别款描述隔离到末尾并包在"仅供借版式"
+            //   分隔线内)，A/B 实测通过(shots/ab-B-subjectfirst.jpg 出真实筷子筒+酒红框+小熊印花，
+            //   版式仍照库)。此处只保留"无白底图时"的兜底提示；有白底图的强约束已固化进模板正文。
+            String compositionTextOverride = "";
+            if (!hasWhiteBg) {
+                // 无白底图 = 没有主体锚，只能靠版式文字画。此时要反过来提醒：文字里的产品描述可参考，
+                // 但仍按本品种方案画，别把它当成"必须复刻某张照片"。
+                compositionTextOverride =
+                    "【注意·本次没有产品白底图】没有提供本款产品的白底图，只能依据下方版式方案的文字描述作画；"
+                  + "请按该品类的通用合理形态绘制，颜色取「" + colorOnly + "」，不要臆造过多细节。\n";
+            }
+            shelfPrompt = shelfPrompt.replace("{{mainImgBgHint}}", mainImgBgHint)
+                                     .replace("{{compositionRefHint}}", compositionRefHint)
+                                     .replace("{{compositionTextOverride}}", compositionTextOverride);
             log.info("架类生图: 叶子={}, 组={}, 预制参考图={}({}), 丢弃预制={}, 白底优先={}, route2构图底={}",
                     leaf, pick.group(), shelfBase != null, pick.ref(), dropPresetRef, hasWhiteBg, floorlidComposed);
             Exception lastShelf = null;
@@ -626,6 +751,13 @@ public class ImageGenService {
         } else if (hasRef) {
             genRefs.add(ref);  // SKU 无白底图时回退
         }
+        // ⚠ 已知图文矛盾(08.02 核查发现,未改,待产品侧定夺)：本路径(非花洒非架类的兜底路径)用的
+        //   image-sku-white-bg.txt 模板开头写死 "Product photography on pure white background"(纯白底
+        //   两分区目录图),但上面 !isShower 分支又把主图分析出的场景背景描述当 [BACKGROUND] 追加进去
+        //   ——一个要纯白、一个要场景,互相打架。因两者语义相反、无法同时满足,且本路径只在
+        //   既非花洒又非架类的品类才会走到(现有业务几乎不触发),此处不擅自改行为,先记录。
+        //   若要改：想要纯白目录图→删掉 [BACKGROUND] 追加；想要跟主图同调的场景图→换模板并把
+        //   主图加进 genRefs 末尾作背景参考(参考架类 mainImgBgHint 的图+文双管写法)。
 
         // 轮换密钥，失败换下一个。M10：Gemini 按【项目】限流(非按key)，429 换 key 无用，
         // 必须退避重试同一调用——否则多数 SKU 撞 429 直接失败(现象：整批只出前 1~2 张)。

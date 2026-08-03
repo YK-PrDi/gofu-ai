@@ -59,7 +59,7 @@ async function genSku(idx) {
   o.taskStatus = 'gen'; o.taskMsg = 'AI生成中…（建档→拉白底→出方案）'
   try {
     const contextId = await ensureContext(o)
-    await ctxStore.load(contextId, 'batch')
+    await ctxStore.adopt('batch', contextId)
     gen.profitRate = batch.profitRate // 批量流利润率
     const plan0 = ctxStore.current?.structure?.plans?.[0] || null
     const missImg = plan0 ? (plan0.items || []).filter((it) => !it.imgDir).length : 0
@@ -189,8 +189,13 @@ const previewPlanIdx = ref(0)
               <el-tag size="small">{{ batch.preview.shop }}</el-tag>
               <el-tag size="small" type="info">{{ batch.preview.category }}</el-tag>
             </div>
-            <el-input v-if="batch.preview.contextId" v-model="batch.preview.title" type="textarea" :rows="2"
-              placeholder="标题" @blur="batch.saveTitle()" style="margin:10px 0" />
+            <!-- 上新标题:加标签明示这是要提交到平台的标题(可改,失焦回写云端);未建 context 时还没标题 -->
+            <div class="pv-title">
+              <span class="pv-title-l">上新标题</span>
+              <el-input v-if="batch.preview.contextId" v-model="batch.preview.title" type="textarea" :rows="2"
+                placeholder="上新标题（可直接改，失焦保存）" @blur="batch.saveTitle()" />
+              <span v-else class="pv-title-empty">未生成（点该商品「AI生成」出方案与标题后可见并可改）</span>
+            </div>
             <div v-if="batch.preview.main.length" class="psec">
               <div class="psec-t">主图（{{ batch.preview.main.length }}）</div>
               <div class="pgrid"><img v-for="(m, i) in batch.preview.main" :key="i" :src="m" /></div>
@@ -231,6 +236,9 @@ const previewPlanIdx = ref(0)
 .prod-msg.done { color: #67c23a; }
 .prod-miss { font-size: 12px; color: #e6a23c; margin-top: 2px; }
 .pv-meta { display: flex; gap: 8px; }
+.pv-title { margin: 10px 0; padding-bottom: 10px; border-bottom: 1px solid #ebeef5; }
+.pv-title-l { display: block; font-size: 12px; color: #909399; margin-bottom: 4px; }
+.pv-title-empty { font-size: 13px; color: #c0c4cc; }
 .psec { margin-top: 14px; }
 .psec-t { font-size: 13px; color: #909399; margin-bottom: 8px; }
 .pgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }

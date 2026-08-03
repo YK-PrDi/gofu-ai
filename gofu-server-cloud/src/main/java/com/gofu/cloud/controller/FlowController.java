@@ -459,11 +459,17 @@ public class FlowController {
         contextService.save(ctx);
 
         String[] keys = new String[count];
+        // 开品构图防同质化：整批洗一次牌(跨次不同)，循环内按 index 取母题(组内不同)。见 kaipinMotifHint。
+        List<String> shuffledMotifs = new ArrayList<>(Arrays.asList(COMPOSITION_MOTIFS));
+        Collections.shuffle(shuffledMotifs, styleRandom);
+        log.info("[开品生图] 构图母题指派(防同质化): {}", shuffledMotifs);
         List<java.util.concurrent.CompletableFuture<Void>> futures = new ArrayList<>();
         for (int idx = 0; idx < count; idx++) {
             final int i = idx;
             // 轮换素材：每次取 1 张缩小版，均匀分布
             final String disneyLocal = disneySmall.get(i % disneySmall.size());
+            // 本张专属机位指令(与其它张明显不同)，拼在共用 prompt 之后
+            final String motifPrompt = prompt + kaipinMotifHint(i, count, shuffledMotifs);
             futures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
                 try {
                     if (task.isCancelled()) return;
@@ -472,9 +478,12 @@ public class FlowController {
                         if (task.isCancelled()) return;
                         task.setCurrentProduct("开品生图 " + (i + 1) + "/" + count);
                         String out = new File(tmpOut, "kaipin-" + i + ".jpg").getAbsolutePath();
-                        // 两张输入：[迪士尼缩图(512px), 用户图]，传给 GPT-Image edits
-                        List<String> twoRefs = List.of(disneyLocal, userLocal);
-                        if (genWithRetryKaipin(prompt, twoRefs, userLocal, out, aspect, 2)) {
+                        // 两张输入：[用户产品图, 迪士尼缩图(512px)]，传给 GPT-Image edits。
+                        // 修(08.02 顺序bug)：原来是 [disneyLocal, userLocal]，但 prompt 明写
+                        //   "以第一张图片为产品主体"(前端 buildGenPrompt 与后端默认 prompt 都这么写)
+                        //   → 第一张实际是迪士尼贴纸,模型把贴纸当成了产品主体。产品图必须排第一张。
+                        List<String> twoRefs = List.of(userLocal, disneyLocal);
+                        if (genWithRetryKaipin(motifPrompt, twoRefs, userLocal, out, aspect, 2)) {
                             keys[i] = uploadIfCos(out);
                             streamMainSlot(ctx, i, keys[i]);
                             task.incrementSuccess();
@@ -805,6 +814,29 @@ public class FlowController {
         sb.append("请把下列机位母题按顺序分配给第 1..N 张主图，第1张主图务必用第一个母题，不得雷同上一次：\n");
         for (int i = 0; i < n; i++) sb.append("第").append(i + 1).append("张 → ").append(motifs.get(i)).append("\n");
         return sb.toString();
+    }
+
+    /**
+     * 开品模式构图防同质化（「三、待实现·当前可做」第1条，方向①）。
+     *
+     * <p>问题：`genKaipinImages` 里 count 张图共用同一份 `buildGenPrompt()` 文本，唯一变量只有轮换的
+     * 迪士尼素材，机位/构图没有任何差异化指令 → 容易出一批雷同构图。
+     *
+     * <p>做法：复用主图那套已验证的 {@link #COMPOSITION_MOTIFS}（6 种机位母题），每次生图先整体洗牌
+     * （跨次防同质化：同一商品重跑一轮，各张拿到的母题与上一轮不同），再按 index 取模分给第 i 张
+     * （组内防同质化）。母题数 6 < count 时循环复用，但配合洗牌后的起始偏移，重复的那几张彼此仍隔开。
+     *
+     * @param idx   第几张（0-based）
+     * @param total 本次共几张
+     * @param shuffled 本批已洗牌的母题列表（整批共用一份，调用方在循环外算好）
+     */
+    private static String kaipinMotifHint(int idx, int total, List<String> shuffled) {
+        if (shuffled == null || shuffled.isEmpty()) return "";
+        String motif = shuffled.get(idx % shuffled.size());
+        return "\n\n【本张构图机位·第 " + (idx + 1) + "/" + total + " 张·必须与其它张明显不同】"
+             + "本张采用：" + motif + "。"
+             + "产品主体、颜色、结构、融合的图案风格保持一致，但**机位/景别/构图**必须按本张指定的母题来，"
+             + "不要与同批其它张用同一个角度或同一种画面布局。";
     }
 
     /**
@@ -1283,7 +1315,10 @@ public class FlowController {
             + "每一个字都要完整显示、不得被裁掉半个字或截断成不完整词；随竖版重排时若某行放不下，就【整行换行折行】显示，"
             + "绝不缩掉、切掉或省略任何文字；保持原有主/副标题层级。"
             + "\n【严禁】新增、改写、缩写、删减、截断或臆造任何卖点文字，严禁出现参考主图上没有的中文词、"
-            + "错别字或生造词；若参考主图本就没有文案，则详情也不要凭空编造功能卖点文字（宁可少写也不要写错）。";
+            + "错别字或生造词；若参考主图本就没有文案，则详情也不要凭空编造功能卖点文字（宁可少写也不要写错）。"
+            + "\n【严禁纵向拉伸/压缩产品主体】产品的长宽比例必须与参考主图完全相同，"
+            + "绝不允许通过拉伸/压扁/缩放产品来填充 9:16 画幅；"
+            + "只能通过在产品上方或下方【延伸背景/场景区域】来达到 9:16——产品本身尺寸占比与主图相当，不得变形。";
     }
 
     private void genOneDetail(ProductContext ctx, GenerationTask task, int idx, String mainLocal, String white, File tmpOut) {
@@ -1297,7 +1332,7 @@ public class FlowController {
                 String baseForDetail = mainLocal != null ? mainLocal : white;
                 String out = new File(tmpOut, "detail-" + idx + ".jpg").getAbsolutePath();
                 String dp = buildDetailPrompt(ctx, idx);
-                if (baseForDetail != null && genWithRetry(dp, refs, baseForDetail, out, "9:16", 2)) {
+                if (baseForDetail != null && genWithRetryDetail(dp, refs, baseForDetail, out, 2)) {
                     streamDetailSlot(ctx, idx, uploadIfCos(out));
                     task.incrementSuccess();
                 } else {
@@ -1312,6 +1347,28 @@ public class FlowController {
             log.warn("[step-all] 详情图 #{} 失败(跳过): {}", idx, e.getMessage());
         }
         finally { task.incrementProgress(); }
+    }
+
+    /** 详情图后处理：contain 模式缩放到目标尺寸，两侧/上下用浅灰填充，避免 cover 裁边丢内容。 */
+    private void ensureContain(String outputPath, String size) {
+        try {
+            String[] parts = size.split("x");
+            int tw = Integer.parseInt(parts[0]), th = Integer.parseInt(parts[1]);
+            java.awt.image.BufferedImage src = javax.imageio.ImageIO.read(new java.io.File(outputPath));
+            if (src == null) return;
+            int sw = src.getWidth(), sh = src.getHeight();
+            if (sw == tw && sh == th) return;
+            double scale = Math.min((double) tw / sw, (double) th / sh);
+            int dw = (int) Math.round(sw * scale), dh = (int) Math.round(sh * scale);
+            java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(tw, th, java.awt.image.BufferedImage.TYPE_INT_RGB);
+            java.awt.Graphics2D g = out.createGraphics();
+            g.setColor(new java.awt.Color(0xF5, 0xF5, 0xF5));
+            g.fillRect(0, 0, tw, th);
+            g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+            g.drawImage(src, (tw - dw) / 2, (th - dh) / 2, dw, dh, null);
+            g.dispose();
+            javax.imageio.ImageIO.write(out, "jpg", new java.io.File(outputPath));
+        } catch (Exception e) { log.warn("ensureContain failed: {}", e.getMessage()); }
     }
 
     /**
@@ -1420,7 +1477,7 @@ public class FlowController {
                             String baseForDetail = mainLocal != null ? mainLocal : white;   // 优先用对应主图,兜底白底
                             String out = new File(tmpOut, "detail-" + idx + ".jpg").getAbsolutePath();
                             String dp = buildDetailPrompt(ctx, idx);
-                            if (baseForDetail != null && genWithRetry(dp, refs, baseForDetail, out, "9:16", 2)) {
+                            if (baseForDetail != null && genWithRetryDetail(dp, refs, baseForDetail, out, 2)) {
                                 dKeys[idx] = uploadIfCos(out);
                                 streamDetailSlot(ctx, idx, dKeys[idx]);   // 8d:完成即写槽位+save,前端逐张可见
                                 task.incrementSuccess();
@@ -1600,7 +1657,7 @@ public class FlowController {
                 List<String> refs = mref != null ? List.of(mref) : List.of();
                 String base = mref != null ? mref : white;
                 String dp = buildDetailPrompt(ctx, index);
-                if (!genWithRetry(dp, refs, base, out, "9:16", 2)) return ResponseEntity.internalServerError().body(Map.of("error", "详情图重生失败"));
+                if (!genWithRetryDetail(dp, refs, base, out, 2)) return ResponseEntity.internalServerError().body(Map.of("error", "详情图重生失败"));
                 key = uploadIfCos(out);
                 if (index < ctx.getVisual().getDetailImages().size()) ctx.getVisual().getDetailImages().set(index, key);
                 else ctx.getVisual().getDetailImages().add(key);
@@ -1868,6 +1925,25 @@ public class FlowController {
                 boolean rateLimited = msg.contains("429") || msg.contains("RESOURCE_EXHAUSTED")
                         || msg.contains("rate") || msg.contains("Too Many");
                 log.warn("生图第 {} 次失败{}: {}", a + 1, rateLimited ? "(限流)" : "", msg);
+                if (rateLimited && a < maxRetry) {
+                    long waitMs = Math.min(16000, 2000L * (1L << Math.min(3, a)));
+                    try { Thread.sleep(waitMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                }
+            }
+        }
+        return false;
+    }
+
+    /** 详情图专用重试：参考图用 contain(letterbox)，避免主图被 cover 裁边导致 AI 漏画内容。 */
+    private boolean genWithRetryDetail(String prompt, List<String> refs, String white, String out, int maxRetry) {
+        for (int a = 0; a <= maxRetry; a++) {
+            try {
+                if (imageGen.generateImageMultiDetail(prompt, refs, white, out, "9:16")) return true;
+            } catch (Exception e) {
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                boolean rateLimited = msg.contains("429") || msg.contains("RESOURCE_EXHAUSTED")
+                        || msg.contains("rate") || msg.contains("Too Many");
+                log.warn("详情图生图第 {} 次失败{}: {}", a + 1, rateLimited ? "(限流)" : "", msg);
                 if (rateLimited && a < maxRetry) {
                     long waitMs = Math.min(16000, 2000L * (1L << Math.min(3, a)));
                     try { Thread.sleep(waitMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }

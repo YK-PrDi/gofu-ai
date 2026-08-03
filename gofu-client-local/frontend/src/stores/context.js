@@ -8,8 +8,9 @@ export const useContextStore = defineStore('context', {
     contextId: '',
     current: null, // 完整 ProductContext 快照
     loading: false,
-    origin: '', // 来源:'import'导入流建 / 'single'单品页建 / 'switcher'切换器调入。
-                // 单品页据此决定是否自动接管(方案A:导入流建的不被动铺到单品页)。
+    origin: '', // 当前 current 属于哪个页面(owner):'single'/'import'/'product-replace'/'kaipin'/'batch'。
+                // 只记"最后一个写入者",页面切走被别页顶掉后无从回退 —— 故配 ownedIds 记账。
+    ownedIds: {}, // owner → 该页最后持有的 contextId。切页回来据此把自己的 context 重新调回 current。
   }),
   getters: {
     hasContext: (s) => !!s.contextId,
@@ -17,6 +18,9 @@ export const useContextStore = defineStore('context', {
     // 品类/主件:后端反推,识别不出为空(ctx.category / ctx.mainItem)
     category: (s) => s.current?.category || '',
     mainItem: (s) => s.current?.mainItem || '',
+    // 页面预览统一读这个:current 不属于本页就返 null,杜绝渲染别页商品(串页)。
+    currentFor: (s) => (owner) => (s.origin === owner ? s.current : null),
+    ownedId: (s) => (owner) => s.ownedIds[owner] || '',
     // 当前选中方案的 SKU 单品列表(展示用)
     skuItems: (s) => {
       const st = s.current?.structure
@@ -37,6 +41,15 @@ export const useContextStore = defineStore('context', {
         this.loading = false
       }
     },
+    // 页面接管某 context:登记归属 + 载入。各页新建/切换 context 都走它(替代裸 load(id,'xxx'))。
+    async adopt(owner, id) {
+      if (!owner || !id) return
+      this.ownedIds[owner] = id
+      await this.load(id, owner)
+    },
+    releaseOwner(owner) {
+      if (owner) delete this.ownedIds[owner]
+    },
     async listAll() {
       return api.get('/api/context')
     },
@@ -54,7 +67,15 @@ export const useContextStore = defineStore('context', {
     clear() {
       this.contextId = ''
       this.current = null
+      this.origin = ''
+      this.ownedIds = {}
     },
   },
-  persist: { pick: ['contextId'] }, // 只持久化 id,内容刷新时重拉,避免存陈旧快照
+  // 不持久化(08.03 二次修正)。
+  // 「切页回来不丢」靠的是 Pinia 内存态 —— hash 路由切页是 router 导航、页面不重载,内存本来就在,
+  // 压根不需要持久化。持久化只决定「页面重载后要不要恢复」,而那正是不想要的:
+  //   · 一开始放 localStorage → 新开应用自动铺出上次商品(用户反馈#1)
+  //   · 改成 sessionStorage 仍然错 → sessionStorage 在同一标签页内**跨 F5 存活**,
+  //     只有关标签页才清,所以 F5 后残留照旧(用户反馈#2)。
+  // 结论:干活中间态一律不持久化,F5 = 干净重来。
 })

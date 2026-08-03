@@ -112,8 +112,9 @@ async function pushWhite(code) {
 
 // 单品上新与导入建品是两条独立流程,单品页直接读当前商品,不做导入接管逻辑;
 // 但 ctxStore 是全局单例,开品/产品替换等其他页面 load 过 context 后 current 会被它们覆盖——
-// 单品页必须按 origin 挡掉非自己流程写入的 context,否则右侧预览会串成"开品商品"等异页占位内容。
-const pageCtx = computed(() => (ctxStore.origin === 'single' || !ctxStore.origin) ? ctxStore.current : null)
+// 按 owner 挡掉非自己流程写入的 context,否则右侧预览会串成"开品商品"等异页内容;
+// 被顶掉后靠 onMounted 里的 adopt 把本页 context 调回来(不再只剩空白预览)。
+const pageCtx = computed(() => ctxStore.currentFor('single'))
 
 // ── 方案/定价 ──
 const plans = computed(() => pageCtx.value?.structure?.plans || [])
@@ -202,11 +203,14 @@ async function pollListing(taskId, tries = 0) {
 
 const fmt = (n) => (Number(n) || 0).toFixed(2)
 
-onMounted(() => {
+onMounted(async () => {
   settings.init()
   storesStore.loadStores()
   // 方案套数默认跟随设置(defaultPlanCount);用户在④生图选项里仍可临时改
   entry.genOpts.planCount = settings.settings.defaultPlanCount || 1
+  // 切页回来:把本页上次的 context 调回 current(可能被产品替换/开品等页顶掉了)
+  const own = ctxStore.ownedId('single')
+  if (own && ctxStore.origin !== 'single') { try { await ctxStore.adopt('single', own) } catch (_) {} }
 })
 </script>
 <template>
@@ -355,7 +359,12 @@ onMounted(() => {
             description="选品、生成后在此预览" :image-size="60" />
 
           <template v-if="pageCtx">
-            <div v-if="pageCtx.visual?.title" class="ptitle">{{ pageCtx.visual.title }}</div>
+            <!-- 上新标题:加标签明示这就是要提交到平台的标题(原来只是一行无标签粗体,容易被当成图注看漏) -->
+            <div class="ptitle-row">
+              <span class="ptitle-l">上新标题</span>
+              <span v-if="pageCtx.visual?.title" class="ptitle">{{ pageCtx.visual.title }}</span>
+              <span v-else class="ptitle-empty">未生成（生成布局时出 AI 标题）</span>
+            </div>
             <!-- 主图(过滤流式生成中的null占位槽);点开看大图(el-image preview) + hover 重生 -->
             <div v-if="mainImagesShown.length" class="psec">
               <div class="psec-t">主图（{{ mainImagesShown.length }}）· 点击看大图，悬停可重生</div>
@@ -413,10 +422,10 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.single { max-width: 1400px; }
+.single { max-width: 1600px; }
 .cols { display: flex; gap: 16px; align-items: flex-start; }
-/* min-width:0 关键:否则左栏内 el-table 固有宽度会撑破 620px 把右栏预览压到极窄(flex+表格经典塌陷) */
-.left { flex: 0 0 620px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+/* min-width:0 关键:否则左栏内 el-table 固有宽度会撑破 680px 把右栏预览压到极窄(flex+表格经典塌陷) */
+.left { flex: 0 0 680px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 .right { flex: 1; min-width: 0; position: sticky; top: 16px; }
 /* SKU 方案表限宽在左栏内,超出滚动而非撑破布局 */
 .left :deep(.el-table) { max-width: 100%; }
@@ -440,10 +449,14 @@ onMounted(() => {
 .hint { font-size: 13px; color: #606266; margin: 0 0 8px; }
 .hint.err { color: #e6a23c; }
 .log { background: #111827; color: #d1d5db; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 200px; overflow: auto; white-space: pre-wrap; }
-.ptitle { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+/* 上新标题行:带标签,与下方图片区分开 */
+.ptitle-row { display: flex; gap: 8px; align-items: baseline; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid #ebeef5; }
+.ptitle-l { flex: 0 0 auto; font-size: 12px; color: #909399; }
+.ptitle { font-size: 14px; font-weight: 600; line-height: 1.5; }
+.ptitle-empty { font-size: 13px; color: #c0c4cc; }
 .psec { margin-bottom: 16px; }
 .psec-t { font-size: 13px; color: #909399; margin-bottom: 8px; }
-.pgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
 .pgrid img { width: 100%; border: 1px solid #ebeef5; border-radius: 4px; }
 .pgrid :deep(.el-image) { width: 100%; border: 1px solid #ebeef5; border-radius: 4px; cursor: zoom-in; display: block; }
 /* 预览格:相对定位,重生/重绘按钮悬停浮现在右上角 */
