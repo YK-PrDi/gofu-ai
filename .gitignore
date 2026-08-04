@@ -74,6 +74,8 @@ title-lib.json
 .multipart-temp/
 .history-refs/
 .firecrawl/
+# 离线 prompt 台（promptlab.sh）的依赖 classpath 缓存，机器相关、删了会自动重建
+.promptlab-cp.txt
 
 # IDE
 .idea/

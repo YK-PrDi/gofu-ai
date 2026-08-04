@@ -121,6 +121,34 @@ public class ImageGenService {
     }
 
     /**
+     * 产品实体描述词：颜色词、材质词、结构件名、被收纳物名。命中即丢句。
+     * 08.04：由 {@link #stripProductWordsFromComposition} 的局部变量提升为静态字段——离线 prompt 台
+     * （test 源集 PromptLab）要用同一张表标注"构图库文字里的别款商品实体词"，
+     * 提升后两处共用一份，避免再抄一张会漂移的词表。行为不变。
+     */
+    static final String[] PRODUCT_WORDS = {
+            // 颜色
+            "枪灰", "奶白", "米白", "黑色", "白色", "银色", "银灰", "深灰", "灰色", "浅蓝", "浅黄", "浅粉",
+            "黄色", "黄绿", "红色", "红白", "金色", "咖色", "杏色", "棕色", "透明", "镀铬", "原木", "浅木", "木纹", "木质",
+            // 材质/工艺
+            "碳钢", "不锈钢", "金属", "塑料", "硅胶", "陶瓷", "太空铝", "钢丝",
+            // 结构件/款式
+            "杯架", "杯位", "刀架", "刀槽", "锅盖架", "肥皂", "皂面", "收纳篮", "收纳盒", "置物架", "沥水架",
+            "接水盘", "底托", "底座", "层板", "挂钩", "吸盘", "围杆", "立柱", "抹布杆", "晾布杆", "分隔支架",
+            // 被收纳物
+            "保温杯", "玻璃杯", "马克杯", "耳杯", "锅盖", "砧板", "菜板", "刀具", "剪刀", "锅铲", "汤勺", "餐叉",
+            "筷子", "海绵", "香皂", "滤网", "钢丝球", "毛巾", "洗洁精", "洗护", "泵瓶", "喷瓶", "乳液", "沐浴球",
+            "清洁刷", "打蛋器", "外套", "耳机", "手提包", "牙刷", "水龙头", "水槽",
+    };
+
+    /** 明确属于"构图/版式"的词：句中含这些且不含产品词时保留。08.04 同 {@link #PRODUCT_WORDS} 提升为静态字段。 */
+    static final String[] LAYOUT_WORDS = {
+            "视角", "俯拍", "俯视", "平视", "仰视", "景别", "画面", "构图", "版式", "分区", "信息栏", "信息条",
+            "标题", "卖点", "标签", "功能窗", "功能小图", "小窗", "留白", "占画面", "比例为", "正方形", "1:1",
+            "布光", "光影", "阴影", "高光", "无人物", "无水印", "无尺寸线", "不生成文字", "后期添加", "铺满", "背景",
+    };
+
+    /**
      * 从构图库文字里剥掉"别款商品"的产品描述，只留与产品无关的构图信息（08.03 #5）。
      *
      * <p>背景：`shelf-prompts.json` 每条构图 prompt 都是对着某张具体参考图写的，里面把那款商品
@@ -137,27 +165,8 @@ public class ImageGenService {
      */
     static String stripProductWordsFromComposition(String seg) {
         if (seg == null || seg.isBlank()) return "";
-        // 产品实体描述词：颜色词、材质词、结构件名、被收纳物名。命中即丢句。
-        String[] productWords = {
-            // 颜色
-            "枪灰", "奶白", "米白", "黑色", "白色", "银色", "银灰", "深灰", "灰色", "浅蓝", "浅黄", "浅粉",
-            "黄色", "黄绿", "红色", "红白", "金色", "咖色", "杏色", "棕色", "透明", "镀铬", "原木", "浅木", "木纹", "木质",
-            // 材质/工艺
-            "碳钢", "不锈钢", "金属", "塑料", "硅胶", "陶瓷", "太空铝", "钢丝",
-            // 结构件/款式
-            "杯架", "杯位", "刀架", "刀槽", "锅盖架", "肥皂", "皂面", "收纳篮", "收纳盒", "置物架", "沥水架",
-            "接水盘", "底托", "底座", "层板", "挂钩", "吸盘", "围杆", "立柱", "抹布杆", "晾布杆", "分隔支架",
-            // 被收纳物
-            "保温杯", "玻璃杯", "马克杯", "耳杯", "锅盖", "砧板", "菜板", "刀具", "剪刀", "锅铲", "汤勺", "餐叉",
-            "筷子", "海绵", "香皂", "滤网", "钢丝球", "毛巾", "洗洁精", "洗护", "泵瓶", "喷瓶", "乳液", "沐浴球",
-            "清洁刷", "打蛋器", "外套", "耳机", "手提包", "牙刷", "水龙头", "水槽",
-        };
-        // 明确属于"构图/版式"的词：句中含这些且不含产品词时保留
-        String[] layoutWords = {
-            "视角", "俯拍", "俯视", "平视", "仰视", "景别", "画面", "构图", "版式", "分区", "信息栏", "信息条",
-            "标题", "卖点", "标签", "功能窗", "功能小图", "小窗", "留白", "占画面", "比例为", "正方形", "1:1",
-            "布光", "光影", "阴影", "高光", "无人物", "无水印", "无尺寸线", "不生成文字", "后期添加", "铺满", "背景",
-        };
+        String[] productWords = PRODUCT_WORDS;
+        String[] layoutWords = LAYOUT_WORDS;
         StringBuilder kept = new StringBuilder();
         int dropped = 0, total = 0;
         for (String sentence : seg.split("(?<=[。；！\\n])")) {
@@ -179,6 +188,27 @@ public class ImageGenService {
                 + "竖排或横排若干功能展示小图；柔和均匀布光，写实场景铺满画面，无人物、无水印、无尺寸线。";
         }
         return out;
+    }
+
+    /**
+     * 08.04 生图质量攻关：把送去生图的最终 prompt 原样落进 cloud.log。
+     *
+     * <p>为什么必须落盘：本方法有 6 条路由（R1 花洒贴图 / R2 落地锅盖架 / R3 架类通用 / R4 花洒AI模板 /
+     * R5 花洒gemini / R6 兜底），prompt 由「模板 + 若干 replace + 若干条件追加」拼成，
+     * 光读代码推不出模型实际收到的那一串到底长什么样、哪段在前哪段在后。而 08.02 实测已坐实
+     * <b>位置比措辞更决定出图结果</b>，所以"看得见确切 prompt"是攻关的前置条件。
+     *
+     * <p>组装段与 HTTP 调用在本方法里揉在一起（400+ 行、6 条路由交织），要做成离线可跑得先抽纯函数——
+     * 那是另一件事的工作量。落日志能以极小改动拿到同样的能力：任何一次真实 run 之后，
+     * 从 cloud.log 里就能取出确切 prompt 拿去比对。
+     *
+     * @param route 路由标识（R1~R6，与本方法注释里的编号对应）
+     * @param refRoles 各张参考图的**角色**（如"白底图"/"袋子"/"主图作背景参考"），顺序即 refs 顺序——
+     *                 光打文件名看不出哪张是干什么的，而"第几张图是什么"是 prompt 里反复指代的东西
+     */
+    private void dumpGenPrompt(String route, String skuName, String prompt, List<String> refRoles) {
+        log.info("[SKU生图·{}] sku={} refs={} prompt={}字\n--- prompt 全文 ↓ ---\n{}\n--- prompt 全文 ↑ ---",
+                route, skuName, refRoles, prompt == null ? 0 : prompt.length(), prompt);
     }
 
     /** 人像参考图：从 classpath assets/portrait.png 落地到用户目录一次，返回文件。失败返回 null。 */
@@ -425,6 +455,11 @@ public class ImageGenService {
 
             // 一次生成。M10：撞限流(429/5xx中转站繁忙)时指数退避重试同一调用——
             // 原来只轮 key 无退避，整批 SKU 排在主图/详情之后、配额耗尽→只出前 1~2 张(07.06反馈)。
+            List<String> r1Roles = new java.util.ArrayList<>();
+            if (hasWhiteBg) r1Roles.add("白底图");
+            if (hasBag) r1Roles.add("袋子");
+            if (hasRef) r1Roles.add("营销主图(背景参考)");
+            dumpGenPrompt("R1 花洒贴图", skuName, prompt, r1Roles);
             Exception lastShower = null;
             int maxBackoff = 4;
             for (int attempt = 0; attempt < keys.size() * (1 + maxBackoff); attempt++) {
@@ -594,6 +629,19 @@ public class ImageGenService {
                                      .replace("{{compositionTextOverride}}", compositionTextOverride);
             log.info("架类生图: 叶子={}, 组={}, 预制参考图={}({}), 丢弃预制={}, 白底优先={}, route2构图底={}",
                     leaf, pick.group(), shelfBase != null, pick.ref(), dropPresetRef, hasWhiteBg, floorlidComposed);
+            // R2/R3 共用同一个调用循环，靠 floorlidComposed 区分：
+            //   R2 = 落地锅盖架专属(!hasWhiteBg 才触发，构图底是别款预制照合成的)，模板 image-shelf-floorlid.txt
+            //   R3 = 架类通用，模板 image-shelf-main.txt（08.02 已做主体锁前置+别款描述末尾隔离的那条）
+            List<String> shelfRoles = new java.util.ArrayList<>();
+            if (floorlidComposed) {
+                shelfRoles.add("route2构图底(别款预制照合成)");
+            } else {
+                if (hasWhiteBg) shelfRoles.add("白底图(主体锚)");
+                if (shelfBase != null && shelfBase.isFile() && !dropPresetRef) shelfRoles.add("预制图(版式参考)");
+                if (!hasWhiteBg && hasRef) shelfRoles.add("营销参考图");
+            }
+            if (hasRef && hasWhiteBg) shelfRoles.add("主图(背景基调参考·权重最低)");
+            dumpGenPrompt(floorlidComposed ? "R2 落地锅盖架" : "R3 架类通用", skuName, shelfPrompt, shelfRoles);
             Exception lastShelf = null;
             int maxBackoff = 4;
             for (int attempt = 0; attempt < keys.size() * (1 + maxBackoff); attempt++) {
@@ -758,6 +806,26 @@ public class ImageGenService {
         //   既非花洒又非架类的品类才会走到(现有业务几乎不触发),此处不擅自改行为,先记录。
         //   若要改：想要纯白目录图→删掉 [BACKGROUND] 追加；想要跟主图同调的场景图→换模板并把
         //   主图加进 genRefs 末尾作背景参考(参考架类 mainImgBgHint 的图+文双管写法)。
+
+        // 08.04：共享尾部循环服务三条路由，按到达时的状态反推是哪条(R1/R2/R3 各自 return 在上面，到不了这里)
+        String tailRoute = isShower
+                ? (aiTemplate ? "R4 花洒AI模板" : "R5 花洒贴图(gemini)")
+                : "R6 兜底(非花洒非架类)";
+        List<String> tailRoles = new java.util.ArrayList<>();
+        if (isShower) {
+            for (int k = 0; k < genRefs.size(); k++) tailRoles.add("refs[" + k + "]");
+        } else if (hasWhiteBg) {
+            tailRoles.add("白底图");
+        } else if (hasRef) {
+            tailRoles.add("营销参考图(无白底回退)");
+        }
+        if ("R6 兜底(非花洒非架类)".equals(tailRoute) && gemini && !bgDesc.isBlank()) {
+            // 上方 763-769 那段自承的图文矛盾就在这个组合下成立：模板要求纯白底、又追加了场景 [BACKGROUND]。
+            // 落日志时直接标出来，免得看日志的人再推一遍。默认渠道是 gpt-image(非 gemini)，故一般不触发。
+            log.warn("[SKU生图·R6] ⚠ 命中已知图文矛盾：image-sku-white-bg.txt 要求纯白底，"
+                    + "但本次又追加了场景 [BACKGROUND] 描述（见本方法上方 08.02 注释）");
+        }
+        dumpGenPrompt(tailRoute, skuName, prompt, tailRoles);
 
         // 轮换密钥，失败换下一个。M10：Gemini 按【项目】限流(非按key)，429 换 key 无用，
         // 必须退避重试同一调用——否则多数 SKU 撞 429 直接失败(现象：整批只出前 1~2 张)。

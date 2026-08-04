@@ -51,7 +51,10 @@ class M19LogicTest {
     // ③ 段数兜底重切：LLM 漏写 --- 时按【第N张方案】标题切出正确段数
     @Test
     void splitByPlanHeader_recoversSegmentsWhenNoDelimiter() throws Exception {
-        FlowController fc = new FlowController(null, null, null, null, null, null);
+        // 构造器参数只为拿到实例反射调纯函数 splitByPlanHeader，全传 null 不会被用到。
+        // 08.04：构造器已从 6 参增到 8 参（新增 templateService/disneyAssetService），
+        // 本测试此前一直编不过（test 源集整体 testCompile 失败）——补齐参数个数。
+        FlowController fc = new FlowController(null, null, null, null, null, null, null, null);
         Method m = FlowController.class.getDeclaredMethod("splitByPlanHeader", String.class);
         m.setAccessible(true);
         String raw = "【总分析】总卖点：稳固收纳\n"

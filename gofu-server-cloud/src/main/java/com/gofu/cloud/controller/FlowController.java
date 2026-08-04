@@ -461,11 +461,16 @@ public class FlowController {
         tmpOut.mkdirs();
         String aspect = "1:1";
 
-        // 预缩素材到 512px。disneyLocals 为空时这里自然是空列表，下游据此走"无贴纸"分支。
-        List<String> disneySmall = new ArrayList<>();
-        for (String d : disneyLocals) disneySmall.add(shrinkTo512(d, tmpOut, "disney_small_"));
-        // 产品B同样预缩(它是用户上传的原图，可能很大)
-        String refSmall = refLocal == null ? null : shrinkTo512(refLocal, tmpOut, "refb_small_");
+        // ⚠️ 08.04 删掉"预缩到 512px"：它是超时的**原因**，不是解药。
+        // 决定性对照（同一时刻各 8 并发、3 图输入、quality=low）：
+        //   小图 23~31KB(即预缩到512的产物) → 6/8 成功，2 张撞满 420s 超时，成功的也慢到 108~262s
+        //   大图 155~217KB(未预缩)          → 8/8 成功，90~152s
+        // 小图更慢且会超时。因为 gpt-image-2 输出固定 1024×1024：喂 512px 它得**上采样重建**细节，
+        // 比喂足够大的图直接重绘更费算力。原注释"预缩减少上传体积、避免超时"的假设正好反了
+        // （另有实测坐实上传体积与耗时无关：424px/23KB 耗 101s，1024px/89KB 耗 79s）。
+        // 现在直接用原图，尺寸/比例由 GptImageAgent.prepareInputImage 按目标 size 统一处理。
+        List<String> disneySmall = new ArrayList<>(disneyLocals);
+        String refSmall = refLocal;
         log.info("[开品生图] 输入构成：产品A + 贴纸{}张 + 产品B{} → 每张图输入 {} 张",
                 disneySmall.size(), refSmall != null ? "有" : "无",
                 1 + (disneySmall.isEmpty() ? 0 : 1) + (refSmall != null ? 1 : 0));
@@ -498,26 +503,24 @@ public class FlowController {
                 batch.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
                     try {
                         if (task.isCancelled()) return;
-                        GEN_CONC.acquire();
-                        try {
-                            if (task.isCancelled()) return;
-                            task.setCurrentProduct("开品生图 " + (i + 1) + "/" + count);
-                            String out = new File(tmpOut, "kaipin-" + i + ".jpg").getAbsolutePath();
-                            // 输入顺序是**硬约束**：产品A 必须第一张。两套 prompt 都写"以第一张图为
-                            // 产品主体/功能本体"；08.02 踩过坑——贴纸排第一时模型把贴纸当成了产品主体。
-                            // 贴纸(轮换取1张)与产品B都是可选的，按可用情况拼，最多 3 张。
-                            List<String> refs = new ArrayList<>();
-                            refs.add(userLocal);
-                            if (!disneySmall.isEmpty()) refs.add(disneySmall.get(i % disneySmall.size()));
-                            if (refSmall != null) refs.add(refSmall);
-                            if (genWithRetryKaipin(motifPrompt, refs, userLocal, out, aspect, 2)) {
-                                keys[i] = uploadIfCos(out);
-                                streamConceptSlot(ctx, i, keys[i]);
-                                task.incrementSuccess();
-                            } else {
-                                task.addResult(Map.of("message", "第 " + (i + 1) + " 张生成失败"));
-                            }
-                        } finally { GEN_CONC.release(); }
+                        task.setCurrentProduct("开品生图 " + (i + 1) + "/" + count);
+                        String out = new File(tmpOut, "kaipin-" + i + ".jpg").getAbsolutePath();
+                        // 输入顺序是**硬约束**：产品A 必须第一张。两套 prompt 都写"以第一张图为
+                        // 产品主体/功能本体"；08.02 踩过坑——贴纸排第一时模型把贴纸当成了产品主体。
+                        // 贴纸(轮换取1张)与产品B都是可选的，按可用情况拼，最多 3 张。
+                        List<String> refs = new ArrayList<>();
+                        refs.add(userLocal);
+                        if (!disneySmall.isEmpty()) refs.add(disneySmall.get(i % disneySmall.size()));
+                        if (refSmall != null) refs.add(refSmall);
+                        // GEN_CONC 由 genWithRetryKaipin 内部按"每次尝试"获取/释放，这里不再整段持有——
+                        // 否则一张挂住的图会霸占许可 240s×3，把其它图饿死在排队上（08.04 3/10 真因）。
+                        if (genWithRetryKaipin(motifPrompt, refs, userLocal, out, aspect, 1)) {
+                            keys[i] = uploadIfCos(out);
+                            streamConceptSlot(ctx, i, keys[i]);
+                            task.incrementSuccess();
+                        } else {
+                            task.addResult(Map.of("message", "第 " + (i + 1) + " 张生成失败"));
+                        }
                     } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
                     catch (Exception e) {
                         task.addResult(Map.of("message", "第 " + (i + 1) + " 张异常: " + e.getMessage()));
@@ -886,7 +889,14 @@ public class FlowController {
              + "各张只有**观察角度**不同——像同一个实物样品被从不同方向拍摄，而不是几个不同的设计。";
     }
 
-    /** 把图缩到长边 512px 存成 jpg（失败/本来就小于512 则原路径返回）。开品的贴纸与产品B参考图共用。 */
+    /**
+     * 把图缩到长边 512px 存成 jpg（失败/本来就小于512 则原路径返回）。
+     *
+     * <p>⚠️ 08.04 起**已无调用方**：开品原来用它预缩贴纸/产品B，但实测证明预缩是超时的原因
+     * （小图让 gpt-image-2 上采样重建，更慢更容易超时，见 genKaipinImages 内的对照数据）。
+     * 暂留此方法不删——万一后续遇到"上游对超大图报 413/拒收"再启用，届时应带上尺寸下限。
+     */
+    @SuppressWarnings("unused")
     private String shrinkTo512(String path, File tmpOut, String prefix) {
         File src = new File(path);
         try {
@@ -2075,21 +2085,40 @@ public class FlowController {
 
     /**
      * 开品模式专用重试：quality=low，走 ImageGenerationService.generateImageMultiLowQuality。
-     * 08.03：上游读超时不再重试——单次读超时已等满 readTimeout，再重试只是把整张图的等待翻倍
-     * （实测上游正常时 quality=low 单张 80~150s，超时说明上游拥塞，重试同样会超）。
+     *
+     * <p>08.04 修正：读超时**恢复重试**。08.03 曾据"超时=上游拥塞，重试同样会超"关掉重试，
+     * 但 08.04 实测否证了那个前提——用户跑 10 张时 <b>同一时间窗内 6 张成功、4 张读超时</b>；
+     * 若上游整体拥塞不该有 6 张正常返回。同时段独立压测 8 并发 3 图输入：8/8 成功，
+     * 最快 64s / 中位 93s / 最慢 110s。故超时是**单请求级别的抖动**（个别请求在上游挂住），
+     * 不是全局降级 → 换一次请求就有很大概率成功，关掉重试等于把可恢复的抖动变成永久失败。
+     *
+     * <p>配套：readTimeout 定在 420s（见 GptImageAgent）。实测长尾会随持续负载往上漂
+     * （连续三轮 8 并发：157s → 205s → 199s，24/24 全成），故阈值不能贴着单轮长尾定，
+     * 否则会把"只是这轮偏慢"的请求判死。maxRetry 同时从 2 降到 1：420×2=14 分钟已是单图上限，
+     * 再加一次只是让用户多等而收益极低。
+     *
+     * <p><b>重试期间必须放开 GEN_CONC 许可</b>（08.04 定位 3/10 惨败的真因）：调用方原来把整个
+     * 3 次重试圈在 acquire/release 之间，一张挂住的图就霸占一个许可最长 720s（240s×3）。
+     * 8 个许可被这样占掉几个后，后面的图排队等许可，而<b>排队时间算在它们自己的 readTimeout 里</b>
+     * → 还没发出请求就已耗掉预算，于是越往后成功率越低（用户实测 6/10 → 3/10）。
+     * 现在每次尝试各自 acquire/release，失败的图在等待重试的间隙把坑让给别人。
      */
-    private boolean genWithRetryKaipin(String prompt, List<String> refs, String white, String out, String aspect, int maxRetry) {
+    private boolean genWithRetryKaipin(String prompt, List<String> refs, String white, String out, String aspect, int maxRetry)
+            throws InterruptedException {
         for (int a = 0; a <= maxRetry; a++) {
+            GEN_CONC.acquire();
             try {
                 if (imageGen.generateImageMultiLowQuality(prompt, refs, white, out, aspect)) return true;
             } catch (Exception e) {
                 boolean timedOut = e instanceof java.net.SocketTimeoutException
                         || e.getCause() instanceof java.net.SocketTimeoutException
                         || (e.getMessage() != null && e.getMessage().contains("Read timed out"));
-                log.warn("[开品生图] 第 {} 次失败{}: {}", a + 1, timedOut ? "(上游读超时,不再重试)" : "", e.getMessage());
-                if (timedOut) return false;
-                if (a < maxRetry) try { Thread.sleep(3000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                log.warn("[开品生图] 第 {}/{} 次失败{}: {}", a + 1, maxRetry + 1,
+                        timedOut ? "(上游读超时,将重试)" : "", e.getMessage());
+            } finally {
+                GEN_CONC.release();   // 重试等待期间不占许可，让别的图能跑
             }
+            if (a < maxRetry) Thread.sleep(3000);
         }
         return false;
     }
@@ -2158,6 +2187,14 @@ public class FlowController {
      * M18-R1：文字渲染指令（照搬羽刃 index.html:1622）。withText 时每张 prompt 加，
      * 明确要求生图模型把分析产出的【画面文案】作为真实中文渲染到画面——补回"无画面文案"的根因。
      */
+    // 08.04 A项：构图库文字的「只借版式·产品信息作废」围栏三件套。
+    // 抽成常量而非内联字面量，是为了离线 prompt 台（test 源集 PromptLab）能按标记定位围栏——
+    // 它的 --variant old 要把围栏摘掉还原成旧的裸注入，好在同一次运行里出可比的 A/B 两组图。
+    // 若这三个串改了文案，PromptLab 会显式报错而不是静默给出"其实是 new"的 old 组（那会让结论失真）。
+    public static final String LIB_FENCE_MARK  = "【版式方案·只借版式·产品信息一律作废】";
+    public static final String LIB_FENCE_OPEN  = "--- 以下文字仅供借版式（其中的产品信息已作废）---";
+    public static final String LIB_FENCE_CLOSE = "--- 以上文字仅代表版式 ---";
+
     private static final String TEXT_RENDER_INSTRUCTION =
         "【文字渲染要求】请把本方案【画面文案】中的主标题、副标题和卖点标签作为清晰可读的中文文字渲染在画面合适位置："
         + "字体现代简洁、排版整齐、与背景高对比、无错别字、不遮挡产品主体关键结构；"
@@ -2217,13 +2254,41 @@ public class FlowController {
         if (seriesPlan != null && !seriesPlan.isBlank())
             sb.append("【总分析·产品与系列规划】\n").append(seriesPlan.trim()).append("\n\n");
         // 本张分析方案（含本图卖点、画面文案、场景构图）
-        sb.append("【第 ").append(currentIndex).append(" 张方案】\n").append(base).append("\n");
+        // 08.04 A项：库命中(fromLib)时给构图库文字套「只借版式·产品信息作废」围栏。
+        //   根因：main-compositions.json 的 构图/核心主体 字段带的是**另一款商品的实物描述**
+        //   （锅盖架落地 row0 = "完整锅盖架位于右侧并承托红色锅盖"），原来裸注入在中性标题
+        //   【第 N 张方案】下面，模型读起来就是"这张图该画什么" → 照别款画。
+        //   写法照抄 image-shelf-main.txt:35-40 —— 那套是 08.02 A/B 实测验证过的（同白底图同构图条目，
+        //   改前出杯架+一堆杯子、改后连跑2次都出真实筷子筒，证据 shots/ab-A-current.jpg vs ab-C-final-run*.jpg）。
+        //   位置不动(主图路径本来就是 subjectLock 第1段、构图第4段，顺序已对)，本次只加围栏这一个变量。
+        //   fromLib=false(GPT 现编)时**不套**：那段是照着白底图现编的、描述的就是本款，套围栏会把真描述作废掉。
+        if (fromLib) {
+            sb.append(LIB_FENCE_MARK).append('\n')
+              .append("下面这段文字描述的是**另一款完全不同的商品**，提供给你的用途**仅限于版式**，请只从中采纳这些与产品无关的信息："
+                    + "拍摄视角与俯仰角度、主体在画面中的位置与占比、左右/上下信息栏的分区比例、功能小图的数量与排布、"
+                    + "标题与卖点标签的位置、被收纳物的**摆放手法**（斜插/平搁/倒扣/悬挂等手法本身）。\n")
+              .append("这段文字里出现的任何**产品名称、颜色、材质、层数/格数、部件形状、以及具体摆了哪些物品**，"
+                    + "一律与本次无关、**禁止照搬**。与上方白底图冲突时，**无条件以白底图为准**。\n")
+              // B项：库里每条构图的固定开头都写着"严格复刻【参考图1】的版式比例"（PromptTemplateService.COMP_TASK
+              // 及花洒 41 条 baked prompt），但主图路径 refs[0] 是**白底图**、不是版式参考图——prompt 正指着
+              // 白底图说"照它的版式来"。不逐条改 JSON，在此一句话覆盖全部条目。
+              .append("另：这段文字里提到的「参考图」「参考图1」**不是**你收到的任何一张图片（你收到的第一张图是本款产品的白底图，"
+                    + "它只定产品主体、不定版式）；那些字样只是这段版式描述的原始写法，按上面的规则理解版式即可。\n")
+              .append(LIB_FENCE_OPEN).append('\n')
+              .append(base).append('\n')
+              .append(LIB_FENCE_CLOSE).append('\n');
+        } else {
+            sb.append("【第 ").append(currentIndex).append(" 张方案】\n").append(base).append("\n");
+        }
         // 0a 卖点侧(07.31改)：给候选词+允许AI在候选内挑并微调措辞，而非照搬单一答案——
         //   候选池已按本张构图的tags过滤到语义相关分组，AI在此范围内选最贴合上方【第N张方案】(构图库)所描绘画面场景的一个。
         //   首图(第1张)候选通常只有高转化整句一个，其余张2-3个候选。空则不注入(走 base 里 GPT 现编/泛词)。
         if (libSellCandidates != null && !libSellCandidates.isEmpty()) {
             String candList = libSellCandidates.stream().map(w -> "【" + w.trim() + "】").reduce((a, b) -> a + b).orElse("");
-            sb.append("\n【本图卖点·参考基调】上方【第 ").append(currentIndex).append(" 张方案】描绘的画面场景是这张图要画的内容。"
+            // 08.04 A项连带：库命中时上方那节标题已从【第N张方案】改成围栏，这里的指代要跟着改，
+            // 否则模型被指向一个 prompt 里不存在的小节名。
+            String planRef = fromLib ? "上方" + LIB_FENCE_MARK : "上方【第 " + currentIndex + " 张方案】";
+            sb.append("\n【本图卖点·参考基调】").append(planRef).append("里那段版式文字所描绘的**画面场景/版式**是这张图要照的（产品本体仍以白底图为准）。"
                     + "从以下候选卖点中选出最贴合这个画面场景的一个作为主标题基调：").append(candList)
               .append("。可以在候选词原意基础上改写措辞使其更贴合画面(不要求逐字照搬)，做成醒目主标题(≤10字)+一句副标题解释，"
                     + "只强调选中的这一个方向，禁止与其他张的卖点重复或混用；文字位置/字号/色块版式以上方方案指定的文字区为准。\n");
@@ -2240,9 +2305,9 @@ public class FlowController {
                     【系列一致性·仅锁产品本体】这是同一产品系列的第 %d/%d 张：
                     1. 产品主体必须100%%一致：外形、颜色、材质、品牌标识、关键结构完全相同
                     2. **产品原生文字必须与第1张完全相同**：本体上的LOGO/品牌名/型号/标签/刻度，字形/位置/颜色/清晰度一致，禁止模糊变形消失
-                    3. 本张的构图、机位、景别、场景版式**以上方【第 %d 张方案】指定的为准**，各张可明显不同（这是防同质化的关键，不要强行统一成同一机位）
+                    3. 本张的构图、机位、景别、场景版式**以上方%s里那段版式文字指定的为准**，各张可明显不同（这是防同质化的关键，不要强行统一成同一机位）；但该段文字里的产品信息一律作废，产品本体只看白底图
                     4. 禁止：产品变形、产品原生文字错误/模糊
-                    """.trim(), currentIndex, totalCount, currentIndex));
+                    """.trim(), currentIndex, totalCount, LIB_FENCE_MARK));
             // 不追加 buildAngleConstraint：机位由库方案主导，产品不变形已由 subjectLock+structLock 保障。
         } else {
             sb.append(String.format("""

@@ -221,6 +221,7 @@ public class GptImageAgent implements ImageGeneratorAgent {
     private boolean generateWithImages(String prompt, List<File> imageFiles, String outputPath,
                                        String apiKey, String baseUrl, String size, String quality, boolean fitContain) {
         List<File> tempFiles = new ArrayList<>();
+        HttpURLConnection conn = null;   // 提到 try 外，好让最外层 finally 能无条件 disconnect
         try {
             List<File> preparedFiles = new ArrayList<>();
             for (File f : imageFiles) {
@@ -231,16 +232,19 @@ public class GptImageAgent implements ImageGeneratorAgent {
 
             String boundary = "----GptImageBoundary" + Long.toHexString(System.currentTimeMillis());
             URL url = URI.create(baseUrl + "/v1/images/edits").toURL();
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
             conn.setRequestProperty("Authorization", "Bearer " + apiKey);
             conn.setDoOutput(true);
             conn.setConnectTimeout(30_000);
-            // 实测(08.03) gpt-image-2 quality=low 单张 80~150s，6 并发时长尾可达 226s。
-            // 300s 余量太薄——排队/上游抖动一叠加就撞超时，且撞了就是整张废掉(不重试)。
-            // 抬到 540s：正常张不受影响(该等多久还是多久)，只把"本来能成、只是慢"的张救回来。
-            conn.setReadTimeout(540_000);
+            // readTimeout 定在 420s。08.04 实测(8并发 × 3图输入 × 连续三轮 = 24 次调用，24/24 全成)：
+            //   第1轮 98~157s、第2轮 88~205s、第3轮 97~199s
+            // 关键观察：**长尾随持续负载往上漂**（157s → 205s），而不是稳定在某个值。
+            // 所以超时阈值不能贴着单轮长尾定——240s 正好落在漂移区间里，会把"本来能成、只是这轮偏慢"
+            // 的请求判死；再叠上重试，一张图最坏烧 240×3=12 分钟还是全失败（用户实测 3/10）。
+            // 420s = 实测最慢 205s 的两倍，留足漂移空间；配合重试仍能在可接受时间内收敛。
+            conn.setReadTimeout(420_000);
 
             try (OutputStream os = conn.getOutputStream()) {
                 String sizeHint = buildSizeHint(size);
@@ -256,14 +260,20 @@ public class GptImageAgent implements ImageGeneratorAgent {
                 os.write(("--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
             }
 
+            // 分段计时：把"写完请求体"和"等到响应"分开，好定位慢在哪一段。
+            // 超时那条只会打 uploadDone 不打耗时 → 据此判断是卡在等响应还是压根没发出去。
+            log.info("GPT-Image 请求已发出(上传{}KB, {}图), 开始等响应…",
+                    preparedFiles.stream().mapToLong(File::length).sum() / 1024, preparedFiles.size());
+            long reqStart = System.currentTimeMillis();
             int status = conn.getResponseCode();
             String respBody;
             try (InputStream is = (status >= 200 && status < 300) ? conn.getInputStream() : conn.getErrorStream()) {
                 // 健壮性修复：错误响应可能无 body（getErrorStream 返回 null），不判空会 NPE 掩盖真实 status
                 respBody = (is == null) ? "" : new String(is.readAllBytes(), StandardCharsets.UTF_8);
-            } finally {
-                conn.disconnect();
             }
+            log.info("GPT-Image 上游耗时 {}s (status={}, {}图输入, 上传{}KB)",
+                    (System.currentTimeMillis() - reqStart) / 1000, status, preparedFiles.size(),
+                    preparedFiles.stream().mapToLong(File::length).sum() / 1024);
 
             if (status < 200 || status >= 300) {
                 log.error("GPT-Image edits 失败 ({}): {}", status, respBody);
@@ -274,13 +284,19 @@ public class GptImageAgent implements ImageGeneratorAgent {
             if (saved) ensureSize(outputPath, size);
             return saved;
         } catch (java.net.SocketTimeoutException te) {
-            // 上游拥塞：交给调用方判定"同 baseUrl 别再换 key 重试"，不在这里吞成 false
+            // 上游单请求抖动。交给调用方重试，不在这里吞成 false。
             log.error("GPT-Image edits 读超时: {}", te.getMessage());
             throw new java.io.UncheckedIOException(te);
         } catch (Exception e) {
             log.error("GPT-Image edits 异常: {}", e.getMessage(), e);
             return false;
         } finally {
+            // disconnect 移到最外层 finally：原来它在读 body 的 try-with-resources 的 finally 里，
+            // 而 getResponseCode() 抛 SocketTimeoutException 时直接跳 catch，那个块从未进入 → 不执行。
+            // 注：08.04 实测过"这是否导致连接泄漏"——本地复现显示 5 次超时请求仍只占 5 条连接，
+            // **没有观察到泄漏**，所以这不是"头两张成功之后全挂"的原因。此处仅作正确性清理
+            // （超时后显式释放连接资源是应有之义），不要把它当成那个现象的解释。
+            if (conn != null) { try { conn.disconnect(); } catch (Exception ignored) {} }
             for (File t : tempFiles) { try { t.delete(); } catch (Exception ignored) {} }
         }
     }
@@ -301,17 +317,12 @@ public class GptImageAgent implements ImageGeneratorAgent {
             double srcRatio = (double) sw / sh;
             double tgtRatio = (double) tw / th;
             if (Math.abs(srcRatio - tgtRatio) < 0.02) return src;
-            // 这里只负责「改比例」，不负责「改分辨率」：输出尺寸由请求的 size 参数决定，
-            // 把小图拉大到 1024 既不增信息量，又会把上游已缩过的素材(开品 512px 迪士尼图)重新胀回大图，
-            // 白抵消预缩。故当源图小于目标时，把画布降到源图量级——但要取源图能覆盖的**最大**尺寸(按长边)，
-            // 不是最小(按短边)：512x367 应产出 512x512(长边不动、短边补足)，若按短边就成 367x367，长边白丢 28% 像素。
-            if (sw < tw || sh < th) {
-                double shrink = Math.max((double) sw / tw, (double) sh / th);
-                if (shrink < 1.0) {
-                    tw = Math.max(16, (int) Math.round(tw * shrink));
-                    th = Math.max(16, (int) Math.round(th * shrink));
-                }
-            }
+            // 一律按目标 size 出画布，**不再把画布缩到源图量级**。
+            // 08.03 曾加过"源图比目标小就缩画布，避免无意义上采样"，08.04 实测证明那是错的：
+            // 小图会让 gpt-image-2 更慢甚至超时（8并发对照：23~31KB 小图 6/8 成功、2 张撞 420s；
+            // 155~217KB 大图 8/8 成功且快 1 倍）——输出固定 1024×1024，喂小图它得上采样重建，更费算力。
+            // 所以这里宁可把小图放大到目标尺寸：多花的字节不影响耗时（实测上传体积与耗时无关），
+            // 却能让上游少做一次重建。
             BufferedImage canvas = new BufferedImage(tw, th, BufferedImage.TYPE_3BYTE_BGR);
             Graphics2D g = canvas.createGraphics();
             g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
@@ -369,10 +380,11 @@ public class GptImageAgent implements ImageGeneratorAgent {
 
     private boolean doGenerateWithMask(String prompt, File imageFile, File maskFile,
                                        String outputPath, String apiKey, String baseUrl, String size) {
+        HttpURLConnection conn = null;   // 同 generateWithImages：提到 try 外，保证超时也能 disconnect
         try {
             String boundary = "----GptImageBoundary" + Long.toHexString(System.currentTimeMillis());
             URL url = URI.create(baseUrl + "/v1/images/edits").toURL();
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
             conn.setRequestProperty("Authorization", "Bearer " + apiKey);
@@ -396,8 +408,6 @@ public class GptImageAgent implements ImageGeneratorAgent {
             try (InputStream is = (status >= 200 && status < 300) ? conn.getInputStream() : conn.getErrorStream()) {
                 // 健壮性修复：错误响应可能无 body（getErrorStream 返回 null），不判空会 NPE 掩盖真实 status
                 respBody = (is == null) ? "" : new String(is.readAllBytes(), StandardCharsets.UTF_8);
-            } finally {
-                conn.disconnect();
             }
 
             if (status < 200 || status >= 300) {
@@ -411,10 +421,13 @@ public class GptImageAgent implements ImageGeneratorAgent {
         } catch (Exception e) {
             log.error("GPT-Image inpaint 异常: {}", e.getMessage(), e);
             return false;
+        } finally {
+            if (conn != null) { try { conn.disconnect(); } catch (Exception ignored) {} }
         }
     }
 
     private boolean generateTextOnly(String prompt, String outputPath, String apiKey, String baseUrl, String size) {
+        HttpURLConnection conn = null;   // 同上：提到 try 外，保证超时也能 disconnect
         try {
             Map<String, Object> payload = Map.of(
                     "model", "gpt-image-2",
@@ -426,7 +439,7 @@ public class GptImageAgent implements ImageGeneratorAgent {
 
             String jsonBody = mapper.writeValueAsString(payload);
             URL url = URI.create(baseUrl + "/v1/images/generations").toURL();
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
             conn.setRequestProperty("Authorization", "Bearer " + apiKey);
@@ -443,8 +456,6 @@ public class GptImageAgent implements ImageGeneratorAgent {
             try (InputStream is = (status >= 200 && status < 300) ? conn.getInputStream() : conn.getErrorStream()) {
                 // 健壮性修复：错误响应可能无 body（getErrorStream 返回 null），不判空会 NPE 掩盖真实 status
                 respBody = (is == null) ? "" : new String(is.readAllBytes(), StandardCharsets.UTF_8);
-            } finally {
-                conn.disconnect();
             }
 
             if (status < 200 || status >= 300) {
@@ -458,6 +469,8 @@ public class GptImageAgent implements ImageGeneratorAgent {
         } catch (Exception e) {
             log.error("GPT-Image generations 异常: {}", e.getMessage(), e);
             return false;
+        } finally {
+            if (conn != null) { try { conn.disconnect(); } catch (Exception ignored) {} }
         }
     }
 
