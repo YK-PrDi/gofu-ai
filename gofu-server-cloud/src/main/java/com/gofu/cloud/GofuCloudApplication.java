@@ -13,6 +13,13 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 public class GofuCloudApplication {
 
     public static void main(String[] args) {
+        // HttpURLConnection 的 keep-alive 连接池默认每目标只留 5 条(http.maxConnections)，
+        // 而生图并发是 GEN_CONC=8。超出的请求要排队等复用 → 实测 6 并发时最慢一张被拖到 226s
+        // (其余 90~156s)，抬到 24 后最慢降到 149s。生图单张本就要 80~150s，排队叠上去就会撞 300s readTimeout。
+        // 必须在任何 HTTP 调用发生前设置(该值只在连接池初始化时读一次)，故放在 main 首行而非 @Configuration。
+        if (System.getProperty("http.maxConnections") == null) {
+            System.setProperty("http.maxConnections", "24");
+        }
         SpringApplication.run(GofuCloudApplication.class, args);
     }
 }

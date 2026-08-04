@@ -9,11 +9,13 @@ import { useContextStore } from '@/stores/context.js'
 import { useSettingsStore } from '@/stores/settings.js'
 import { useStoresStore } from '@/stores/stores-mgmt.js'
 import { useProductReplaceStore } from '@/stores/product-replace.js'
+import { useImageDownload } from '@/composables/useImageDownload.js'
 
 const ctxStore = useContextStore()
 const settings = useSettingsStore()
 const storesStore = useStoresStore()
 const prStore = useProductReplaceStore()
+const { downloadMany, downloading } = useImageDownload()
 
 const imgUrl = (r) => '/api/gen/img?ref=' + encodeURIComponent(r)
 
@@ -41,6 +43,15 @@ const busy = computed(() => st.running || st.chaining)
 const batch = reactive({ items: [], curIdx: -1, running: false })
 const batchCurItem = computed(() => batch.curIdx >= 0 ? batch.items[batch.curIdx] : null)
 const batchGachaImages = computed(() => batchCurItem.value?.gachaImages || [])
+
+// 大图预览列表提到 computed 各算一次。原来写在 v-for 的 :preview-src-list 里，
+// 每个格子每次渲染都重算一遍全量数组——抽卡 100 张就是每次 tick 一万次 encodeURIComponent，
+// 而抽卡期间轮询每 1.5~2.5s 一跳，页面会明显卡。
+const gachaPreview = computed(() => gachaImages.value.map(imgUrl))
+const batchGachaPreview = computed(() => batchGachaImages.value.map(imgUrl))
+const mainsPreview = computed(() => pickedMains.value.map(imgUrl))
+const detailsPreview = computed(() => detailImages.value.map(imgUrl))
+const skuPreview = computed(() => skuItems.value.map((x) => imgUrl(x.imgDir)))
 
 // 抽卡全集快照:直接拉 context 取已出的图写进 target。
 // 不经 ctxStore —— 批量并行时多个商品各自轮询,谁都不该顶掉用户正在看的那行预览。
@@ -578,7 +589,7 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
         </div>
         <div v-else class="grid">
           <div v-for="(m, i) in gachaImages" :key="i" :class="['cell', { on: isPicked(m) }]">
-            <el-image :src="imgUrl(m)" fit="cover" loading="lazy" :preview-src-list="gachaImages.map(imgUrl)"
+            <el-image :src="imgUrl(m)" fit="cover" loading="lazy" :preview-src-list="gachaPreview"
               :initial-index="i" preview-teleported hide-on-click-modal />
             <el-checkbox class="pickbox" :model-value="isPicked(m)" @click.stop @change="toggle(m)" />
             <span v-if="isPicked(m)" class="badge">{{ prStore.picked.indexOf(m) + 1 }}</span>
@@ -587,6 +598,14 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
         <div class="actions foot">
           <el-button type="success" :disabled="prStore.picked.length === 0 || busy" :loading="st.chaining" @click="confirmAndList">
             {{ st.chaining ? '处理中…' : `确认并全自动上新（${prStore.picked.length} 张）` }}
+          </el-button>
+          <el-button :disabled="!prStore.picked.length" :loading="downloading"
+            @click="downloadMany(prStore.picked, '产品替换-抽卡')">
+            下载选中（{{ prStore.picked.length }} 张）
+          </el-button>
+          <el-button :disabled="!gachaImages.length" :loading="downloading"
+            @click="downloadMany(gachaImages, '产品替换-抽卡')">
+            下载全部（{{ gachaImages.length }} 张）
           </el-button>
         </div>
         <pre v-if="prStore.chainLog" class="chainlog">{{ prStore.chainLog }}</pre>
@@ -602,24 +621,33 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
           <span v-else class="ptitle-empty">未生成（②生成方案/标题时出）</span>
         </div>
         <div v-if="pickedMains.length" class="psec">
-          <div class="psec-t">选定主图（{{ pickedMains.length }}）· 点击看大图</div>
+          <div class="psec-t">选定主图（{{ pickedMains.length }}）· 点击看大图
+            <el-button link type="primary" size="small" :loading="downloading"
+              @click="downloadMany(pickedMains, '主图')">下载全部</el-button>
+          </div>
           <div class="pgrid">
             <el-image v-for="(m, i) in pickedMains" :key="'m' + i" :src="imgUrl(m)"
-              :preview-src-list="pickedMains.map(imgUrl)" :initial-index="i" fit="contain" preview-teleported hide-on-click-modal />
+              :preview-src-list="mainsPreview" :initial-index="i" fit="contain" preview-teleported hide-on-click-modal />
           </div>
         </div>
         <div v-if="detailImages.length" class="psec">
-          <div class="psec-t">详情图（{{ detailImages.length }}）· 点击看大图</div>
+          <div class="psec-t">详情图（{{ detailImages.length }}）· 点击看大图
+            <el-button link type="primary" size="small" :loading="downloading"
+              @click="downloadMany(detailImages, '详情图')">下载全部</el-button>
+          </div>
           <div class="pgrid">
             <el-image v-for="(d, i) in detailImages" :key="'d' + i" :src="imgUrl(d)"
-              :preview-src-list="detailImages.map(imgUrl)" :initial-index="i" fit="contain" preview-teleported hide-on-click-modal />
+              :preview-src-list="detailsPreview" :initial-index="i" fit="contain" preview-teleported hide-on-click-modal />
           </div>
         </div>
         <div v-if="skuItems.length" class="psec">
-          <div class="psec-t">SKU 图（{{ skuItems.length }}）· 点击看大图</div>
+          <div class="psec-t">SKU 图（{{ skuItems.length }}）· 点击看大图
+            <el-button link type="primary" size="small" :loading="downloading"
+              @click="downloadMany(skuItems.map((x) => x.imgDir), 'SKU图')">下载全部</el-button>
+          </div>
           <div class="pgrid">
             <el-image v-for="(it, i) in skuItems" :key="'s' + i" :src="imgUrl(it.imgDir)"
-              :preview-src-list="skuItems.map((x) => imgUrl(x.imgDir))" :initial-index="i"
+              :preview-src-list="skuPreview" :initial-index="i"
               fit="contain" preview-teleported hide-on-click-modal :title="it.skuDisplayName || it.name" />
           </div>
         </div>
@@ -679,7 +707,7 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
         </div>
         <div v-else class="grid">
           <div v-for="(m, i) in batchGachaImages" :key="i" :class="['cell', { on: isBatchPicked(m) }]">
-            <el-image :src="imgUrl(m)" fit="cover" loading="lazy" :preview-src-list="batchGachaImages.map(imgUrl)"
+            <el-image :src="imgUrl(m)" fit="cover" loading="lazy" :preview-src-list="batchGachaPreview"
               :initial-index="i" preview-teleported hide-on-click-modal />
             <el-checkbox class="pickbox" :model-value="isBatchPicked(m)" @click.stop @change="toggleBatch(m)" />
             <span v-if="isBatchPicked(m)" class="badge">{{ batchCurItem.picked.indexOf(m) + 1 }}</span>
@@ -690,6 +718,10 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
             :disabled="batchCurItem.picked.length === 0 || batchCurItem.status !== 'waiting-pick'"
             :loading="batchCurItem.status === 'running-list'" @click="confirmBatchAndList">
             {{ batchCurItem.status === 'running-list' ? '处理中…' : `确认并上新（${batchCurItem.picked.length} 张）` }}
+          </el-button>
+          <el-button :disabled="!batchGachaImages.length" :loading="downloading"
+            @click="downloadMany(batchCurItem.picked.length ? batchCurItem.picked : batchGachaImages, '批量抽卡')">
+            下载{{ batchCurItem.picked.length ? `选中（${batchCurItem.picked.length} 张）` : `全部（${batchGachaImages.length} 张）` }}
           </el-button>
           <span v-if="batchCurItem.status === 'running-gacha'" class="cnt-hint">抽卡还在跑，可先勾选，跑完再点确认</span>
           <span v-if="batchCurItem.status === 'done'" class="cnt-hint" style="color:#67c23a">✓ 该商品已上新完成（下方为成品预览，可回看）</span>
@@ -710,21 +742,21 @@ const statusType = (s) => ({ pending: '', warn: 'warning', 'running-gacha': 'war
           <div class="psec-t">选定主图（{{ pickedMains.length }}）· 点击看大图</div>
           <div class="pgrid">
             <el-image v-for="(m, i) in pickedMains" :key="'bm' + i" :src="imgUrl(m)"
-              :preview-src-list="pickedMains.map(imgUrl)" :initial-index="i" fit="contain" preview-teleported hide-on-click-modal />
+              :preview-src-list="mainsPreview" :initial-index="i" fit="contain" preview-teleported hide-on-click-modal />
           </div>
         </div>
         <div v-if="detailImages.length" class="psec">
           <div class="psec-t">详情图（{{ detailImages.length }}）· 点击看大图</div>
           <div class="pgrid">
             <el-image v-for="(d, i) in detailImages" :key="'bd' + i" :src="imgUrl(d)"
-              :preview-src-list="detailImages.map(imgUrl)" :initial-index="i" fit="contain" preview-teleported hide-on-click-modal />
+              :preview-src-list="detailsPreview" :initial-index="i" fit="contain" preview-teleported hide-on-click-modal />
           </div>
         </div>
         <div v-if="skuItems.length" class="psec">
           <div class="psec-t">SKU 图（{{ skuItems.length }}）· 点击看大图</div>
           <div class="pgrid">
             <el-image v-for="(it, i) in skuItems" :key="'bs' + i" :src="imgUrl(it.imgDir)"
-              :preview-src-list="skuItems.map((x) => imgUrl(x.imgDir))" :initial-index="i"
+              :preview-src-list="skuPreview" :initial-index="i"
               fit="contain" preview-teleported hide-on-click-modal :title="it.skuDisplayName || it.name" />
           </div>
         </div>

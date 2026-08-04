@@ -353,30 +353,62 @@ public class FlowController {
             if (userImageRef == null || userImageRef.isBlank())
                 return ResponseEntity.badRequest().body(Map.of("error", "userImageRef 必填"));
 
+            // 08.03：tag 不再必填。开品的原始设计是「产品A白底图 + 产品B参考图 碰撞出新产品」，
+            // 迪士尼标签是后加的另一条路。两条至少要有一条，否则没有任何"碰撞对象"。
             String tag = (String) body.get("tag");
-            if (tag == null || tag.isBlank())
-                return ResponseEntity.badRequest().body(Map.of("error", "tag 必填"));
+            String refImageRef = (String) body.get("refImageRef");   // 产品B参考图(可选)
+            boolean hasTag = tag != null && !tag.isBlank();
+            boolean hasRefImg = refImageRef != null && !refImageRef.isBlank();
+            if (!hasTag && !hasRefImg)
+                return ResponseEntity.badRequest().body(Map.of("error", "请选择迪士尼标签，或上传产品B参考图（至少要有一个碰撞参考）"));
 
-            int n = body.get("n") instanceof Number nu ? Math.min(Math.max(1, nu.intValue()), 10) : 3;
             int count = body.get("count") instanceof Number nu ? Math.min(Math.max(1, nu.intValue()), 100) : 6;
-            String prompt = body.get("prompt") instanceof String s && !s.isBlank() ? s
-                    : "以第一张图片为产品主体，将后续迪士尼贴纸图案融合到产品外观或背景场景中，保持产品功能结构清晰，整体风格活泼可爱，适合电商主图展示。";
+            // 抽样数不再由前端传：自动取 count（sample 内部 LIMIT 会截断到库存量，不足就返回更少）。
+            // 原来独立的 n 会造成浪费——多抽的素材被下载+缩图却永远用不上（轮询只按 i%N 取前 count 张）。
+            int n = count;
+            // 08.03：开品产出的是「新款产品设计提案白底图」，不是电商主图——故 prompt 落点是
+            // 纯白背景+看清造型结构，而非卖货氛围。前端 buildGenPrompt 与此保持一致。
+            // 默认 prompt 按碰撞方式二选一：有贴纸走 IP 融合，纯产品B走"两款碰撞出新设计"。
+            String defaultPrompt = hasTag ? KAIPIN_WHITE_BG_PROMPT : KAIPIN_COLLIDE_PROMPT;
+            String prompt = body.get("prompt") instanceof String s && !s.isBlank() ? s : defaultPrompt;
 
-            // 1) 从迪士尼素材库随机抽 N 张
-            List<java.util.Map<String, String>> samples = disneyAssetService.sample(tag, n);
-            if (samples.isEmpty())
-                return ResponseEntity.badRequest().body(Map.of("error", "标签「" + tag + "」下暂无素材，请先导入"));
+            // 1) 有标签才抽素材。抽不到不再 400——降级成"无贴纸"，只要还有产品B就能碰撞；
+            //    两者都没有的情况上面已经拦掉了。
+            List<java.util.Map<String, String>> samples = hasTag
+                    ? disneyAssetService.sample(tag, n) : List.of();
+            String warning = null;
+            if (hasTag && samples.isEmpty()) {
+                if (!hasRefImg)
+                    return ResponseEntity.badRequest().body(Map.of("error", "标签「" + tag + "」下暂无素材，请先导入"));
+                warning = "标签「" + tag + "」下暂无素材，本次只用产品B参考图碰撞";
+                log.warn("[开品生图] {}", warning);
+            }
 
-            // 2) 本地化用户图和素材图
+            // 2) 本地化用户图 / 素材图 / 产品B参考图
             String userLocal = localizeWhite(userImageRef);
             if (userLocal == null) return ResponseEntity.badRequest().body(Map.of("error", "用户图片无法本地化"));
 
-            List<String> refLocals = new ArrayList<>();
-            refLocals.add(userLocal);
+            String refLocal = null;
+            if (hasRefImg) {
+                refLocal = localizeWhite(refImageRef);
+                if (refLocal == null) {
+                    if (samples.isEmpty())
+                        return ResponseEntity.badRequest().body(Map.of("error", "产品B参考图无法本地化"));
+                    warning = "产品B参考图无法本地化，本次只用迪士尼素材";
+                    log.warn("[开品生图] {}", warning);
+                }
+            }
+
+            // disneyLocals 只放素材图，不再把 userLocal 混在头部
+            // （原来 refLocals=[userLocal, 素材...] 再 subList(1,..) 取素材，一旦素材全 localize 失败就退化成
+            //   [userLocal]，导致给模型传了两张同一张图还不报错。现在两者物理分开，"无贴纸"是正当状态。）
+            List<String> disneyLocals = new ArrayList<>();
             for (java.util.Map<String, String> s : samples) {
                 String local = localizeWhite(s.get("cosKey"));
-                if (local != null) refLocals.add(local);
+                if (local != null) disneyLocals.add(local);
             }
+            if (disneyLocals.isEmpty() && refLocal == null)
+                return ResponseEntity.badRequest().body(Map.of("error", "参考图全部无法本地化，无法生成"));
 
             int total = count;
             String taskId = "kaipin-" + System.nanoTime();
@@ -384,13 +416,14 @@ public class FlowController {
             task.setStatus("running");
             flowTasks.put(taskId, task);
 
-            final List<String> fRefs = refLocals;
+            final List<String> fDisney = disneyLocals;
+            final String fRefLocal = refLocal;
             final String fPrompt = prompt;
             final int fCount = total;
             final String fUserLocal = userLocal;
             imageGen.getExecutor().submit(() -> {
                 try {
-                    genKaipinImages(ctx, fRefs, fUserLocal, fPrompt, fCount, task);
+                    genKaipinImages(ctx, fDisney, fUserLocal, fRefLocal, fPrompt, fCount, task);
                     task.setStatus("done");
                 } catch (Exception e) {
                     log.error("[开品生图] 异步失败: {}", e.getMessage(), e);
@@ -401,7 +434,9 @@ public class FlowController {
 
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("taskId", taskId); resp.put("total", total); resp.put("contextId", ctx.getId());
-            resp.put("sampledCount", samples.size()); resp.put("tag", tag);
+            resp.put("sampledCount", samples.size()); resp.put("tag", hasTag ? tag : "");
+            resp.put("usedRefImage", refLocal != null);
+            if (warning != null) resp.put("warning", warning);
             return ResponseEntity.ok(resp);
         } catch (Exception e) {
             log.error("[开品生图] 编排失败: {}", e.getMessage(), e);
@@ -410,103 +445,99 @@ public class FlowController {
     }
 
     /**
-     * 开品生图工作体：每张图只用 [用户图, 随机1张迪士尼素材] 两图输入，避免多图并发超时。
-     * 迪士尼贴纸是大图（1280×1714），在传给 GPT 前先缩到 512px，减少上传体积和处理时间。
-     * count 张结果轮换素材列表（round-robin），流式写 ctx.visual.mainImages。
+     * 开品生图工作体。每张图的输入 = [产品A白底图] + 可选的迪士尼贴纸(轮换) + 可选的产品B参考图，
+     * 最多 3 张——产品A**必须**排第一张（两套 prompt 都写"以第一张图为产品主体/功能本体"，
+     * 08.02 踩过顺序坑：贴纸排第一时模型把贴纸当成了产品主体）。
+     *
+     * <p>贴纸和产品B都先缩到 512px 再传（减少上传体积；注意这不影响上游耗时，实测瓶颈在模型推理侧）。
+     * count 张结果轮换素材列表（round-robin），流式写 ctx.visual.conceptImages。
+     *
+     * @param disneyLocals 迪士尼素材本地路径（可空——无标签时就是空的）
+     * @param refLocal     产品B参考图本地路径（可空）
      */
-    private void genKaipinImages(ProductContext ctx, List<String> refLocals, String userLocal,
-                                  String prompt, int count, GenerationTask task) {
-        // refLocals[0] = userLocal，[1..] = 素材图；每次只取用户图 + 1张素材
-        List<String> disneyLocals = refLocals.size() > 1 ? refLocals.subList(1, refLocals.size()) : refLocals;
-        if (disneyLocals.isEmpty()) throw new RuntimeException("无可用迪士尼素材图");
-
+    private void genKaipinImages(ProductContext ctx, List<String> disneyLocals, String userLocal,
+                                  String refLocal, String prompt, int count, GenerationTask task) {
         File tmpOut = new File(appProperties.getPaths().getTempOutputDir(), "kaipin-" + System.nanoTime());
         tmpOut.mkdirs();
         String aspect = "1:1";
 
-        // 预缩迪士尼素材图到 512px（减少 GPT edits 处理时间，避免超时）
+        // 预缩素材到 512px。disneyLocals 为空时这里自然是空列表，下游据此走"无贴纸"分支。
         List<String> disneySmall = new ArrayList<>();
-        for (String d : disneyLocals) {
-            File src = new File(d);
-            try {
-                java.awt.image.BufferedImage img = javax.imageio.ImageIO.read(src);
-                if (img != null && (img.getWidth() > 512 || img.getHeight() > 512)) {
-                    double scale = 512.0 / Math.max(img.getWidth(), img.getHeight());
-                    int sw = (int) (img.getWidth() * scale), sh = (int) (img.getHeight() * scale);
-                    java.awt.image.BufferedImage small = new java.awt.image.BufferedImage(sw, sh, java.awt.image.BufferedImage.TYPE_3BYTE_BGR);
-                    java.awt.Graphics2D g = small.createGraphics();
-                    g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-                    g.drawImage(img, 0, 0, sw, sh, null);
-                    g.dispose();
-                    File smallFile = File.createTempFile("disney_small_", ".jpg", tmpOut);
-                    javax.imageio.ImageIO.write(small, "jpeg", smallFile);
-                    disneySmall.add(smallFile.getAbsolutePath());
-                    log.info("[开品生图] 迪士尼图缩小 {}x{} -> {}x{}", img.getWidth(), img.getHeight(), sw, sh);
-                } else {
-                    disneySmall.add(d);
-                }
-            } catch (Exception e) {
-                log.warn("[开品生图] 缩图失败，使用原图: {}", e.getMessage());
-                disneySmall.add(d);
-            }
-        }
+        for (String d : disneyLocals) disneySmall.add(shrinkTo512(d, tmpOut, "disney_small_"));
+        // 产品B同样预缩(它是用户上传的原图，可能很大)
+        String refSmall = refLocal == null ? null : shrinkTo512(refLocal, tmpOut, "refb_small_");
+        log.info("[开品生图] 输入构成：产品A + 贴纸{}张 + 产品B{} → 每张图输入 {} 张",
+                disneySmall.size(), refSmall != null ? "有" : "无",
+                1 + (disneySmall.isEmpty() ? 0 : 1) + (refSmall != null ? 1 : 0));
+        // 贴纸和产品B同时在场 → 输入是 3 张，必须补一句交代第三张的角色，
+        // 否则"将后续迪士尼参考图案…"会把产品B也当贴纸素材画进去。
+        final String promptFull = (!disneySmall.isEmpty() && refSmall != null)
+                ? prompt + KAIPIN_THIRD_REF_CLAUSE : prompt;
 
+        // 产出写 conceptImages(设计提案)，不写 mainImages(电商主图)——见 VisualContent.conceptImages 注释。
         synchronized (ctx) {
-            List<String> mi = ctx.getVisual().getMainImages();
-            mi.clear();
-            for (int i = 0; i < count; i++) mi.add(null);
+            List<String> ci = ctx.getVisual().getConceptImages();
+            ci.clear();
+            for (int i = 0; i < count; i++) ci.add(null);
         }
         contextService.save(ctx);
 
         String[] keys = new String[count];
-        // 开品构图防同质化：整批洗一次牌(跨次不同)，循环内按 index 取母题(组内不同)。见 kaipinMotifHint。
-        List<String> shuffledMotifs = new ArrayList<>(Arrays.asList(COMPOSITION_MOTIFS));
-        Collections.shuffle(shuffledMotifs, styleRandom);
-        log.info("[开品生图] 构图母题指派(防同质化): {}", shuffledMotifs);
-        List<java.util.concurrent.CompletableFuture<Void>> futures = new ArrayList<>();
-        for (int idx = 0; idx < count; idx++) {
-            final int i = idx;
-            // 轮换素材：每次取 1 张缩小版，均匀分布
-            final String disneyLocal = disneySmall.get(i % disneySmall.size());
-            // 本张专属机位指令(与其它张明显不同)，拼在共用 prompt 之后
-            final String motifPrompt = prompt + kaipinMotifHint(i, count, shuffledMotifs);
-            futures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
-                try {
-                    if (task.isCancelled()) return;
-                    GEN_CONC.acquire();
+        // 分批提交（批大小 = GEN_CONC 许可数）。原来把 count 个 future 一次性全塞进 executor，
+        // 每个在**线程内**才 acquire 信号量 → count=100 时 20 个线程全被开品占住并停在信号量上，
+        // 其它模式的生图(step-all/详情/SKU 共用同一个池和同一个 GEN_CONC)整段时间排不上队。
+        // 顺带让"停止"真的能停住：未提交的批次遇到 cancel 直接不启动（原来只能等已提交的跑完）。
+        final int batchSize = GEN_CONC_PERMITS;
+        for (int start = 0; start < count && !task.isCancelled(); start += batchSize) {
+            int end = Math.min(start + batchSize, count);
+            List<java.util.concurrent.CompletableFuture<Void>> batch = new ArrayList<>();
+            for (int idx = start; idx < end; idx++) {
+                final int i = idx;
+                // 本张专属观察视角(与其它张明显不同)，拼在共用 prompt 之后
+                final String motifPrompt = promptFull + kaipinViewHint(i, count);
+                batch.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
                     try {
                         if (task.isCancelled()) return;
-                        task.setCurrentProduct("开品生图 " + (i + 1) + "/" + count);
-                        String out = new File(tmpOut, "kaipin-" + i + ".jpg").getAbsolutePath();
-                        // 两张输入：[用户产品图, 迪士尼缩图(512px)]，传给 GPT-Image edits。
-                        // 修(08.02 顺序bug)：原来是 [disneyLocal, userLocal]，但 prompt 明写
-                        //   "以第一张图片为产品主体"(前端 buildGenPrompt 与后端默认 prompt 都这么写)
-                        //   → 第一张实际是迪士尼贴纸,模型把贴纸当成了产品主体。产品图必须排第一张。
-                        List<String> twoRefs = List.of(userLocal, disneyLocal);
-                        if (genWithRetryKaipin(motifPrompt, twoRefs, userLocal, out, aspect, 2)) {
-                            keys[i] = uploadIfCos(out);
-                            streamMainSlot(ctx, i, keys[i]);
-                            task.incrementSuccess();
-                        } else {
-                            task.addResult(Map.of("message", "第 " + (i + 1) + " 张生成失败"));
-                        }
-                    } finally { GEN_CONC.release(); }
-                } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                catch (Exception e) {
-                    task.addResult(Map.of("message", "第 " + (i + 1) + " 张异常: " + e.getMessage()));
-                } finally { task.incrementProgress(); }
-            }, imageGen.getExecutor()));
+                        GEN_CONC.acquire();
+                        try {
+                            if (task.isCancelled()) return;
+                            task.setCurrentProduct("开品生图 " + (i + 1) + "/" + count);
+                            String out = new File(tmpOut, "kaipin-" + i + ".jpg").getAbsolutePath();
+                            // 输入顺序是**硬约束**：产品A 必须第一张。两套 prompt 都写"以第一张图为
+                            // 产品主体/功能本体"；08.02 踩过坑——贴纸排第一时模型把贴纸当成了产品主体。
+                            // 贴纸(轮换取1张)与产品B都是可选的，按可用情况拼，最多 3 张。
+                            List<String> refs = new ArrayList<>();
+                            refs.add(userLocal);
+                            if (!disneySmall.isEmpty()) refs.add(disneySmall.get(i % disneySmall.size()));
+                            if (refSmall != null) refs.add(refSmall);
+                            if (genWithRetryKaipin(motifPrompt, refs, userLocal, out, aspect, 2)) {
+                                keys[i] = uploadIfCos(out);
+                                streamConceptSlot(ctx, i, keys[i]);
+                                task.incrementSuccess();
+                            } else {
+                                task.addResult(Map.of("message", "第 " + (i + 1) + " 张生成失败"));
+                            }
+                        } finally { GEN_CONC.release(); }
+                    } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                    catch (Exception e) {
+                        task.addResult(Map.of("message", "第 " + (i + 1) + " 张异常: " + e.getMessage()));
+                    } finally { task.incrementProgress(); }
+                }, imageGen.getExecutor()));
+            }
+            java.util.concurrent.CompletableFuture.allOf(batch.toArray(new java.util.concurrent.CompletableFuture[0])).join();
+            log.info("[开品生图] 批次 {}~{}/{} 完成", start + 1, end, count);
         }
-        java.util.concurrent.CompletableFuture.allOf(futures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
+        if (task.isCancelled()) log.info("[开品生图] 已取消，未提交的批次不再启动");
 
         int okCount;
         synchronized (ctx) {
-            List<String> mi = ctx.getVisual().getMainImages();
-            mi.removeIf(java.util.Objects::isNull);
-            okCount = mi.size();
+            List<String> ci = ctx.getVisual().getConceptImages();
+            ci.removeIf(java.util.Objects::isNull);
+            okCount = ci.size();
         }
         contextService.save(ctx);
-        log.info("[开品生图] contextId={} 参考图{}张 目标{}张 → 成功{}张", ctx.getId(), refLocals.size(), count, okCount);
+        log.info("[开品生图] contextId={} 贴纸{}张 产品B{} 目标{}张 → 成功{}张(写入 conceptImages)",
+                ctx.getId(), disneySmall.size(), refSmall != null ? "有" : "无", count, okCount);
         if (okCount == 0) throw new RuntimeException("开品生图全部失败（共 " + count + " 张，成功 0 张）");
     }
 
@@ -758,6 +789,24 @@ public class FlowController {
         }
     }
 
+    /**
+     * 开品模式流式:概念白底图逐张写槽位+save（同 streamMainSlot，conceptImages 已预填 null 占位）。
+     * 单独一份而非复用 streamMainSlot：开品产物是设计提案，绝不能混进电商主图链(mainImages)。
+     */
+    private void streamConceptSlot(ProductContext ctx, int idx, String key) {
+        if (key == null) return;
+        try {
+            synchronized (ctx) {
+                List<String> ci = ctx.getVisual().getConceptImages();
+                if (idx >= 0 && idx < ci.size()) ci.set(idx, key);
+                else ci.add(key);
+                contextService.save(ctx);
+            }
+        } catch (Exception e) {
+            log.warn("[开品流式] 写概念图槽位 {} 失败(不阻断): {}", idx, e.getMessage());
+        }
+    }
+
     /** 8d 流式:SKU 图 item 自身已隔离(setImgDir),完成即 save 让前端逐个显示。 */
     private void streamSkuSave(ProductContext ctx) {
         try { synchronized (ctx) { contextService.save(ctx); } }
@@ -817,27 +866,97 @@ public class FlowController {
     }
 
     /**
-     * 开品模式构图防同质化（「三、待实现·当前可做」第1条，方向①）。
+     * 开品模式·工业设计观察视角序列（08.03 改）。
      *
-     * <p>问题：`genKaipinImages` 里 count 张图共用同一份 `buildGenPrompt()` 文本，唯一变量只有轮换的
-     * 迪士尼素材，机位/构图没有任何差异化指令 → 容易出一批雷同构图。
+     * <p>原来复用主图的 {@link #COMPOSITION_MOTIFS}（营销构图母题：场景氛围/情绪/景别），但开品的目的是
+     * <b>开发新产品</b>——要的是看清造型与结构细节的<b>设计提案图</b>，不是卖货氛围图。营销母题会引入
+     * 场景道具和情绪光影，反而遮挡结构。
      *
-     * <p>做法：复用主图那套已验证的 {@link #COMPOSITION_MOTIFS}（6 种机位母题），每次生图先整体洗牌
-     * （跨次防同质化：同一商品重跑一轮，各张拿到的母题与上一轮不同），再按 index 取模分给第 i 张
-     * （组内防同质化）。母题数 6 < count 时循环复用，但配合洗牌后的起始偏移，重复的那几张彼此仍隔开。
+     * <p>改为固定的多视角序列（不洗牌）：同一个设计从不同角度看，才能判断要不要打样。
+     * 顺序固定的理由——设计评审需要"第1张永远是正面"这种可预期的对照关系，
+     * 洗牌反而让跨次对比同一设计变困难（与主图防同质化的诉求正好相反）。
      *
      * @param idx   第几张（0-based）
      * @param total 本次共几张
-     * @param shuffled 本批已洗牌的母题列表（整批共用一份，调用方在循环外算好）
      */
-    private static String kaipinMotifHint(int idx, int total, List<String> shuffled) {
-        if (shuffled == null || shuffled.isEmpty()) return "";
-        String motif = shuffled.get(idx % shuffled.size());
-        return "\n\n【本张构图机位·第 " + (idx + 1) + "/" + total + " 张·必须与其它张明显不同】"
-             + "本张采用：" + motif + "。"
-             + "产品主体、颜色、结构、融合的图案风格保持一致，但**机位/景别/构图**必须按本张指定的母题来，"
-             + "不要与同批其它张用同一个角度或同一种画面布局。";
+    private static String kaipinViewHint(int idx, int total) {
+        String view = KAIPIN_VIEWS[idx % KAIPIN_VIEWS.length];
+        return "\n\n【本张观察视角·第 " + (idx + 1) + "/" + total + " 张】" + view
+             + "\n同一个产品设计在各张之间必须完全一致（造型、比例、颜色、图案位置、零件数量都不变），"
+             + "各张只有**观察角度**不同——像同一个实物样品被从不同方向拍摄，而不是几个不同的设计。";
     }
+
+    /** 把图缩到长边 512px 存成 jpg（失败/本来就小于512 则原路径返回）。开品的贴纸与产品B参考图共用。 */
+    private String shrinkTo512(String path, File tmpOut, String prefix) {
+        File src = new File(path);
+        try {
+            java.awt.image.BufferedImage img = javax.imageio.ImageIO.read(src);
+            if (img == null || (img.getWidth() <= 512 && img.getHeight() <= 512)) return path;
+            double scale = 512.0 / Math.max(img.getWidth(), img.getHeight());
+            int sw = (int) (img.getWidth() * scale), sh = (int) (img.getHeight() * scale);
+            java.awt.image.BufferedImage small = new java.awt.image.BufferedImage(sw, sh, java.awt.image.BufferedImage.TYPE_3BYTE_BGR);
+            java.awt.Graphics2D g = small.createGraphics();
+            g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            g.drawImage(img, 0, 0, sw, sh, null);
+            g.dispose();
+            File smallFile = File.createTempFile(prefix, ".jpg", tmpOut);
+            javax.imageio.ImageIO.write(small, "jpeg", smallFile);
+            log.info("[开品生图] 参考图缩小 {}x{} -> {}x{} ({})", img.getWidth(), img.getHeight(), sw, sh, smallFile.getName());
+            return smallFile.getAbsolutePath();
+        } catch (Exception e) {
+            log.warn("[开品生图] 缩图失败，使用原图: {}", e.getMessage());
+            return path;
+        }
+    }
+
+    /**
+     * 开品 prompt 的共用尾巴：白底 / 结构清晰 / 无营销元素。两种碰撞方式（贴纸、产品B）都要。
+     * 与前端 Kaipin.vue buildGenPrompt() 的措辞保持一致，改一处要同步另一处。
+     */
+    private static final String KAIPIN_WHITE_BG_TAIL =
+            "\n【背景】纯白背景(#FFFFFF)，干净无场景、无道具、无装饰、无文字、无水印、无logo；"
+          + "产品下方只允许极轻微的接触阴影，不要投射到背景上形成明显影子。"
+          + "\n【主体】产品完整入画、居中、不裁切、不遮挡；造型轮廓、结构分件、接缝、开孔、"
+          + "连接方式都要清晰可辨（这张图是用来判断能不能打样的，结构看不清就没有价值）。"
+          + "\n【光照】均匀柔和的产品摄影布光，不要强对比戏剧光、不要彩色环境光染色，真实还原材质与颜色。"
+          + "\n【禁止】禁止任何营销文案、卖点标签、促销元素、边框、拼贴、多格排版；禁止出现人物或手部。";
+
+    /** 有迪士尼贴纸时：把 IP 的造型语言与图案融进产品外观。 */
+    static final String KAIPIN_WHITE_BG_PROMPT =
+            "以第一张图片为产品主体，将【第二张】迪士尼参考图案的造型语言与图案元素融合到产品外观设计中，"
+          + "产出一张【新款产品设计提案白底图】。" + KAIPIN_WHITE_BG_TAIL;
+
+    /**
+     * 贴纸 + 产品B 同时存在时补在末尾：说明第三张图的角色。
+     * 不补的话，"将后续迪士尼参考图案…"会把第三张(产品B)也当成贴纸素材一起画进去。
+     */
+    static final String KAIPIN_THIRD_REF_CLAUSE =
+            "\n【第三张图的用途】第三张图是另一款产品，仅作**造型语言参考**（只取其造型手法、"
+          + "曲线走势、比例关系、结构语汇），不要把它的产品原样画出来、也不要与主体并排摆放。";
+
+    /**
+     * 无贴纸、只有产品B时：两款产品**碰撞**出新设计——这是开品模式的原始设计意图。
+     * 关键是讲清两张图各自的角色，否则模型会把第二张也当成要画的产品，出成"两个产品摆一起"。
+     */
+    static final String KAIPIN_COLLIDE_PROMPT =
+            "以第一张图片为【功能本体】（产品的功能结构、用途、主要部件以它为准），"
+          + "第二张图片仅作【造型语言参考】（只取它的造型手法、曲线走势、比例关系、体块与结构语汇、材质气质），"
+          + "把两者碰撞融合，设计出一款【全新产品】，产出它的设计提案白底图。"
+          + "\n【重要】不要把第二张图的产品原样画出来、也不要把两个产品并排摆在一起——"
+          + "最终画面里只有**一款**新产品，它保有第一张图的功能属性，但外观造型受第二张图启发而重新设计。"
+          + KAIPIN_WHITE_BG_TAIL;
+
+    /**
+     * 开品设计提案的固定视角序列。覆盖工业设计评审看造型所需的角度；
+     * count > 5 时循环复用（第6张回到正面，与第1张同角度但由模型随机性产生细微差异，可用于挑选）。
+     */
+    private static final String[] KAIPIN_VIEWS = {
+        "正面平视（产品正对镜头、无透视变形，作为本组的基准视图，完整展示正面造型与图案布局）。",
+        "45° 侧前方视角（能同时看到正面与一侧侧面，体现体量感和厚度关系）。",
+        "正侧面平视（展示侧面轮廓线、厚度、以及挂钩/底座等结构与主体的连接方式）。",
+        "俯视 45°（从上方斜看，展示顶面结构、开口、内部分区或收纳布局）。",
+        "局部结构特写（微距靠近关键结构件——连接处/卡扣/开孔/接缝，清晰展示做工细节与装配关系，不要整体全景）。",
+    };
 
     /**
      * 改图风格库（07.09#2，从羽刃 CUSTOM_IMAGE_STYLES 移植 9 种）。
@@ -878,7 +997,8 @@ public class FlowController {
      * M14 生图并发限流：线程池有 20，但生图并发度限到 8（对齐乐羽 CONC=8），
      * 避免打爆 gpt-image 中转站触发大面积 429。主图 2~N / 详情 / SKU 三条并发循环共用此闸门。
      */
-    private static final java.util.concurrent.Semaphore GEN_CONC = new java.util.concurrent.Semaphore(8);
+    private static final int GEN_CONC_PERMITS = 8;
+    private static final java.util.concurrent.Semaphore GEN_CONC = new java.util.concurrent.Semaphore(GEN_CONC_PERMITS);
 
     /**
      * 交错第二步（07.08重构：选定方案后才跑）。入参 {@code { contextId, planIndex, accWhiteImages?:[], genDetail?, genSku?, templateId? }}。
@@ -1953,13 +2073,21 @@ public class FlowController {
         return false;
     }
 
-    /** 开品模式专用重试：quality=low，走 ImageGenerationService.generateImageMultiLowQuality。 */
+    /**
+     * 开品模式专用重试：quality=low，走 ImageGenerationService.generateImageMultiLowQuality。
+     * 08.03：上游读超时不再重试——单次读超时已等满 readTimeout，再重试只是把整张图的等待翻倍
+     * （实测上游正常时 quality=low 单张 80~150s，超时说明上游拥塞，重试同样会超）。
+     */
     private boolean genWithRetryKaipin(String prompt, List<String> refs, String white, String out, String aspect, int maxRetry) {
         for (int a = 0; a <= maxRetry; a++) {
             try {
                 if (imageGen.generateImageMultiLowQuality(prompt, refs, white, out, aspect)) return true;
             } catch (Exception e) {
-                log.warn("[开品生图] 第 {} 次失败: {}", a + 1, e.getMessage());
+                boolean timedOut = e instanceof java.net.SocketTimeoutException
+                        || e.getCause() instanceof java.net.SocketTimeoutException
+                        || (e.getMessage() != null && e.getMessage().contains("Read timed out"));
+                log.warn("[开品生图] 第 {} 次失败{}: {}", a + 1, timedOut ? "(上游读超时,不再重试)" : "", e.getMessage());
+                if (timedOut) return false;
                 if (a < maxRetry) try { Thread.sleep(3000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
             }
         }

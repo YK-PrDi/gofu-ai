@@ -7,6 +7,7 @@ import { useContextStore } from '@/stores/context.js'
 import { useSettingsStore } from '@/stores/settings.js'
 import { useStoresStore } from '@/stores/stores-mgmt.js'
 import { useGen } from '@/composables/useGen.js'
+import { useImageDownload } from '@/composables/useImageDownload.js'
 import CascadeCategory from '@/components/CascadeCategory.vue'
 import SkuPicker from '@/components/SkuPicker.vue'
 import InpaintDialog from '@/components/InpaintDialog.vue'
@@ -17,6 +18,7 @@ const ctxStore = useContextStore()
 const settings = useSettingsStore()
 const storesStore = useStoresStore()
 const { gen, runLayout, runSkuImages, runOneClick, stopGen, recalcPrice, regenImage } = useGen()
+const { downloadMany, downloading } = useImageDownload()
 
 // 图片URL(预览缩略+点开大图共用):COS key/本地路径/URL 统一走云端 gen/img 代理
 const imgUrl = (ref) => '/api/gen/img?ref=' + encodeURIComponent(ref)
@@ -126,6 +128,10 @@ const currentItems = computed(() => plans.value[selectedPlan.value]?.items || []
 // 8d流式:后端生成中 mainImages/detailImages 含 null 占位槽,渲染前过滤掉(否则碎图)
 const mainImagesShown = computed(() => (pageCtx.value?.visual?.mainImages || []).filter(Boolean))
 const detailImagesShown = computed(() => (pageCtx.value?.visual?.detailImages || []).filter(Boolean))
+// 预览列表算一次(原来每个格子每次渲染都重算全量数组)。这里张数少影响小,但 SKU 那条是 filter+map,顺手统一。
+const mainsPreview = computed(() => mainImagesShown.value.map(imgUrl))
+const detailsPreview = computed(() => detailImagesShown.value.map(imgUrl))
+const skuPreview = computed(() => currentItems.value.filter((x) => x.imgDir).map((x) => imgUrl(x.imgDir)))
 
 function onPriceEdit(it, idx) {
   it.__edited = true
@@ -367,10 +373,13 @@ onMounted(async () => {
             </div>
             <!-- 主图(过滤流式生成中的null占位槽);点开看大图(el-image preview) + hover 重生 -->
             <div v-if="mainImagesShown.length" class="psec">
-              <div class="psec-t">主图（{{ mainImagesShown.length }}）· 点击看大图，悬停可重生</div>
+              <div class="psec-t">主图（{{ mainImagesShown.length }}）· 点击看大图，悬停可重生
+                <el-button link type="primary" size="small" :loading="downloading"
+                  @click="downloadMany(mainImagesShown, '主图')">下载全部</el-button>
+              </div>
               <div class="pgrid">
                 <div v-for="(m, i) in mainImagesShown" :key="'m' + i" class="pcell">
-                  <el-image :src="imgUrl(m)" :preview-src-list="mainImagesShown.map(imgUrl)" :initial-index="i"
+                  <el-image :src="imgUrl(m)" :preview-src-list="mainsPreview" :initial-index="i"
                     fit="contain" preview-teleported hide-on-click-modal />
                   <div class="img-btns">
                     <el-button size="small" type="primary" :loading="gen.imgBusy" @click="regenImage('main', i)">重生</el-button>
@@ -381,10 +390,13 @@ onMounted(async () => {
             </div>
             <!-- 详情图 -->
             <div v-if="detailImagesShown.length" class="psec">
-              <div class="psec-t">详情图（{{ detailImagesShown.length }}）· 点击看大图，悬停可重生</div>
+              <div class="psec-t">详情图（{{ detailImagesShown.length }}）· 点击看大图，悬停可重生
+                <el-button link type="primary" size="small" :loading="downloading"
+                  @click="downloadMany(detailImagesShown, '详情图')">下载全部</el-button>
+              </div>
               <div class="pgrid">
                 <div v-for="(d, i) in detailImagesShown" :key="'d' + i" class="pcell">
-                  <el-image :src="imgUrl(d)" :preview-src-list="detailImagesShown.map(imgUrl)" :initial-index="i"
+                  <el-image :src="imgUrl(d)" :preview-src-list="detailsPreview" :initial-index="i"
                     fit="contain" preview-teleported hide-on-click-modal />
                   <div class="img-btns">
                     <el-button size="small" type="primary" :loading="gen.imgBusy" @click="regenImage('detail', i)">重生</el-button>
@@ -395,12 +407,15 @@ onMounted(async () => {
             </div>
             <!-- SKU图(当前方案各item的成品图);点开看大图 + hover 重绘(回写 plans.items.imgDir) -->
             <div v-if="currentItems.some((it) => it.imgDir)" class="psec">
-              <div class="psec-t">SKU 图（方案{{ selectedPlan + 1 }}）· 点击看大图，悬停可重绘</div>
+              <div class="psec-t">SKU 图（方案{{ selectedPlan + 1 }}）· 点击看大图，悬停可重绘
+                <el-button link type="primary" size="small" :loading="downloading"
+                  @click="downloadMany(currentItems.filter((x) => x.imgDir).map((x) => x.imgDir), 'SKU图')">下载全部</el-button>
+              </div>
               <div class="pgrid">
                 <template v-for="(it, i) in currentItems" :key="'s' + i">
                   <div v-if="it.imgDir" class="pcell">
                     <el-image :src="imgUrl(it.imgDir)"
-                      :preview-src-list="currentItems.filter((x) => x.imgDir).map((x) => imgUrl(x.imgDir))"
+                      :preview-src-list="skuPreview"
                       fit="contain" preview-teleported hide-on-click-modal :title="it.skuDisplayName || it.name" />
                     <div class="img-btns">
                       <el-button size="small" @click="openInpaint('sku', i, it.imgDir)">重绘</el-button>

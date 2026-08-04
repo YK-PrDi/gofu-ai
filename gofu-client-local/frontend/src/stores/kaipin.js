@@ -9,9 +9,8 @@ export const useKaipinStore = defineStore('kaipin', {
     analyzed: false,
     fields: [],          // [{key, value}]
     analyzeMsg: '', analyzeMsgType: '',
-    // 生图配置
+    // 生图配置（08.03 删掉 n：抽样数改由后端按 genCount 自动推导，不再让用户设）
     selectedTag: '',
-    n: 3,
     genCount: 6,
     genPrompt: '',
     // 生图结果

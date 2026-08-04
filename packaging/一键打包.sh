@@ -21,8 +21,13 @@ echo "############ [2/4] 构建 exe (build-exe.sh) ############"
 bash "$PKG/build-exe.sh"
 
 echo "############ [3/4] 写使用说明 + 清理冒烟数据 ############"
-# 清掉可能存在的运行数据(日志/db)，只保留种子配置，避免把登录态/测试数据打进包
-rm -rf "$DIST/GOFU/app/data/logs" "$DIST/GOFU/app/data/gofu-cloud.db" 2>/dev/null || true
+# 清掉运行日志，避免把冒烟测试的日志打进包。
+# ⚠️ 08.03 修：原来这行还删了 app/data/gofu-cloud.db —— 但 build-exe.sh 的 [5.5.6] 刚把仓库根的
+# 库作为**种子**拷进去(08.02 为修"开品报未找到标签，请先导入素材"加的)，这里再删掉等于把那个修复
+# 又撤销了(删除语句写于 07.30，早于种子机制，属于陈旧遗留)。种子库里是迪士尼素材表，图片本体在 COS，
+# 不含登录态(拼多多 cookie 在 pdd_cookies.json、快麦 token 在 kuaimai-config.json，都不在这个库里)，
+# 所以保留它是安全的。真要出干净空库版，删 build-exe.sh 的拷贝步骤，别在这里反向删。
+rm -rf "$DIST/GOFU/app/data/logs" 2>/dev/null || true
 cat > "$DIST/GOFU/使用说明.txt" << EOF
 ========================================
   GOFU-AI 商品工作台 · 便携测试版 v${VER}

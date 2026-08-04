@@ -136,16 +136,38 @@ public class GptImageAgent implements ImageGeneratorAgent {
 
         List<File> imageFiles = resolveImageFiles(refImagePaths);
         String size = pickSize(aspect);
+        // 读超时不是 key 的问题而是上游拥塞：同 baseUrl 的其余 key 换了也一样慢，
+        // 换一个就再等一个 readTimeout(300s) → 3 key 串成 15 分钟(08.03 开品卡死真因)。
+        // 故记下已超时的 baseUrl，后续同 baseUrl 的 key 直接跳过；不同 baseUrl 的 key 仍失败转移。
+        java.util.Set<String> timedOutBaseUrls = new java.util.HashSet<>();
+        java.net.SocketTimeoutException lastTimeout = null;
         for (String apiKey : orderedKeys()) {
             String baseUrl = baseUrlForKey(apiKey);
+            if (timedOutBaseUrls.contains(baseUrl)) {
+                log.warn("GPT-Image 跳过 key [{}]：baseUrl={} 刚读超时，同上游换 key 无意义", maskKey(apiKey), baseUrl);
+                continue;
+            }
             log.info("GPT-Image 尝试 key [{}], baseUrl={}, fitContain={}", maskKey(apiKey), baseUrl, fitContain);
-            boolean ok = !imageFiles.isEmpty()
-                    ? generateWithImages(prompt, imageFiles, outputPath, apiKey, baseUrl, size, quality, fitContain)
-                    : generateTextOnly(prompt, outputPath, apiKey, baseUrl, size);
-            if (ok) return true;
+            try {
+                boolean ok = !imageFiles.isEmpty()
+                        ? generateWithImages(prompt, imageFiles, outputPath, apiKey, baseUrl, size, quality, fitContain)
+                        : generateTextOnly(prompt, outputPath, apiKey, baseUrl, size);
+                if (ok) return true;
+            } catch (java.io.UncheckedIOException ue) {
+                if (!(ue.getCause() instanceof java.net.SocketTimeoutException)) throw ue;
+                timedOutBaseUrls.add(baseUrl);
+                lastTimeout = (java.net.SocketTimeoutException) ue.getCause();
+                log.warn("GPT-Image key [{}] 读超时({}), 标记 baseUrl={} 拥塞", maskKey(apiKey), lastTimeout.getMessage(), baseUrl);
+                continue;
+            }
             log.warn("GPT-Image key [{}] 失败，尝试下一个", maskKey(apiKey));
         }
 
+        // 全因上游读超时而结束时抛出，让上层重试逻辑能识别"上游拥塞"并跳过无意义重试（不再吞成 false）。
+        if (lastTimeout != null) {
+            log.error("GPT-Image 所有可用 key 均读超时（上游拥塞）");
+            throw new java.io.UncheckedIOException(lastTimeout);
+        }
         log.error("GPT-Image 所有 key 均失败");
         return false;
     }
@@ -215,7 +237,10 @@ public class GptImageAgent implements ImageGeneratorAgent {
             conn.setRequestProperty("Authorization", "Bearer " + apiKey);
             conn.setDoOutput(true);
             conn.setConnectTimeout(30_000);
-            conn.setReadTimeout(300_000);
+            // 实测(08.03) gpt-image-2 quality=low 单张 80~150s，6 并发时长尾可达 226s。
+            // 300s 余量太薄——排队/上游抖动一叠加就撞超时，且撞了就是整张废掉(不重试)。
+            // 抬到 540s：正常张不受影响(该等多久还是多久)，只把"本来能成、只是慢"的张救回来。
+            conn.setReadTimeout(540_000);
 
             try (OutputStream os = conn.getOutputStream()) {
                 String sizeHint = buildSizeHint(size);
@@ -248,6 +273,10 @@ public class GptImageAgent implements ImageGeneratorAgent {
             boolean saved = saveFromResponse(respBody, outputPath);
             if (saved) ensureSize(outputPath, size);
             return saved;
+        } catch (java.net.SocketTimeoutException te) {
+            // 上游拥塞：交给调用方判定"同 baseUrl 别再换 key 重试"，不在这里吞成 false
+            log.error("GPT-Image edits 读超时: {}", te.getMessage());
+            throw new java.io.UncheckedIOException(te);
         } catch (Exception e) {
             log.error("GPT-Image edits 异常: {}", e.getMessage(), e);
             return false;
@@ -272,6 +301,17 @@ public class GptImageAgent implements ImageGeneratorAgent {
             double srcRatio = (double) sw / sh;
             double tgtRatio = (double) tw / th;
             if (Math.abs(srcRatio - tgtRatio) < 0.02) return src;
+            // 这里只负责「改比例」，不负责「改分辨率」：输出尺寸由请求的 size 参数决定，
+            // 把小图拉大到 1024 既不增信息量，又会把上游已缩过的素材(开品 512px 迪士尼图)重新胀回大图，
+            // 白抵消预缩。故当源图小于目标时，把画布降到源图量级——但要取源图能覆盖的**最大**尺寸(按长边)，
+            // 不是最小(按短边)：512x367 应产出 512x512(长边不动、短边补足)，若按短边就成 367x367，长边白丢 28% 像素。
+            if (sw < tw || sh < th) {
+                double shrink = Math.max((double) sw / tw, (double) sh / th);
+                if (shrink < 1.0) {
+                    tw = Math.max(16, (int) Math.round(tw * shrink));
+                    th = Math.max(16, (int) Math.round(th * shrink));
+                }
+            }
             BufferedImage canvas = new BufferedImage(tw, th, BufferedImage.TYPE_3BYTE_BGR);
             Graphics2D g = canvas.createGraphics();
             g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
