@@ -22,5 +22,20 @@ echo "[promptlab] 编译…" >&2
 mvn -o -q -pl gofu-server-cloud -am test-compile >&2
 
 CP="gofu-server-cloud/target/test-classes;gofu-server-cloud/target/classes;gofu-shared/target/classes;$(cat "$CPFILE")"
-exec "$JAVA" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 \
+
+# 输出编码要跟**终端**一致，否则中文全是乱码。
+# Windows 的 Git Bash / cmd 默认代码页 936(GBK)，而 Java 默认按 UTF-8 输出 → 终端按 GBK 解码就成"鍒嗘瀽鍗"。
+# 故按 chcp 报的代码页决定 stdout.encoding：936→GBK、65001→UTF-8、取不到就 UTF-8。
+# 可用 PROMPTLAB_ENC 覆盖（如想强制 UTF-8 重定向到文件：PROMPTLAB_ENC=UTF-8 ./promptlab.sh ... > out.txt）
+ENC="${PROMPTLAB_ENC:-}"
+if [ -z "$ENC" ]; then
+  CODEPAGE="$(chcp.com 2>/dev/null | tr -dc '0-9')"
+  case "$CODEPAGE" in
+    *936)   ENC=GBK ;;
+    *65001) ENC=UTF-8 ;;
+    *)      ENC=UTF-8 ;;
+  esac
+fi
+
+exec "$JAVA" -Dfile.encoding=UTF-8 -Dstdout.encoding="$ENC" -Dstderr.encoding="$ENC" \
      -cp "$CP" com.gofu.cloud.promptlab.PromptLab "$@"

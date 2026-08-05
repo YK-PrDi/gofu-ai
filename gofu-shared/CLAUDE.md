@@ -1,6 +1,6 @@
 # gofu-shared — 共享契约层
 
-> 进入本模块前先读仓库根的 `CLAUDE.md` 和 `ARCHITECTURE.md`。
+> 进入本模块前先读仓库根的 `CLAUDE.md`。（`ARCHITECTURE.md` 只在碰架构决策/踩怪问题时查其「雷区」清单，不必每次全读。）
 
 ## 这个模块能做什么
 

@@ -9,6 +9,17 @@ export const useKaipinStore = defineStore('kaipin', {
     analyzed: false,
     fields: [],          // [{key, value}]
     analyzeMsg: '', analyzeMsgType: '',
+    // 上传的产品图（08.05 修：原来存在组件的 reactive 里，切页组件卸载就没了——
+    // 用户反馈"上传白底图点分析后，切到别的模式再回来白底图不见了"。
+    // 存 b64 而不是 File：切页回来要能重新上传/重新分析，而 File 对象没法从 store 恢复；
+    // 有了 b64 + ext 就够了（uploadImage 只用这两样，analyze 的 FormData 可由 b64 重建 File）。
+    // ⚠ 只进内存、**不持久化**（本 store 整体不持久化，见文件末注释）：b64 可能几 MB，
+    // localStorage 装不下；且 F5 该是干净重来（L6 决定）。切页不丢靠的是内存态，够用。
+    imageAPreview: '', imageAExt: 'jpg', imageAName: '',
+    imageBPreview: '', imageBExt: 'jpg', imageBName: '',
+    // 分析输入的文字字段（同上，切页不丢）
+    productA: '', productB: '', selling: '',
+    focus: 'cost', focusText: '', style: '', styleText: '',
     // 生图配置（08.03 删掉 n：抽样数改由后端按 genCount 自动推导，不再让用户设）
     selectedTag: '',
     genCount: 6,

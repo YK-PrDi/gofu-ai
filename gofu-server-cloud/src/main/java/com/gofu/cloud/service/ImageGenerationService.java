@@ -32,11 +32,24 @@ public class ImageGenerationService {
     private static final String DEFAULT_AGENT_ID = "gpt-image";
     private static final String GEMINI_ANALYSIS_MODEL = "gemini-3-pro-preview";
     private static final MediaType JSON_TYPE = MediaType.get("application/json; charset=utf-8");
+    /**
+     * 无条件追加到每个生图 prompt 末尾的反穿模约束。
+     *
+     * <p>08.05 重写：原文只说"不得互相穿透/嵌入/融合"——是**抽象禁令**，模型不知道谁该在谁前面，
+     * 实测仍高频穿模（雪人锅盖架一轮主图 3 张 + SKU 3 张全部出现"锅盖穿过树枝手臂杆件"，
+     * 与 Gemini 出图评估报告列为第一严重的问题一致）。
+     * 现改为**给确定的层级顺序 + 可自检的判定标准**：先说"从后往前分层画"，再列出
+     * 四种明确禁止的重叠形态。理由同 08.02 那条实测结论——模型需要的是可执行的指令，
+     * 不是价值判断；"禁止穿模"是判断，"杆件必须完整画在收纳物前面并遮住它"是指令。
+     */
     private static final String NO_INTERSECTION_PROMPT = """
-            【最高优先级·禁止穿模】
-            画面中任何产品、人体、手指、衣袖、头发、道具、墙面、桌面、玻璃、置物架、支架、线缆、背景结构之间都不得互相穿透、嵌入、融合或共享边界。
-            产品必须有真实接触面、支撑点、遮挡关系和接触阴影；手指只能自然握持或触碰产品表面，不能穿过产品孔洞或外壳。
-            产品不能半截插入桌面、墙面、背景、支架或其他物体；所有连接、接触、阴影、透视和前后层级必须物理合理。
+            【最高优先级·三维层级与禁止穿模】
+            把画面当成有确定前后层次的真实三维空间，**从后往前分层作画**：背景 → 被遮挡的物体 → 最前面的物体。每一层完整画完再画下一层。
+            凡两个物体在画面上重叠，**必须其中之一被另一个完全遮挡**，绝不允许这四种情形：一个从另一个中间穿过去、边缘嵌进对方内部、两者边缘融成一条线、前后关系含糊不清若隐若现。
+            细长构件（金属杆件、框条、支架、线缆、把手）从头到尾**粗细一致、走向连续**，不得在与其它物体交叠处变细、断开、消失或改变方向。
+            每个物体都要看得出**靠什么支撑**：有落实的接触点、贴合的接触边界、朝光源反方向的落地阴影。看不出支撑关系 = 画错了。产品不能半截插入桌面、墙面、背景或其他物体。
+            手部只能自然握持或从外侧触碰产品表面，不能穿过产品的孔洞、外壳或杆件；手指数量与关节比例须正常。
+            透明件（玻璃/亚克力）可以透视看到后方物体，但它的**不透明部分**（金属边圈、提手、旋钮、密封条）与其它物体重叠处仍必须有明确的前后遮挡。
             """.trim();
 
     private final AppProperties appProperties;
@@ -874,7 +887,10 @@ public class ImageGenerationService {
         return agent.generateMulti(enforcedPrompt, refImagePaths, whiteBgPath, outputPath, aspect);
     }
 
-    private String enforceNoIntersectionPrompt(String prompt) {
+    // 08.05 改 static：本方法只读 NO_INTERSECTION_PROMPT 常量、不碰任何实例字段，
+    // 改成 static 后离线 prompt 台（PromptLab）能直接反射调用它复用生产逻辑，
+    // 不必再抄一份同文副本（抄的那份已经漂移过一次——改了生产、离线台还打印旧文）。
+    static String enforceNoIntersectionPrompt(String prompt) {
         String base = prompt == null ? "" : prompt.trim();
         if (base.contains("最高优先级·禁止穿模") || base.contains("禁止穿模")) {
             return base;

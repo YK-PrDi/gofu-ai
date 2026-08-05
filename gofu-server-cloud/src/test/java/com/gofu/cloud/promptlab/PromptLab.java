@@ -59,7 +59,8 @@ public final class PromptLab {
     // ── 入参 ──────────────────────────────────────────────────────────────
 
     private record Args(String category, String skuHint, String kind, int n, String whitePath,
-                        boolean gen, String variant, boolean hasFilter, String contextId) {}
+                        boolean gen, String variant, boolean hasFilter, String contextId,
+                        String tag, boolean refB, String note) {}
 
     private static Args parse(String[] argv) {
         Map<String, String> kv = new LinkedHashMap<>();
@@ -83,15 +84,24 @@ public final class PromptLab {
                 flags.contains("gen"),
                 kv.getOrDefault("variant", "new"),
                 flags.contains("hasFilter"),
-                kv.get("ctx"));
+                kv.get("ctx"),
+                kv.get("tag"),
+                flags.contains("refB"),
+                kv.get("note"));
     }
 
     private static void usage() {
         System.out.println("""
                 离线 prompt 台。用法：
-                  --cat  <品类>        必填。可传全路径「家装主材>厨房>厨房挂件>锅盖架」或裸叶子「锅盖架」
+                  --cat  <品类>        main/detail 必填（kaipin 不需要）。可传全路径或裸叶子「锅盖架」
                   --sku  <主件名>      可选。用于构图库挑子组(如含"吸盘"→吸盘组)、卖点候选过滤
-                  --kind main|detail   默认 main。detail=详情图 prompt
+                  --kind main|detail|kaipin
+                                       默认 main。detail=详情图；kaipin=开品设计提案图
+                  开品(--kind kaipin)专用：
+                  --tag  <贴纸标签>    迪士尼标签名（走 IP 融合那套主体锁）
+                  --refB               表示有产品B参考图（走"两款碰撞"那套；与 --tag 同给=3张输入）
+                  --note <分析卡>      用户手改过的外观分析卡。多行用 `--note @文件路径` 从文件读，
+                                       或用 \n 表示换行。**这是开品唯一承载设计意图的文本**
                   --n    <张数>        默认 3
                   --white <白底图路径>  --gen 时必填；不出图时可省(只影响 refs 打印)
                   --hasFilter          花洒专用：该 SKU 带滤芯配件(否则库会剔除 focus=滤芯 的构图)
@@ -109,7 +119,11 @@ public final class PromptLab {
     public static void main(String[] argv) throws Exception {
         if (argv.length == 0) { usage(); return; }
         Args args = parse(argv);
-        if (args.category().isBlank()) { usage(); throw new IllegalArgumentException("--cat 必填"); }
+        // 开品不按品类走（它不查构图库、不查 ec-catalog），故 --cat 只对 main/detail 必填
+        if (!"kaipin".equals(args.kind()) && args.category().isBlank()) {
+            usage();
+            throw new IllegalArgumentException("--cat 必填（--kind kaipin 除外）");
+        }
         // variant=both 时一张构图要出两张图（old+new），闸门按**实际出图张数**算，不是按 --n。
         int genShots = args.gen() ? args.n() * ("both".equals(args.variant()) ? 2 : 1) : 0;
         if (genShots > MAX_GEN_PER_RUN) {
@@ -130,7 +144,9 @@ public final class PromptLab {
         List<String> prompts = switch (args.kind()) {
             case "main"   -> buildMainPrompts(args, templateService);
             case "detail" -> buildDetailPrompts(args);
-            default -> throw new IllegalArgumentException("--kind 只支持 main / detail（SKU 图走生产日志，见类注释）");
+            case "kaipin" -> buildKaipinPrompts(args);
+            default -> throw new IllegalArgumentException(
+                    "--kind 只支持 main / detail / kaipin（SKU 图走生产日志，见类注释）");
         };
 
         if (!args.gen()) {
@@ -225,6 +241,86 @@ public final class PromptLab {
         return out;
     }
 
+    // ── 开品：反射调生产的 buildKaipinPrompt / insertThirdRefClause / kaipinViewHint ──
+
+    /**
+     * 完整复刻生产链路：
+     *   buildKaipinPrompt(hasTag, clampDesignNote(note))
+     *   → 3 张输入时 insertThirdRefClause
+     *   → fillDirection(base, kaipinViewHint(i, n))：把本张的**设计方向**填进占位符
+     *     （08.05：N 张 = N 个不同设计方案，视角反而固定；原来是"同一设计的 N 个视角"，方向错了）
+     *   → enforceNoIntersectionPrompt
+     * 都走反射，不在本台重写任何 prompt 文案。
+     */
+    private static List<String> buildKaipinPrompts(Args args) throws Exception {
+        boolean hasTag = args.tag() != null && !args.tag().isBlank();
+        boolean hasRefB = args.refB();
+        if (!hasTag && !hasRefB) {
+            throw new IllegalArgumentException(
+                    "开品至少要有一个碰撞参考：--tag <贴纸标签> 或 --refB（生产同此校验）");
+        }
+        String raw = readNote(args.note());
+        String clamped = (String) staticCall("clampDesignNote", new Class<?>[]{String.class}, raw);
+
+        int inputs = 1 + (hasTag ? 1 : 0) + (hasRefB ? 1 : 0);
+        boolean threeInputs = hasTag && hasRefB;
+
+        System.out.printf("%n[ROUTE ] kaipin / 贴纸=%s / 产品B=%s / 每张输入 %d 张%n",
+                hasTag ? args.tag() : "无", hasRefB ? "有" : "无", inputs);
+        System.out.printf("[主体锁] %s%n", hasTag ? "KAIPIN_WHITE_BG_PROMPT_HEAD(IP融合)"
+                                                 : "KAIPIN_COLLIDE_PROMPT_HEAD(两款碰撞)");
+        if (raw.isEmpty()) {
+            System.out.println("[分析卡] 未传 --note —— 注意：分析卡是开品里**唯一承载你设计意图**的文本，"
+                    + "不传就只有通用要求。实测建议带上再看位置。");
+        } else {
+            System.out.printf("[分析卡] 原始 %d 字 → 截断后 %d 字%s%n", raw.length(), clamped.length(),
+                    clamped.length() < raw.length()
+                        ? "  ⚠ 有字段被整行丢弃（超 KAIPIN_NOTE_MAX，要放宽上限才能全带上）" : "  ✓ 完整保留");
+        }
+        System.out.printf("[REFS  ] #0=产品A白底图%s%s%n",
+                hasTag ? "  #1=迪士尼贴纸" : "", hasRefB ? (hasTag ? "  #2=产品B" : "  #1=产品B") : "");
+        System.out.printf("[第三张说明] %s%n", threeInputs
+                ? "插入（位置=共用尾巴之前，08.04 起不再追加到最末尾）" : "不插入（输入不足 3 张）");
+
+        String base = (String) staticCall("buildKaipinPrompt",
+                new Class<?>[]{boolean.class, String.class}, hasTag, clamped);
+        if (threeInputs) {
+            base = (String) staticCall("insertThirdRefClause", new Class<?>[]{String.class}, base);
+        }
+
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < args.n(); i++) {
+            String dir = (String) staticCall("kaipinViewHint",
+                    new Class<?>[]{int.class, int.class}, i, args.n());
+            // 走生产同一条路：填进占位符，而不是追加到末尾（08.05 段序修复）
+            String prompt = enforceNoIntersection(
+                    (String) staticCall("fillDirection", new Class<?>[]{String.class, String.class}, base, dir));
+            System.out.printf("%n[第 %d/%d 张]%n", i + 1, args.n());
+            dump(prompt, null, clamped.isEmpty() ? null : clamped);
+            out.add(prompt);
+            libSegs.add("");   // 开品无构图库段，--variant both 对它无意义
+        }
+        return out;
+    }
+
+    /** --note 支持直接给文本，或 `@路径` 从文件读（分析卡多行，命令行里不好写）。 */
+    private static String readNote(String note) throws Exception {
+        if (note == null || note.isBlank()) return "";
+        if (note.startsWith("@")) {
+            File f = new File(note.substring(1));
+            if (!f.isFile()) throw new IllegalArgumentException("--note 指向的文件不存在: " + f);
+            return new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8).trim();
+        }
+        return note.replace("\\n", "\n").trim();   // 命令行里用 \n 表示换行
+    }
+
+    /** 反射调 FlowController 的 package-private / private static 纯函数。 */
+    private static Object staticCall(String method, Class<?>[] sig, Object... args) throws Exception {
+        Method m = FlowController.class.getDeclaredMethod(method, sig);
+        m.setAccessible(true);
+        return m.invoke(null, args);
+    }
+
     // ── old 变体：把当前代码的作废围栏还原成 08.04 之前的裸注入 ────────────────
 
     /**
@@ -252,22 +348,31 @@ public final class PromptLab {
 
     // ── 打印：段边界 + 字符偏移 + 别款商品实体词标注 ─────────────────────────
 
-    /** 生产里每个 prompt 都会被 enforceNoIntersectionPrompt 追加这段；漏了就是在验一个生产不存在的 prompt。 */
-    private static String enforceNoIntersection(String prompt) {
-        String base = prompt == null ? "" : prompt.trim();
-        if (base.contains("禁止穿模")) return base;
-        return base + "\n\n" + NO_INTERSECTION;
+    /**
+     * 生产里每个 prompt 都会被 {@code enforceNoIntersectionPrompt} 追加反穿模段；漏了就是在验一个
+     * 生产不存在的 prompt。
+     *
+     * <p>⚠️ 08.05 改为**反射读生产常量**。原来这里抄了一份同文的副本，结果 08.05 改生产那段
+     * （抽象禁令 → 明确层级顺序）之后，离线台仍打印旧文本，差点据此得出"改动没生效"的错误结论。
+     * 这正是本类开头那条铁律要防的事——凡是抄一份，就一定会漂移。
+     */
+    private static String enforceNoIntersection(String prompt) throws Exception {
+        java.lang.reflect.Method m = com.gofu.cloud.service.ImageGenerationService.class
+                .getDeclaredMethod("enforceNoIntersectionPrompt", String.class);
+        m.setAccessible(true);
+        return (String) m.invoke(null, prompt);   // 生产侧已改 static，直接调
     }
 
-    /** 与 ImageGenerationService.NO_INTERSECTION_PROMPT 同文（该常量 private，此处按值对齐）。 */
-    private static final String NO_INTERSECTION = """
-            【最高优先级·禁止穿模】
-            画面中任何产品、人体、手指、衣袖、头发、道具、墙面、桌面、玻璃、置物架、支架、线缆、背景结构之间都不得互相穿透、嵌入、融合或共享边界。
-            产品必须有真实接触面、支撑点、遮挡关系和接触阴影；手指只能自然握持或触碰产品表面，不能穿过产品孔洞或外壳。
-            产品不能半截插入桌面、墙面、背景、支架或其他物体；所有连接、接触、阴影、透视和前后层级必须物理合理。
-            """.trim();
-
     private static void dump(String prompt, String libSeg) throws Exception {
+        dump(prompt, libSeg, null);
+    }
+
+    /**
+     * @param libSeg     构图库原文段（会做"别款商品实体词"检测 + 围栏判定）；无则传 null
+     * @param designNote 用户的分析卡（**只报位置，不做实体词检测**）。分析卡里的颜色/材质是用户
+     *                   自己的设计要求，不是"别款描述"——拿 PRODUCT_WORDS 去查它会刷出一堆假告警。
+     */
+    private static void dump(String prompt, String libSeg, String designNote) throws Exception {
         System.out.printf("[PROMPT 共 %d 字]%n", prompt.length());
         // 按【…】小节标题切，打印每节起始偏移——位置是本轮攻关的主要变量，得能一眼量出来。
         // 只认**行首**的【…】：正文里还有很多嵌在句中的标记（如 TEXT_RENDER_INSTRUCTION 里的
@@ -302,6 +407,14 @@ public final class PromptLab {
                         : "⚠ 无作废隔离——模型会当成'这张图要画什么'来执行");
             }
         }
+        if (designNote != null && !designNote.isBlank()) {
+            int at = prompt.indexOf(designNote);
+            System.out.printf("  分析卡 @偏移 %s / %d字 —— %s%n",
+                    at < 0 ? "(未找到,组装可能有误)" : String.valueOf(at), designNote.length(),
+                    at < 0 ? "⚠ 检查组装" : at < 600
+                        ? "○ 在主体锁之后的高权威位（改前是挂在最末尾、砍到200字）"
+                        : "⚠ 偏移偏后，确认是否仍排在共用尾巴之前");
+        }
         System.out.println("  ── 全文 ──");
         System.out.println(indent(prompt));
     }
@@ -317,7 +430,7 @@ public final class PromptLab {
     /** 每张 prompt 对应的构图库原文段（toOldVariant 还原旧写法时要把它填回裸注入的位置）。 */
     private static final List<String> libSegs = new ArrayList<>();
 
-    private static void runGen(Args args, LocalConfig cfg, List<String> prompts) {
+    private static void runGen(Args args, LocalConfig cfg, List<String> prompts) throws Exception {
         AppProperties ap = new AppProperties();
         ap.getGptImage().setApiKeys(cfg.appGptImageKeys());
         ap.getGptImage().setBaseUrl(cfg.appGptImageBaseUrl());

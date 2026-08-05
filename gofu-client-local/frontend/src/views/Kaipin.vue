@@ -15,15 +15,15 @@ const { downloadMany, downloading } = useImageDownload()
 
 const imgUrl = (r) => '/api/gen/img?ref=' + encodeURIComponent(r)
 
-// ─── 分析输入（不存 store，切页后图片需重传，文字字段切页会丢失 —— 可接受）───
-const input = reactive({
-  imageA: null, imageAPreview: '',
-  imageB: null, imageBPreview: '',
-  productA: '', productB: '',
-  selling: '',
-  focus: 'cost', focusText: '',
-  style: '', styleText: '',
-})
+// ─── 分析输入 ───
+// 08.05 修（用户反馈"上传白底图点分析后，切到别的模式再回来白底图不见了"）：
+//   原来整个 input 是组件内的 reactive，切页组件卸载就全丢（图片和文字字段一起丢）。
+//   现在都放进 kpStore —— 切页回来照旧；store 只在内存、不持久化，F5 仍是干净重来
+//   （L6 决定，见 kaipin.js 末尾注释）。
+//   存的是 b64 而非 File 对象：File 没法从 store 恢复，而上传只需要 b64+扩展名，
+//   analyze 的 FormData 可由 b64 重建 File（见 b64ToFile）。
+//   `input` 保留为指向 store 的代理，模板里的 input.xxx 一律不用改。
+const input = kpStore
 const focusOptions = [
   { value: 'cost', label: '成本量产' }, { value: 'premium', label: '颜值溢价' },
   { value: 'disruptive', label: '颠覆创新' }, { value: 'custom', label: '自定义' },
@@ -91,23 +91,42 @@ function fileToB64(f) {
     rd.readAsDataURL(f)
   })
 }
+// 只存 b64 + 扩展名 + 原文件名（不存 File 对象，它没法跨切页从 store 恢复）
 async function pickImageA(e) {
   const f = e.target.files[0]; if (!f) return
-  input.imageAPreview = await fileToB64(f); input.imageA = f
+  input.imageAPreview = await fileToB64(f)
+  input.imageAExt = f.name.toLowerCase().endsWith('.png') ? 'png' : 'jpg'
+  input.imageAName = f.name
 }
 async function pickImageB(e) {
   const f = e.target.files[0]; if (!f) return
-  input.imageBPreview = await fileToB64(f); input.imageB = f
+  input.imageBPreview = await fileToB64(f)
+  input.imageBExt = f.name.toLowerCase().endsWith('.png') ? 'png' : 'jpg'
+  input.imageBName = f.name
+}
+
+/** 从 b64 dataURL 重建 File，供 analyze 的 FormData 用（切页回来后已无原 File 对象）。 */
+function b64ToFile(dataUrl, name, ext) {
+  if (!dataUrl) return null
+  const b64 = dataUrl.replace(/^data:[^;]+;base64,/, '')
+  const bin = atob(b64)
+  const buf = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
+  return new File([buf], name || ('image.' + ext), { type: ext === 'png' ? 'image/png' : 'image/jpeg' })
 }
 
 // ─── 外观分析 ───
 async function analyze() {
-  if (!input.productA && !input.imageA) { ElMessage.warning('请至少填写产品A描述或上传图片'); return }
+  // 判"有没有图"改看 b64（不再看 File 对象，切页回来后只剩 b64）
+  if (!input.productA && !input.imageAPreview) { ElMessage.warning('请至少填写产品A描述或上传图片'); return }
   analyzing.value = true; kpStore.analyzed = false; kpStore.analyzeMsg = '分析中（调用 Gemini，约 15-30 秒）…'; kpStore.analyzeMsgType = ''
   try {
     const form = new FormData()
-    if (input.imageA) form.append('imageA', input.imageA)
-    if (input.imageB) form.append('imageB', input.imageB)
+    // 由 b64 重建 File（切页回来后原 File 已不在）
+    const fA = b64ToFile(input.imageAPreview, input.imageAName, input.imageAExt)
+    const fB = b64ToFile(input.imageBPreview, input.imageBName, input.imageBExt)
+    if (fA) form.append('imageA', fA)
+    if (fB) form.append('imageB', fB)
     form.append('productA', input.productA || '')
     form.append('productB', input.productB || '')
     form.append('selling', input.selling || '')
@@ -126,10 +145,10 @@ async function analyze() {
 }
 
 // ─── 上传图片到云端，获取 imageRef。产品A、产品B 共用。 ───
-async function uploadImage(file, previewB64, label) {
-  if (!file) throw new Error(`请先上传${label}`)
-  const ext = file.name.toLowerCase().endsWith('.png') ? 'png' : 'jpg'
-  const b64 = (previewB64 || '').replace(/^data:[^;]+;base64,/, '')
+// 08.05：入参从 (File, b64) 改成 (b64, ext)——切页回来后已无 File 对象，扩展名单独存在 store。
+async function uploadImage(previewB64, ext, label) {
+  if (!previewB64) throw new Error(`请先上传${label}`)
+  const b64 = previewB64.replace(/^data:[^;]+;base64,/, '')
   const d = await api.post('/api/gen/upload-image', { base64: b64, ext })
   if (!d.imageRef) throw new Error(`${label}上传失败`)
   return d.imageRef
@@ -139,18 +158,18 @@ async function uploadImage(file, previewB64, label) {
 async function startGenerate() {
   // 标签不再必选：开品的原始玩法是「产品A + 产品B 碰撞出新产品」，贴纸是另一条路。
   // 两条至少要有一条，否则没有任何可碰撞的参考。
-  if (!kpStore.selectedTag && !input.imageB) {
+  if (!kpStore.selectedTag && !input.imageBPreview) {
     ElMessage.warning('请选择迪士尼标签，或上传产品B参考图（至少要有一个碰撞参考）'); return
   }
-  if (!input.imageA) { ElMessage.warning('请上传产品A白底图（生图必须有产品本体）'); return }
+  if (!input.imageAPreview) { ElMessage.warning('请上传产品A白底图（生图必须有产品本体）'); return }
   generating.value = true; kpStore.genDone = false; kpStore.picked = []; kpStore.cloudTaskId = ''
   kpStore.genPct = 0; kpStore.genPhase = '准备中…'; kpStore.genMsg = ''; kpStore.genMsgType = ''
   try {
     // 1) 上传产品A（必须）+ 产品B（可选，作造型语言参考进生图）
     kpStore.genPhase = '上传产品图…'; kpStore.genPct = 5
-    const userImageRef = await uploadImage(input.imageA, input.imageAPreview, '产品A图')
-    const refImageRef = input.imageB
-      ? await uploadImage(input.imageB, input.imageBPreview, '产品B图') : ''
+    const userImageRef = await uploadImage(input.imageAPreview, input.imageAExt, '产品A图')
+    const refImageRef = input.imageBPreview
+      ? await uploadImage(input.imageBPreview, input.imageBExt, '产品B图') : ''
 
     // 2) 建 context（用卖点/品类信息）
     kpStore.genPhase = '建立商品档案…'; kpStore.genPct = 15
@@ -166,11 +185,25 @@ async function startGenerate() {
     await ctxStore.adopt('kaipin', contextId)
 
     // 3) 调云端生图
+    // 08.04 D-2：**不再由前端拼 prompt**，只把用户手改过的分析卡原文传过去，组装全交后端。
+    //   为什么改：原来前端 buildGenPrompt() 拼好整段传过来，后端一收到 prompt 就把自己那几个
+    //   KAIPIN_* 常量整段替换掉 → 那些常量实际是死的，两边"改一处要同步另一处"的注释保护不了任何东西，
+    //   已经漂移出三处（第三张图说明的位置、多出的【外观设计参考】段、分析卡被砍到 200 字）。
+    //   最要紧的是第三处：分析卡是唯一承载你设计意图的文本，却被挂在整串最末尾（权威最低位）
+    //   且砍到 200 字，多字段的卡后面几个字段直接丢——这很可能就是"改了分析卡但出图不体现"的真因。
+    //   现在后端把它放在主体锁之后、按字段边界截断（见 FlowController.clampDesignNote）。
+    // 各字段用**换行**连接（不是分号）：后端按行截断，换行才能保证不把某个字段砍成半句。
     kpStore.genPhase = '生成中…'; kpStore.genPct = 20
-    const genPromptFull = buildGenPrompt()
+    const designNote = (Array.isArray(kpStore.fields) ? kpStore.fields : [])
+      .filter((f) => f && f.value && String(f.value).trim())
+      .map((f) => f.key + '：' + String(f.value).trim())
+      .join('\n')
     const d = await api.post('/api/flow/kaipin-generate', {
       contextId, userImageRef, refImageRef, tag: kpStore.selectedTag,
-      count: kpStore.genCount, prompt: genPromptFull,
+      count: kpStore.genCount, designNote,
+      // 高级自定义（kpStore.genPrompt）仍走 prompt 入参：显式传了后端就整段照用、不插分析卡。
+      // 目前界面没有这个输入框，故实际恒为空；留着接口是为了直连 API 调试时能整段覆盖。
+      ...(kpStore.genPrompt?.trim() ? { prompt: kpStore.genPrompt.trim() } : {}),
     })
     if (d.error) throw new Error(d.error)
     kpStore.cloudTaskId = d.taskId
@@ -187,34 +220,6 @@ async function startGenerate() {
   } finally { generating.value = false }
 }
 
-// 开品产出的是「新款产品设计提案白底图」，不是电商主图——落点是纯白背景+看清造型结构。
-// 与云端 FlowController.KAIPIN_WHITE_BG_TAIL 保持一致，改一处要同步另一处。
-const WHITE_BG_TAIL =
-  '\n【背景】纯白背景(#FFFFFF)，干净无场景、无道具、无装饰、无文字、无水印、无logo；'
-  + '产品下方只允许极轻微的接触阴影，不要投射到背景上形成明显影子。'
-  + '\n【主体】产品完整入画、居中、不裁切、不遮挡；造型轮廓、结构分件、接缝、开孔、'
-  + '连接方式都要清晰可辨（这张图是用来判断能不能打样的，结构看不清就没有价值）。'
-  + '\n【光照】均匀柔和的产品摄影布光，不要强对比戏剧光、不要彩色环境光染色，真实还原材质与颜色。'
-  + '\n【禁止】禁止任何营销文案、卖点标签、促销元素、边框、拼贴、多格排版；禁止出现人物或手部。'
-
-// 两种碰撞方式各一套开头，与云端 KAIPIN_WHITE_BG_PROMPT / KAIPIN_COLLIDE_PROMPT 对应。
-function buildGenPrompt() {
-  if (kpStore.genPrompt.trim()) return kpStore.genPrompt.trim()
-  const card = kpStore.fields.map(f => f.key + ': ' + f.value).join('；')
-  const head = kpStore.selectedTag
-    ? '以第一张图片为产品主体，将【第二张】迪士尼参考图案的造型语言与图案元素融合到产品外观设计中，'
-      + '产出一张【新款产品设计提案白底图】。'
-      // 贴纸+产品B 同时给 → 输入 3 张，要交代第三张的角色，否则会被当成另一张贴纸画进去
-      + (input.imageB
-        ? '\n【第三张图的用途】第三张图是另一款产品，仅作**造型语言参考**（只取其造型手法、'
-          + '曲线走势、比例关系、结构语汇），不要把它的产品原样画出来、也不要与主体并排摆放。' : '')
-    : '以第一张图片为【功能本体】（产品的功能结构、用途、主要部件以它为准），'
-      + '第二张图片仅作【造型语言参考】（只取它的造型手法、曲线走势、比例关系、体块与结构语汇、材质气质），'
-      + '把两者碰撞融合，设计出一款【全新产品】，产出它的设计提案白底图。'
-      + '\n【重要】不要把第二张图的产品原样画出来、也不要把两个产品并排摆在一起——'
-      + '最终画面里只有**一款**新产品，它保有第一张图的功能属性，但外观造型受第二张图启发而重新设计。'
-  return head + WHITE_BG_TAIL + (card ? '\n【外观设计参考】' + card.substring(0, 200) : '')
-}
 
 async function pollGenTask(taskId, total) {
   for (let tries = 0; tries < 1200; tries++) {

@@ -73,6 +73,36 @@ public class GptImageAgent implements ImageGeneratorAgent {
         return apiKey.substring(0, 4) + "***";
     }
 
+    /**
+     * 判断响应是否为"中转站额度耗尽"。上游实测返回：
+     * {@code HTTP 403 + {"error":{"message":"预扣费额度失败, 用户剩余额度: ¥0.042036,
+     * 需要预扣费额度: ¥0.100000 ...","code":"insufficient_user_quota"}}}
+     *
+     * <p>只认额度信号，不把其它 403（如 key 无效、被封）误判成额度问题——
+     * 那两种换 key 是有意义的，额度耗尽换 key 没意义（共用余额）。
+     */
+    private boolean isQuotaExhausted(int status, String respBody) {
+        if (status != 403 && status != 402) return false;
+        if (respBody == null) return false;
+        String b = respBody.toLowerCase();
+        return b.contains("insufficient_user_quota")
+                || b.contains("quota")            // 兼容 insufficient_quota / quota_exceeded 等变体
+                || respBody.contains("额度");
+    }
+
+    /** 从上游错误 JSON 里取 error.message（取不到就返回截断的原文，别把整个 body 灌进异常）。 */
+    private String extractUpstreamMessage(String respBody) {
+        try {
+            Map<?, ?> root = mapper.readValue(respBody, Map.class);
+            Object err = root.get("error");
+            if (err instanceof Map<?, ?> em && em.get("message") != null) {
+                return String.valueOf(em.get("message"));
+            }
+        } catch (Exception ignored) { /* 非 JSON 就走下面的截断 */ }
+        String s = respBody == null ? "" : respBody.trim();
+        return s.length() > 300 ? s.substring(0, 300) + "…" : s;
+    }
+
     @Override
     public String getId() {
         return "gpt-image";
@@ -153,6 +183,11 @@ public class GptImageAgent implements ImageGeneratorAgent {
                         ? generateWithImages(prompt, imageFiles, outputPath, apiKey, baseUrl, size, quality, fitContain)
                         : generateTextOnly(prompt, outputPath, apiKey, baseUrl, size);
                 if (ok) return true;
+            } catch (UpstreamQuotaExhaustedException qe) {
+                // 额度耗尽：所有 key 共用同一账户余额（08.04 实测三个 key 查出的剩余额度完全相同），
+                // 换 key 一定同样失败，直接上抛，别再白试后面的 key。
+                log.error("GPT-Image 额度耗尽，停止尝试其余 key（共用同一账户余额）");
+                throw qe;
             } catch (java.io.UncheckedIOException ue) {
                 if (!(ue.getCause() instanceof java.net.SocketTimeoutException)) throw ue;
                 timedOutBaseUrls.add(baseUrl);
@@ -275,6 +310,12 @@ public class GptImageAgent implements ImageGeneratorAgent {
                     (System.currentTimeMillis() - reqStart) / 1000, status, preparedFiles.size(),
                     preparedFiles.stream().mapToLong(File::length).sum() / 1024);
 
+            if (isQuotaExhausted(status, respBody)) {
+                // 额度耗尽：换 key 无意义(共用余额)、重试更无意义，直接上抛让整批停下并提示充值
+                String msg = extractUpstreamMessage(respBody);
+                log.error("GPT-Image 中转站额度耗尽({}): {}", status, msg);
+                throw new UpstreamQuotaExhaustedException(msg);
+            }
             if (status < 200 || status >= 300) {
                 log.error("GPT-Image edits 失败 ({}): {}", status, respBody);
                 return false;
@@ -287,6 +328,8 @@ public class GptImageAgent implements ImageGeneratorAgent {
             // 上游单请求抖动。交给调用方重试，不在这里吞成 false。
             log.error("GPT-Image edits 读超时: {}", te.getMessage());
             throw new java.io.UncheckedIOException(te);
+        } catch (UpstreamQuotaExhaustedException qe) {
+            throw qe;   // 额度耗尽必须穿透，不能被下面的 catch(Exception) 吞成"普通失败"
         } catch (Exception e) {
             log.error("GPT-Image edits 异常: {}", e.getMessage(), e);
             return false;
@@ -410,6 +453,11 @@ public class GptImageAgent implements ImageGeneratorAgent {
                 respBody = (is == null) ? "" : new String(is.readAllBytes(), StandardCharsets.UTF_8);
             }
 
+            if (isQuotaExhausted(status, respBody)) {
+                String msg = extractUpstreamMessage(respBody);
+                log.error("GPT-Image inpaint 中转站额度耗尽({}): {}", status, msg);
+                throw new UpstreamQuotaExhaustedException(msg);
+            }
             if (status < 200 || status >= 300) {
                 log.error("GPT-Image inpaint 失败 ({}): {}", status, respBody);
                 return false;
@@ -418,6 +466,8 @@ public class GptImageAgent implements ImageGeneratorAgent {
             boolean saved = saveFromResponse(respBody, outputPath);
             if (saved) ensureSize(outputPath, size);
             return saved;
+        } catch (UpstreamQuotaExhaustedException qe) {
+            throw qe;
         } catch (Exception e) {
             log.error("GPT-Image inpaint 异常: {}", e.getMessage(), e);
             return false;
@@ -458,6 +508,11 @@ public class GptImageAgent implements ImageGeneratorAgent {
                 respBody = (is == null) ? "" : new String(is.readAllBytes(), StandardCharsets.UTF_8);
             }
 
+            if (isQuotaExhausted(status, respBody)) {
+                String msg = extractUpstreamMessage(respBody);
+                log.error("GPT-Image generations 中转站额度耗尽({}): {}", status, msg);
+                throw new UpstreamQuotaExhaustedException(msg);
+            }
             if (status < 200 || status >= 300) {
                 log.error("GPT-Image generations 失败 ({}): {}", status, respBody);
                 return false;
@@ -466,6 +521,8 @@ public class GptImageAgent implements ImageGeneratorAgent {
             boolean saved = saveFromResponse(respBody, outputPath);
             if (saved) ensureSize(outputPath, size);
             return saved;
+        } catch (UpstreamQuotaExhaustedException qe) {
+            throw qe;
         } catch (Exception e) {
             log.error("GPT-Image generations 异常: {}", e.getMessage(), e);
             return false;

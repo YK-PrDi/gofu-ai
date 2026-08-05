@@ -369,8 +369,41 @@ public class FlowController {
             // 08.03：开品产出的是「新款产品设计提案白底图」，不是电商主图——故 prompt 落点是
             // 纯白背景+看清造型结构，而非卖货氛围。前端 buildGenPrompt 与此保持一致。
             // 默认 prompt 按碰撞方式二选一：有贴纸走 IP 融合，纯产品B走"两款碰撞出新设计"。
-            String defaultPrompt = hasTag ? KAIPIN_WHITE_BG_PROMPT : KAIPIN_COLLIDE_PROMPT;
-            String prompt = body.get("prompt") instanceof String s && !s.isBlank() ? s : defaultPrompt;
+            // 08.04 D-1/D-2：**后端是开品 prompt 的唯一真相源**。
+            //  改前：前端 Kaipin.vue buildGenPrompt() 自己拼好整段 prompt 传过来，后端一收到 prompt
+            //  就把自己这几个常量整段替换掉 → 那些常量实际是**死的**，尽管两边都写着"改一处要同步另一处"。
+            //  两份已经漂移出三处（第三张图说明的位置、多出的【外观设计参考】段、分析卡被砍到200字），
+            //  而 08.02 实测结论正是"位置比措辞更决定结果"——前端那份怎么排，后端注释就在说谎。
+            //  改后：前端只传 designNote（用户手改过的分析卡原文），组装全在这里。
+            //
+            //  段序按**权威降序**（这是本次要修的核心，不是措辞）：
+            //    ① 主体锁 head（以第一张图为主体 / 功能本体）
+            //    ② 第三张图的角色说明（仅当贴纸+产品B 同时给，输入3张时才需要）
+            //    ③ 【外观设计要求】= 用户的分析卡 —— 唯一承载用户设计意图的文本，紧跟主体锁
+            //    ④ 共用尾巴（白底/结构清晰/禁止项）—— 通用要求，放最后
+            //  前端旧版把 ③ 挂在 ④ 之后的最末尾且砍到 200 字，是权威最低位，
+            //  这很可能就是"改了分析卡但出图不体现"的真因（见 KAIPIN_DESIGN_NOTE_HEAD）。
+            String designNote = clampDesignNote(
+                    body.get("designNote") instanceof String dn ? dn : null);
+            // 兼容直连 API / 老版前端：显式传了整段 prompt 就照用，不再插分析卡（避免与它自带的重复）。
+            String rawPrompt = body.get("prompt") instanceof String s && !s.isBlank() ? s.trim() : null;
+            String prompt;
+            if (rawPrompt != null) {
+                prompt = rawPrompt;
+            } else {
+                // 注意：**这里不加**"第三张图的用途"。它取决于真实输入是不是 3 张，而那要等
+                //   素材抽样之后才知道——选了标签但该标签素材库为空时会降级成"只用产品B"，
+                //   此时 hasTag=true 但实际只有 2 张输入，按 hasTag 加就是在描述一张不存在的图。
+                //   故由 genKaipinImages 按**实际素材**决定，见 insertThirdRefClause。
+                prompt = buildKaipinPrompt(hasTag, designNote);
+            }
+            // 第三张说明不在这里决定（见上方注释），故本行不报它——由 genKaipinImages 另落一条。
+            log.info("[开品生图] prompt 来源={}, 分析卡={}（截断后{}字/原始{}字）, prompt共{}字",
+                    rawPrompt != null ? "前端整段(兼容路径)" : "后端组装",
+                    designNote.isEmpty() ? "无" : "已注入(主体锁之后)",
+                    designNote.length(),
+                    body.get("designNote") instanceof String rawDn ? rawDn.length() : 0,
+                    prompt.length());
 
             // 1) 有标签才抽素材。抽不到不再 400——降级成"无贴纸"，只要还有产品B就能碰撞；
             //    两者都没有的情况上面已经拦掉了。
@@ -476,8 +509,13 @@ public class FlowController {
                 1 + (disneySmall.isEmpty() ? 0 : 1) + (refSmall != null ? 1 : 0));
         // 贴纸和产品B同时在场 → 输入是 3 张，必须补一句交代第三张的角色，
         // 否则"将后续迪士尼参考图案…"会把产品B也当贴纸素材画进去。
-        final String promptFull = (!disneySmall.isEmpty() && refSmall != null)
-                ? prompt + KAIPIN_THIRD_REF_CLAUSE : prompt;
+        // 判据用**实际素材**(disneySmall/refSmall)而非请求参数 hasTag——选了标签但素材库为空时
+        // 会降级成"只用产品B"，那时只有 2 张输入，按 hasTag 加就是在描述一张不存在的图。
+        // 08.04：改用 insertThirdRefClause 插到共用尾巴之前，不再追加到整串最末尾（位置>措辞）。
+        final boolean threeInputs = !disneySmall.isEmpty() && refSmall != null;
+        final String promptFull = threeInputs ? insertThirdRefClause(prompt) : prompt;
+        log.info("[开品生图] 第三张说明={}（实际素材：贴纸{}张 + 产品B{}）",
+                threeInputs, disneySmall.size(), refSmall != null ? "有" : "无");
 
         // 产出写 conceptImages(设计提案)，不写 mainImages(电商主图)——见 VisualContent.conceptImages 注释。
         synchronized (ctx) {
@@ -493,13 +531,18 @@ public class FlowController {
         // 其它模式的生图(step-all/详情/SKU 共用同一个池和同一个 GEN_CONC)整段时间排不上队。
         // 顺带让"停止"真的能停住：未提交的批次遇到 cancel 直接不启动（原来只能等已提交的跑完）。
         final int batchSize = GEN_CONC_PERMITS;
+        // 额度耗尽的原文（首个撞上的那条）。非 null 即停止后续批次，并把上游原话带给前端——
+        // 那句话里有"剩余额度/需要额度"的具体数字，比"生成失败"有用得多。
+        final java.util.concurrent.atomic.AtomicReference<String> quotaErr = new java.util.concurrent.atomic.AtomicReference<>();
         for (int start = 0; start < count && !task.isCancelled(); start += batchSize) {
             int end = Math.min(start + batchSize, count);
             List<java.util.concurrent.CompletableFuture<Void>> batch = new ArrayList<>();
             for (int idx = start; idx < end; idx++) {
                 final int i = idx;
                 // 本张专属观察视角(与其它张明显不同)，拼在共用 prompt 之后
-                final String motifPrompt = promptFull + kaipinViewHint(i, count);
+                // 08.05：设计方向从"追加到末尾"改为"填进占位符"——它是 N 张唯一的差异来源，
+                //   排在通用要求(背景/主体/光照/禁止)之后权威过低，很可能导致 N 张仍雷同。
+                final String motifPrompt = fillDirection(promptFull, kaipinViewHint(i, count));
                 batch.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
                     try {
                         if (task.isCancelled()) return;
@@ -522,6 +565,10 @@ public class FlowController {
                             task.addResult(Map.of("message", "第 " + (i + 1) + " 张生成失败"));
                         }
                     } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                    catch (com.gofu.cloud.service.agent.UpstreamQuotaExhaustedException qe) {
+                        // 额度耗尽：记下原文，让后续批次别再白跑（换 key/重试都没用，只能充值）
+                        quotaErr.compareAndSet(null, qe.getMessage());
+                    }
                     catch (Exception e) {
                         task.addResult(Map.of("message", "第 " + (i + 1) + " 张异常: " + e.getMessage()));
                     } finally { task.incrementProgress(); }
@@ -529,6 +576,10 @@ public class FlowController {
             }
             java.util.concurrent.CompletableFuture.allOf(batch.toArray(new java.util.concurrent.CompletableFuture[0])).join();
             log.info("[开品生图] 批次 {}~{}/{} 完成", start + 1, end, count);
+            if (quotaErr.get() != null) {
+                log.error("[开品生图] 中转站额度耗尽，停止后续批次：{}", quotaErr.get());
+                break;
+            }
         }
         if (task.isCancelled()) log.info("[开品生图] 已取消，未提交的批次不再启动");
 
@@ -541,6 +592,11 @@ public class FlowController {
         contextService.save(ctx);
         log.info("[开品生图] contextId={} 贴纸{}张 产品B{} 目标{}张 → 成功{}张(写入 conceptImages)",
                 ctx.getId(), disneySmall.size(), refSmall != null ? "有" : "无", count, okCount);
+        // 额度耗尽时优先报它：这是真原因，"成功0张"只是结果。已出的图仍在 conceptImages 里，充值后不用重跑。
+        if (quotaErr.get() != null) {
+            throw new RuntimeException("中转站账户额度不足，请充值后重试（已出 " + okCount
+                    + "/" + count + " 张，已出的图仍保留）。上游原文：" + quotaErr.get());
+        }
         if (okCount == 0) throw new RuntimeException("开品生图全部失败（共 " + count + " 张，成功 0 张）");
     }
 
@@ -883,10 +939,13 @@ public class FlowController {
      * @param total 本次共几张
      */
     private static String kaipinViewHint(int idx, int total) {
-        String view = KAIPIN_VIEWS[idx % KAIPIN_VIEWS.length];
-        return "\n\n【本张观察视角·第 " + (idx + 1) + "/" + total + " 张】" + view
-             + "\n同一个产品设计在各张之间必须完全一致（造型、比例、颜色、图案位置、零件数量都不变），"
-             + "各张只有**观察角度**不同——像同一个实物样品被从不同方向拍摄，而不是几个不同的设计。";
+        String dir = KAIPIN_DESIGN_DIRECTIONS[idx % KAIPIN_DESIGN_DIRECTIONS.length];
+        return "\n\n【本张的设计方向·第 " + (idx + 1) + "/" + total + " 个方案】" + dir
+             + "\n这 " + total + " 张是 " + total + " 个**互不相同的设计方案**，供人挑选——"
+             + "本张要拿出一个**明显区别于其它方案**的外观：造型语言、比例关系、分件方式、配色搭配都可以大胆不同，"
+             + "不要保守地只做微调，也不要与其它方案趋同。"
+             + "\n【视角固定】所有方案统一用**正面平视**（产品正对镜头、无透视变形、完整入画）——"
+             + "同一个角度才便于横向比较不同方案；不要换成侧视/俯视/特写。";
     }
 
     /**
@@ -931,13 +990,146 @@ public class FlowController {
           + "\n【光照】均匀柔和的产品摄影布光，不要强对比戏剧光、不要彩色环境光染色，真实还原材质与颜色。"
           + "\n【禁止】禁止任何营销文案、卖点标签、促销元素、边框、拼贴、多格排版；禁止出现人物或手部。";
 
-    /** 有迪士尼贴纸时：把 IP 的造型语言与图案融进产品外观。 */
-    static final String KAIPIN_WHITE_BG_PROMPT =
-            "以第一张图片为产品主体，将【第二张】迪士尼参考图案的造型语言与图案元素融合到产品外观设计中，"
-          + "产出一张【新款产品设计提案白底图】。" + KAIPIN_WHITE_BG_TAIL;
+    /**
+     * 08.05：开品的**创新底线**——同品类、同功能，但外观要大改。两套主体锁共用。
+     *
+     * <p>用户 08.05 定的边界：「还是同一个品类，但是外观上要创新」。所以这段既要**放开外观**，
+     * 也要**守住品类**——不能创新到跑成另一个品类的东西（锅盖架变成台灯就没法打样了）。
+     *
+     * <p>与上新链正好相反：那边是"1:1 复刻白底图这款实物"（忠于已有商品，改了算虚假宣传）；
+     * 开品是"照着这款去想一款新的"（忠于品类与功能，不改就没有开品的意义）。
+     * 曾把上新链那套一致性约束套到开品上，是把生产约束用在了设计探索上（见 kaipinViewHint 注释）。
+     */
+    static final String KAIPIN_INNOVATE_CLAUSE =
+            "\n【这是开品·要的是创新不是复刻】第一张图只用来确定**品类、功能与使用场景**"
+          + "（要设计的仍是同一类产品，能解决同样的问题、装同样的东西、用在同样的地方）；"
+          + "它的**外观不必保留**——造型轮廓、比例关系、分件与结构方式、配色、材质、装饰细节都应当"
+          + "**大胆重新设计**，做出一眼看得出是新款的东西。"
+          + "\n严禁把第一张图原样描一遍或只做细微调整（换个颜色、挪个圆角不算创新）；"
+          + "但也不要脱离品类——不能设计成另一类产品，功能结构必须仍然成立、能真实使用。";
 
     /**
-     * 贴纸 + 产品B 同时存在时补在末尾：说明第三张图的角色。
+     * 有迪士尼贴纸时的**主体锁头段**（不含共用尾巴）。
+     * 08.04 D-1 拆出 HEAD：为了能在"主体锁"与"共用尾巴"之间插入用户的分析卡
+     * （见 {@link #KAIPIN_DESIGN_NOTE_HEAD}）。拼回原样即 {@link #KAIPIN_WHITE_BG_PROMPT}。
+     */
+    static final String KAIPIN_WHITE_BG_PROMPT_HEAD =
+            "参考第一张图片这款产品，设计一款**同品类的全新产品**，并把【第二张】迪士尼参考图案的"
+          + "造型语言与图案元素融进它的外观，产出一张【新款产品设计提案白底图】。"
+          + KAIPIN_INNOVATE_CLAUSE;
+
+    /** 有迪士尼贴纸时：把 IP 的造型语言与图案融进产品外观。 */
+    static final String KAIPIN_WHITE_BG_PROMPT = KAIPIN_WHITE_BG_PROMPT_HEAD + KAIPIN_WHITE_BG_TAIL;
+
+    /**
+     * 08.04 D-1：用户手改过的【外观设计分析卡】。这是开品模式里**唯一承载用户设计意图**的文本
+     * （`kpStore.fields` 各字段换行拼成），最该被模型当真。
+     *
+     * <p>⚠ 修的是前端那份的两个缺陷（`Kaipin.vue:229`）：
+     * <ul>
+     *   <li><b>位置</b>：原来挂在整串 prompt 的**最末尾**（`head + WHITE_BG_TAIL + 【外观设计参考】card`），
+     *       是权威最低位。按 08.02 实测结论（位置 > 措辞），末尾的文字压不住前面已建立的印象——
+     *       这很可能就是"改了分析卡但出图不体现"的真因。现在提到主体锁之后、共用尾巴之前。</li>
+     *   <li><b>截断</b>：原来 `card.substring(0, 200)` 硬砍 200 字。多字段的卡装不下，后面字段
+     *       直接丢，且会把某个字段砍成半句。现在按**字段**截（保完整字段，不砍半句），
+     *       上限放宽到 {@link #KAIPIN_NOTE_MAX} 字。</li>
+     * </ul>
+     */
+    // 08.05 改措辞：原写"以下是本次要实现的设计意图，优先级高于下方通用要求"——这话与开品的创新
+    //   方向打架。分析卡是**分析产品A得来的**（主色调/辅色/风格标签描述的是 A 现有的样子），
+    //   标成"要实现的设计意图"等于在说"照 A 的颜色和风格画"，恰好抵消上面那段"外观不必保留"。
+    //   但也不能不给——用户会手改这张卡，改动的部分正是他要的新设计。
+    //   故如实交代它的双重身份：既是 A 的现状记录、也是用户改过之处的设计诉求，
+    //   并明确"与创新要求冲突时以创新为准"（用户手改的字段自然会与 A 的原值不同，模型按新值走）。
+    static final String KAIPIN_DESIGN_NOTE_HEAD =
+            "\n【设计参考卡·用户可能已按新设计意图修改过】以下是对第一张图那款产品的外观分析，"
+          + "**用户可能已经手动改写了其中的字段来表达他想要的新设计**（例如把主色调改成另一种颜色、"
+          + "把风格标签改成另一种风格）。请这样用它：\n"
+          + "· 凡是描述**目标形态/颜色/风格/材质/结构**的内容，按它执行——那是本次要做出来的东西；\n"
+          + "· 但**不要**把它当成「必须保持与第一张图一致」的理由：本次是开品，外观本就该大改；\n"
+          + "· 与上面【这是开品·要的是创新不是复刻】冲突时，**以创新要求为准**。\n";
+
+    /** 分析卡注入上限（字符）。按字段边界截断，宁可少一个字段也不砍半句。 */
+    static final int KAIPIN_NOTE_MAX = 1200;
+
+    /**
+     * 按**字段边界**截断分析卡：逐行累加，加不下的整行丢掉，不产生半句。
+     * 原前端 `substring(0,200)` 会把字段砍成半句（如"材质：食品级硅胶+不锈"），
+     * 模型读到断句反而更容易臆造。返回空串表示无可注入内容。
+     */
+    static String clampDesignNote(String note) {
+        if (note == null || note.isBlank()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (String line : note.trim().split("\\r?\\n")) {
+            String s = line.trim();
+            if (s.isEmpty()) continue;
+            if (sb.length() + s.length() + 1 > KAIPIN_NOTE_MAX) break;   // 装不下就整行不要
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(s);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 08.04 D-2/D-3：开品 prompt 组装的**唯一实现**。抽成静态纯函数，为的是
+     * {@code kaipinGenerate}（生产）与离线 prompt 台（PromptLab，test 源集）调**同一份**——
+     * 前端另写一份 buildGenPrompt 的下场就是漂移出三处（见 KAIPIN_DESIGN_NOTE_HEAD）。
+     *
+     * <p>段序按权威降序：① 主体锁 → ② 分析卡（用户设计意图）→ ③ 共用尾巴（通用要求）。
+     * "第三张图的用途"不在此处——它取决于真实输入张数，见 {@link #insertThirdRefClause}。
+     *
+     * @param hasTag     是否用迪士尼贴纸（决定主体锁用哪套）
+     * @param designNote 已过 {@link #clampDesignNote} 的分析卡；空串则不注入
+     */
+    static String buildKaipinPrompt(boolean hasTag, String designNote) {
+        StringBuilder sb = new StringBuilder(hasTag ? KAIPIN_WHITE_BG_PROMPT_HEAD : KAIPIN_COLLIDE_PROMPT_HEAD);
+        if (designNote != null && !designNote.isEmpty())
+            sb.append(KAIPIN_DESIGN_NOTE_HEAD).append(designNote);
+        sb.append(KAIPIN_DIRECTION_SLOT);   // 占位：由 kaipinViewHint 的产物替换（本张设计方向）
+        sb.append(KAIPIN_WHITE_BG_TAIL);
+        return sb.toString();
+    }
+
+    /**
+     * 【本张的设计方向】的插入位置占位符。
+     *
+     * <p>08.05：原来把设计方向**追加在整串最末尾**（通用要求之后）。但它是 N 张之间
+     * <b>唯一的差异来源</b>——按 08.02 实测结论（位置 > 措辞），差异化指令排在通用要求
+     * （背景/主体/光照/禁止）后面，权威低于那些每张都一样的话，很可能出来的 N 张仍然雷同。
+     * 现在把它插在"创新宣言 + 分析卡"之后、共用尾巴之前。
+     */
+    static final String KAIPIN_DIRECTION_SLOT = "{{KAIPIN_DIRECTION}}";
+
+    /**
+     * 把本张的设计方向填进 {@link #KAIPIN_DIRECTION_SLOT}。占位符缺失（如直连 API 传了
+     * 自定义 prompt）时退回追加到末尾——宁可位置不佳，也不能丢掉这张的差异化方向。
+     */
+    static String fillDirection(String prompt, String direction) {
+        if (prompt == null) return direction;
+        if (prompt.contains(KAIPIN_DIRECTION_SLOT)) return prompt.replace(KAIPIN_DIRECTION_SLOT, direction);
+        return prompt + direction;
+    }
+
+    /**
+     * 把"第三张图的用途"插到**共用尾巴之前**（而不是追加到整串最末尾）。
+     *
+     * <p>08.04：原来是 {@code prompt + KAIPIN_THIRD_REF_CLAUSE}，落在【禁止】之后的最末尾。
+     * 而前端那份是插在 tail **之前**——同一段文字两个位置，正是前后端漂移的一处。
+     * 按 08.02 实测结论（位置 > 措辞），"这第三张图是什么"属于交代输入构成，
+     * 应紧跟主体锁一侧，不该排在通用禁止项后面。
+     *
+     * <p>找不到尾巴锚点（如直连 API 传了自定义 prompt）就退回追加，宁可位置不佳也不能丢这段说明——
+     * 丢了会让模型把产品B也当贴纸素材画进去。
+     */
+    static String insertThirdRefClause(String prompt) {
+        if (prompt == null || prompt.isEmpty()) return KAIPIN_THIRD_REF_CLAUSE;
+        int at = prompt.indexOf(KAIPIN_WHITE_BG_TAIL);
+        if (at < 0) return prompt + KAIPIN_THIRD_REF_CLAUSE;
+        return prompt.substring(0, at) + KAIPIN_THIRD_REF_CLAUSE + prompt.substring(at);
+    }
+
+    /**
+     * 贴纸 + 产品B 同时存在时补上：说明第三张图的角色。
      * 不补的话，"将后续迪士尼参考图案…"会把第三张(产品B)也当成贴纸素材一起画进去。
      */
     static final String KAIPIN_THIRD_REF_CLAUSE =
@@ -948,24 +1140,33 @@ public class FlowController {
      * 无贴纸、只有产品B时：两款产品**碰撞**出新设计——这是开品模式的原始设计意图。
      * 关键是讲清两张图各自的角色，否则模型会把第二张也当成要画的产品，出成"两个产品摆一起"。
      */
-    static final String KAIPIN_COLLIDE_PROMPT =
-            "以第一张图片为【功能本体】（产品的功能结构、用途、主要部件以它为准），"
+    static final String KAIPIN_COLLIDE_PROMPT_HEAD =
+            "以第一张图片确定【品类与功能】（要设计的是同一类产品、解决同样的使用需求），"
           + "第二张图片仅作【造型语言参考】（只取它的造型手法、曲线走势、比例关系、体块与结构语汇、材质气质），"
           + "把两者碰撞融合，设计出一款【全新产品】，产出它的设计提案白底图。"
           + "\n【重要】不要把第二张图的产品原样画出来、也不要把两个产品并排摆在一起——"
-          + "最终画面里只有**一款**新产品，它保有第一张图的功能属性，但外观造型受第二张图启发而重新设计。"
-          + KAIPIN_WHITE_BG_TAIL;
+          + "最终画面里只有**一款**新产品。"
+          + KAIPIN_INNOVATE_CLAUSE;
+
+    /** 无贴纸、只有产品B时的完整 prompt（HEAD + 共用尾巴）。 */
+    static final String KAIPIN_COLLIDE_PROMPT = KAIPIN_COLLIDE_PROMPT_HEAD + KAIPIN_WHITE_BG_TAIL;
 
     /**
-     * 开品设计提案的固定视角序列。覆盖工业设计评审看造型所需的角度；
-     * count > 5 时循环复用（第6张回到正面，与第1张同角度但由模型随机性产生细微差异，可用于挑选）。
+     * 开品出 N 张 = **N 个不同的设计方案**（08.05 改）。变化的是造型方向，视角固定成正面平视——
+     * 同一个角度才好横向比方案；换角度反而让"这是两个设计还是同一个换角度"分不清。
+     *
+     * <p>每条只给**造型探索方向**，不指定具体形态（指定了就成了我在替设计师做决定）。
+     * N > 方向数时循环复用，靠模型随机性产生同方向内的差异。
      */
-    private static final String[] KAIPIN_VIEWS = {
-        "正面平视（产品正对镜头、无透视变形，作为本组的基准视图，完整展示正面造型与图案布局）。",
-        "45° 侧前方视角（能同时看到正面与一侧侧面，体现体量感和厚度关系）。",
-        "正侧面平视（展示侧面轮廓线、厚度、以及挂钩/底座等结构与主体的连接方式）。",
-        "俯视 45°（从上方斜看，展示顶面结构、开口、内部分区或收纳布局）。",
-        "局部结构特写（微距靠近关键结构件——连接处/卡扣/开孔/接缝，清晰展示做工细节与装配关系，不要整体全景）。",
+    private static final String[] KAIPIN_DESIGN_DIRECTIONS = {
+        "整体轮廓走**极简几何**：用最少的线条与面完成功能，去掉一切非必要装饰，转折干净利落。",
+        "整体轮廓走**圆润有机**：曲线主导、边角圆滑饱满，像被水流打磨过，亲和无攻击性。",
+        "结构走**通透轻量**：大量镂空、细杆件、悬挑关系，视觉上轻盈到几乎消失，但受力仍合理。",
+        "结构走**体块厚重**：饱满的实体感、扎实的底座、明确的重心，传达耐用与稳定。",
+        "取**仿生**灵感：从动植物/自然形态（叶片、贝壳、骨骼、水滴、翅膀）借结构逻辑与曲线走势，不要做成卡通动物摆件。",
+        "做**模块化/可变**：明确的分件与拼接逻辑，部件可拆可换可堆叠，接缝本身成为设计语言。",
+        "强调**材质对撞**：两种质感（金属与木、哑光与透明、硬与软）在同一件产品上形成对比与分区。",
+        "做**折面/棱线**语言：以折纸般的平面转折和清晰棱线塑形，面与面之间有明确的明暗交界。",
     };
 
     /**
@@ -2109,6 +2310,8 @@ public class FlowController {
             GEN_CONC.acquire();
             try {
                 if (imageGen.generateImageMultiLowQuality(prompt, refs, white, out, aspect)) return true;
+            } catch (com.gofu.cloud.service.agent.UpstreamQuotaExhaustedException qe) {
+                throw qe;   // 额度耗尽：重试一定同样失败，穿透到批次循环让整批停下
             } catch (Exception e) {
                 boolean timedOut = e instanceof java.net.SocketTimeoutException
                         || e.getCause() instanceof java.net.SocketTimeoutException

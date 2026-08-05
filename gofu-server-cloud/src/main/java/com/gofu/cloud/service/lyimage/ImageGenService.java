@@ -289,6 +289,23 @@ public class ImageGenService {
         File whiteBgRef = (whiteImgPath != null && !whiteImgPath.isBlank())
             ? new File(whiteImgPath) : ref;
         boolean hasWhiteBg = whiteBgRef.isFile();
+        // 08.04 硬闸：没有白底图就**不生图**（用户定的规则）。白底图是本款产品的唯一真实锚点，
+        //   没有它画出来的只是"一个看起来像这品类的东西"，不是这款商品——那属于虚假宣传，
+        //   出了图反而更糟（用户会以为成功了）。用户按「品类-快麦编码」规范命名文件夹的目的
+        //   就是让系统凭编码去快麦取白底图；取不到该让用户去快麦补，不该降级硬画。
+        //   这也是废除 R2（落地锅盖架无白底兜底）的同一条理由。
+        // 定位：这是**最后一道**防线。正常入口各自已有前置拦截（导入走快麦兜底+提示、批量前端硬拦、
+        //   产品替换 400、单品前端闸门），且 runStep2/runSkuCross 传进来的白底图必非空。
+        //   真正会撞到这里的是 /api/ly-gen/sku-images —— 它把 whiteImgPath 默认成空串且无校验，
+        //   是绕过所有前置拦截的后门。抛错后 LyGenController 会按 SKU 记进 item.error，不会整批崩。
+        if (!hasWhiteBg) {
+            throw new IllegalStateException(
+                    "SKU「" + skuName + "」没有可用的产品白底图，已停止生图。"
+                  + "白底图是本款产品的唯一结构/颜色依据，缺它只能画出别款、属虚假宣传。"
+                  + "请按商品编码在快麦补一张白底图后重试"
+                  + "（产品替换模式：请检查所选文件夹下的「白底图」子目录）。"
+                  + " [诊断] whiteImgPath=" + whiteImgPath + ", 营销参考图=" + (hasRef ? "有" : "无"));
+        }
         File bag = (bagImagePath != null && !bagImagePath.isBlank()) ? new File(bagImagePath) : null;
         boolean hasBag = bag != null && bag.isFile();
         // 配件白底图筛选：优先用前面【已选的配件清单 accParts】（每项 code+qty）精确匹配白底图文件名——
@@ -523,70 +540,31 @@ public class ImageGenService {
             // 配套参考图作构图底（refs 第一张权重最高）+ 商品白底图锁主体
             File shelfBase = templateService.shelfRefFile(leaf, pick.group(), pick.ref());
             List<File> shelfRefs = new java.util.ArrayList<>();
-            boolean floorlidComposed = false;   // route2 已自行按"白底图优先+构图底"组好 refs 的标记
+            // ── 08.04 已废除「路线2 / R2」（落地锅盖架无白底图兜底）──────────────────────────
+            //  原实现：无白底图时，Java 把「米奇款预制架体照 + 锅盖/砧板收纳物」合成一张构图底当
+            //  最高权重参考图，配 image-shelf-floorlid.txt 让 AI 照它画（理由是"AI 从零画架体必崩"）。
+            //
+            //  为什么废：它的触发门槛是 `!hasWhiteBg`，而按产品定义**这个状态根本不该走到生图**——
+            //  没有白底图就没有本款的真实锚点，画出来的只是"一个看起来像锅盖架的东西"，不是这款商品。
+            //  用户 08.04 定的规则：快麦查不到白底图就让用户去快麦补，补不上就不生图。用户按
+            //  「品类-快麦编码」规范命名文件夹的目的正是让系统能凭编码去快麦取白底图，用户自己
+            //  从不提供白底图子目录。所以"无白底图"是个该被拦下来的错误态，不是一种要支持的降级模式。
+            //  给一条本该被拦掉的路径优化 prompt 质量 = 给死路铺砖。
+            //
+            //  连带删除：`isRealLidRack`/`floorHint` 判据、`compositeShelfFloorLid` 调用、
+            //  `image-shelf-floorlid.txt` 的加载、以及那段"无白底图时改写序号说明"的补丁
+            //  （那个补丁本身就是在给一条不该存在的路径打图文错位的补丁）。
+            //  `ShowerCompositor.compositeShelfFloorLid`、`image-shelf-floorlid.txt`、
+            //  `assets/base/shelf-落地锅盖架-米奇款.png`、`assets/collectibles/*` 均已无调用方，
+            //  暂留不删（属未使用资产，删除另议，不在本次改动范围）。
+            //  现在无白底图会在本方法入口直接抛错，压根到不了这里。
 
-            // ── 路线2（真·落地锅盖架专属）：Java 先合成「米奇款架体+锅盖/砧板收纳物」构图底，作最高权重参考图，
-            //    prompt 强约束"保架体/收纳物 1:1、只理顺卡位遮挡与背景"。绕开 AI 重画架体必崩。
-            //    ⚠️ 这条路 3 处写死锅盖架专属(米奇架体/锅盖砧板收纳物/米奇蝴蝶结prompt)，只适用真锅盖架。
-            //    其它落地架品种(树菜板架/沥水架等)品类名也叫「锅盖架」但实物不同，必须绕开这条、走下方通用整图AI
-            //    (白底图锁主体+品种prompt，与花洒同理)，否则会被贴成锅盖架(错图根因)。
-            //    判据：主件名/skuName 真提到"锅盖"才算真锅盖架。
-            String floorHint = (shelfSkuHint + " " + (skuName == null ? "" : skuName));
-            boolean isRealLidRack = floorHint.contains("锅盖");
-            // 原则修(0c)：构图最多细分到品类(锅盖架分落地/吸附两种构图风格)，**不按具体商品**。
-            //   route2 把「某张具体产品照(米奇/台面款)」合成收纳物当 img2img 底，属"细分到商品"——
-            //   会把小熊锅盖架 img2img 成那张预制款(主题没换/颜色不符)。故：**有真实白底图就绕开 route2**，
-            //   白底图作唯一主体锚走通用整图AI(与树菜板架同理)；route2 只在**无白底图**时作兜底
-            //   (AI 从零画架体易崩，才借预制底给结构)。
-            if (leaf.contains("锅盖架") && "落地".equals(pick.group()) && isRealLidRack && !hasWhiteBg) {
-                try {
-                    File rackImg = (shelfBase != null && shelfBase.isFile()) ? shelfBase
-                            : templateService.assetByPath("base/shelf-落地锅盖架-米奇款.png");
-                    java.util.List<File> collectibles = new java.util.ArrayList<>();
-                    File lid = templateService.assetByPath("collectibles/锅盖-侧立白底.png");
-                    File board = templateService.assetByPath("collectibles/砧板-侧立白底.png");
-                    if (lid != null) collectibles.add(lid);
-                    if (board != null) collectibles.add(board);
-                    if (lid != null) collectibles.add(lid);   // 三槽：锅盖/砧板/锅盖
-                    if (rackImg != null && rackImg.isFile()) {
-                        String baseImg = compositor.compositeShelfFloorLid(rackImg, collectibles, null, batch, seq, skuName + "-构图底");
-                        // 改:白底图优先(主体锚,第一张最高权重),构图底只当版式参考(第二张)。
-                        //    有真实白底图时白底图先进;构图底后进,prompt 已明确"架体以白底图为准,构图底只借摆法"。
-                        if (hasWhiteBg) shelfRefs.add(whiteBgRef);
-                        shelfRefs.add(new File(baseImg));       // 构图底作版式参考(白底图在前时它是第二张)
-                        floorlidComposed = true;
-                        shelfPrompt = PromptLoader.load("prompt/image-shelf-floorlid.txt")
-                                .replace("{{shelfPrompt}}", shelfSeg).replace("{{colorName}}", colorOnly);
-                        // 修(08.02 序号错位):本分支的进入条件含 !hasWhiteBg,所以 shelfRefs 里其实
-                        //   **只有构图底一张**,而 image-shelf-floorlid.txt 却写着"第一张是白底图、
-                        //   第二张是构图底" —— 模型会把构图底当成"本款白底图"照抄那个米奇预制款
-                        //   (与用户反馈的"SKU图跟白底图不一样"同一类图文错位)。无白底图时改写这两段
-                        //   序号说明,如实告诉模型"只有一张构图底、且它是别款、造型不可照抄"。
-                        if (!hasWhiteBg) {
-                            shelfPrompt = shelfPrompt
-                                .replace("第一张参考图是本款产品的白底图（真实实物）。",
-                                         "本次**没有提供本款产品的白底图**，唯一一张参考图是用【别款】落地架拼的构图底。")
-                                .replace("第二张参考图是用【别款】落地架拼的\"构图底\"，",
-                                         "这张构图底")
-                                .replace("架体一律以第一张白底图为准。",
-                                         "架体只能按本品种方案的文字描述来画,**不得照搬构图底里那款架体的造型细节**。");
-                        }
-                        log.info("落地锅盖架 路线2：白底图优先={}, 构图底={}", hasWhiteBg, baseImg);
-                    }
-                } catch (Exception ce) {
-                    log.warn("落地锅盖架构图底合成失败，回退整图AI: {}", ce.getMessage());
-                }
-            }
-
-            // 参考图组装：
-            //  · route2(无白底图兜底)已按"构图底"进 shelfRefs,此处不再重复加。
-            //  · 有白底图=唯一主体锚,一律丢弃预制产品照(避免实物被画成预制那款,不再对锅盖架开例外)。
-            boolean dropPresetRef = hasWhiteBg;
-            if (!floorlidComposed) {   // 非route2 才走通用组装(route2 已自行组好白底优先)
-                if (hasWhiteBg) shelfRefs.add(whiteBgRef);   // 白底图优先(主体锚)
-                if (shelfBase != null && shelfBase.isFile() && !dropPresetRef) shelfRefs.add(shelfBase);   // 预制图作版式参考,放白底之后
-                if (!hasWhiteBg && hasRef) shelfRefs.add(ref);
-            }
+            // 参考图组装：白底图=唯一主体锚（入口已保证非空），一律丢弃预制产品照
+            // （避免实物被画成预制那款，不再对锅盖架开例外）。
+            shelfRefs.add(whiteBgRef);   // 白底图 = 唯一主体锚（入口已保证非空）
+            // 注：`shelfBase`（构图库里为该条目配的预制产品照）**一律不作参考图**。
+            //   0c 起就是这个原则：白底图在时预制照会把实物带成预制那款（小熊锅盖架被 img2img 成米奇款）。
+            //   它现在只用于上面那条日志（记录库里配了哪张），不进 refs。
             // 主图追加为背景参考：白底图已锁主体，主图放最末只用于背景色调/氛围参考，权重最低。
             // 修(#1 08.02)：原来只给图不给文字描述，模型容易忽略最后一张图的背景而自行另编场景。
             //   补上主图背景的**文字**描述(bgStyleOverride = analyzeBackgroundStyleOnce(选定主图) 的产出，
@@ -600,13 +578,13 @@ public class ImageGenService {
                                    + "\n若上面【构图·按本品种方案】的文字描述了不同的场景/背景/台面/墙面颜色，**一律以本段主图背景基调为准**。";
                 }
             }
-            // 构图参考图说明：只在有真实预制参考图时才提示AI"参考图里的商品是别款/换成本款"；
-            // 无预制图时只有白底图，绝不能出现这段说明——否则AI会把白底图产品当"别款"替换掉。
+            // 构图参考图说明（{{compositionRefHint}}）：08.04 起恒为空，整段逻辑已删。
+            //   原来只在"refs 里有真实预制参考图"时才提示 AI"参考图里的商品是别款、换成本款"。
+            //   R2 废除 + 预制图一律丢弃后，refs 里只剩白底图(+可选主图作背景参考)，
+            //   **不存在**"除白底图以外的构图参考图"，故这段话永远不该出现。
+            //   ⚠ 这条约束反过来更要紧：只有白底图时若冒出这段话，AI 会把白底图产品当"别款"替换掉
+            //   （正是它当年要防的错）。日后若重新引入预制参考图，必须连带恢复这段说明。
             String compositionRefHint = "";
-            boolean hasPresetInRefs = shelfBase != null && shelfBase.isFile() && !dropPresetRef;
-            if (hasPresetInRefs || floorlidComposed) {
-                compositionRefHint = "【构图参考图·只借版式·不借产品】\n所给参考图中**除白底图以外**的那张构图参考图，只用来锁定排布：主体产品的摆放位置、拍摄视角、功能展示小图与文案标签的分区布局，做出同样专业的电商主图版式。它**仅用于锁定\"版式与构图\"**，其中出现的具体商品是别的产品，**绝对不要照搬**——所有位置（含功能小图、细节图）画的产品都必须是上方白底图那一款。";
-            }
             // 修(#1 08.02 二轮)：构图库 prompt 文本把「另一款商品」写得极细（如杯架方案写死
             //   "枪灰色碳钢杯架/上下两层/白色保温杯+玻璃杯+马克杯"）。预制*图片*在有白底图时已被
             //   dropPresetRef 丢掉，但这段*文字*仍整段留着 → 筷子筒被画成杯架(用户08.02反馈)。
@@ -616,32 +594,22 @@ public class ImageGenService {
             //   二轮改法：模板结构重排(白底图主体锁提到最前、别款描述隔离到末尾并包在"仅供借版式"
             //   分隔线内)，A/B 实测通过(shots/ab-B-subjectfirst.jpg 出真实筷子筒+酒红框+小熊印花，
             //   版式仍照库)。此处只保留"无白底图时"的兜底提示；有白底图的强约束已固化进模板正文。
+            // {{compositionTextOverride}}：08.04 起恒为空。原来是"无白底图时"的兜底提示
+            //   （"只能依据下方版式方案的文字描述作画"）——那是让模型**凭别款商品的文字描述臆造本款**，
+            //   本方法入口的硬闸已经让这个状态到不了这里。日后若重新允许无白底图生图，
+            //   要连带重新设计这段，并解决它自带的图文矛盾（模板要求忠于白底图、这段却说没有白底图）。
             String compositionTextOverride = "";
-            if (!hasWhiteBg) {
-                // 无白底图 = 没有主体锚，只能靠版式文字画。此时要反过来提醒：文字里的产品描述可参考，
-                // 但仍按本品种方案画，别把它当成"必须复刻某张照片"。
-                compositionTextOverride =
-                    "【注意·本次没有产品白底图】没有提供本款产品的白底图，只能依据下方版式方案的文字描述作画；"
-                  + "请按该品类的通用合理形态绘制，颜色取「" + colorOnly + "」，不要臆造过多细节。\n";
-            }
             shelfPrompt = shelfPrompt.replace("{{mainImgBgHint}}", mainImgBgHint)
                                      .replace("{{compositionRefHint}}", compositionRefHint)
                                      .replace("{{compositionTextOverride}}", compositionTextOverride);
-            log.info("架类生图: 叶子={}, 组={}, 预制参考图={}({}), 丢弃预制={}, 白底优先={}, route2构图底={}",
-                    leaf, pick.group(), shelfBase != null, pick.ref(), dropPresetRef, hasWhiteBg, floorlidComposed);
-            // R2/R3 共用同一个调用循环，靠 floorlidComposed 区分：
-            //   R2 = 落地锅盖架专属(!hasWhiteBg 才触发，构图底是别款预制照合成的)，模板 image-shelf-floorlid.txt
-            //   R3 = 架类通用，模板 image-shelf-main.txt（08.02 已做主体锁前置+别款描述末尾隔离的那条）
+            log.info("架类生图: 叶子={}, 组={}, 库里配了预制图={}({}, 08.04起一律不用作参考图), 白底图={}",
+                    leaf, pick.group(), shelfBase != null, pick.ref(), hasWhiteBg);
+            // 08.04：R2 已废，架类只剩这一条路（R3 架类通用，模板 image-shelf-main.txt——
+            //   08.02 做过主体锁前置 + 别款描述末尾隔离的那条）。
             List<String> shelfRoles = new java.util.ArrayList<>();
-            if (floorlidComposed) {
-                shelfRoles.add("route2构图底(别款预制照合成)");
-            } else {
-                if (hasWhiteBg) shelfRoles.add("白底图(主体锚)");
-                if (shelfBase != null && shelfBase.isFile() && !dropPresetRef) shelfRoles.add("预制图(版式参考)");
-                if (!hasWhiteBg && hasRef) shelfRoles.add("营销参考图");
-            }
+            shelfRoles.add("白底图(主体锚)");   // 入口已保证非空
             if (hasRef && hasWhiteBg) shelfRoles.add("主图(背景基调参考·权重最低)");
-            dumpGenPrompt(floorlidComposed ? "R2 落地锅盖架" : "R3 架类通用", skuName, shelfPrompt, shelfRoles);
+            dumpGenPrompt("R3 架类通用", skuName, shelfPrompt, shelfRoles);
             Exception lastShelf = null;
             int maxBackoff = 4;
             for (int attempt = 0; attempt < keys.size() * (1 + maxBackoff); attempt++) {
