@@ -60,7 +60,7 @@ public final class PromptLab {
 
     private record Args(String category, String skuHint, String kind, int n, String whitePath,
                         boolean gen, String variant, boolean hasFilter, String contextId,
-                        String tag, boolean refB, String note) {}
+                        String tag, boolean refB, String note, String style) {}
 
     private static Args parse(String[] argv) {
         Map<String, String> kv = new LinkedHashMap<>();
@@ -87,7 +87,10 @@ public final class PromptLab {
                 kv.get("ctx"),
                 kv.get("tag"),
                 flags.contains("refB"),
-                kv.get("note"));
+                kv.get("note"),
+                // 默认 random 与生产前端一致(entry.js genOpts.styleId='random')，不是空——
+                // 生产链 resolveStylePrompt 对空/random 都会随机抽 9 种之一，永不返回空串。
+                kv.getOrDefault("style", "random"));
     }
 
     private static void usage() {
@@ -104,6 +107,10 @@ public final class PromptLab {
                                        或用 \n 表示换行。**这是开品唯一承载设计意图的文本**
                   --n    <张数>        默认 3
                   --white <白底图路径>  --gen 时必填；不出图时可省(只影响 refs 打印)
+                  --style <风格id>     默认 random(与生产前端一致)。可选 original/tech-blue/girl-pink/
+                                       premium-gray/natural-green/sunset-orange/khaki/light-yellow/beige。
+                                       random 每次随机抽一种(整组统一)，故总字数会在 60~128 字间浮动；
+                                       **压字数做对比时请指定具体风格**，否则基准不稳
                   --hasFilter          花洒专用：该 SKU 带滤芯配件(否则库会剔除 focus=滤芯 的构图)
                   --ctx  <contextId>   可选。传了会走跨次去重(同一商品重生尽量避开上次抽过的构图)
                   --gen                真调 /v1/images/edits 出图。不传=零成本只打印
@@ -192,6 +199,19 @@ public final class PromptLab {
         build.setAccessible(true);
         FlowController fc = newFlowController();
 
+        // 08.06 修正观测偏差：原来这里给 buildSeriesPrompt 的 styleReq 硬传 null，
+        //   而它是 `if (styleReq != null && !styleReq.isBlank())` 才拼【画面风格】段 ——
+        //   于是段偏移表里永远没有这一段，看起来像"9种改图风格在主图链上没生效"，实则是本台自己没传。
+        //   生产链是通的：前端 entry.js 默认 styleId='random'、单品页有下拉框(10项)，
+        //   resolveStylePrompt 对空/random 都随机抽 9 种之一、未知 id 回退 original，**永不返回空串**。
+        //   故本台改为同样走 resolveStylePrompt，让打印的字数=真实下发字数（此前偏低 60~128 字）。
+        Method resolveStyle = FlowController.class.getDeclaredMethod("resolveStylePrompt", Object.class);
+        resolveStyle.setAccessible(true);
+        String styleReq = (String) resolveStyle.invoke(fc, args.style());
+        System.out.printf("[STYLE ] --style %s → 【画面风格】%d字%s%n",
+                args.style(), styleReq == null ? 0 : styleReq.length(),
+                "random".equals(args.style()) ? "（随机抽中，整组统一；要稳定比字数请用 --style 指定具体风格）" : "");
+
         List<String> out = new ArrayList<>();
         for (int i = 0; i < args.n(); i++) {
             String base = i < picks.size() ? picks.get(i).prompt()
@@ -206,7 +226,7 @@ public final class PromptLab {
             }
 
             String prompt = (String) build.invoke(fc, base, i + 1, args.n(), seriesPlan,
-                    subjectLock, negative, null, true, structLock, isShower, fromLib, sellCands);
+                    subjectLock, negative, styleReq, true, structLock, isShower, fromLib, sellCands);
 
             // variant=both 时**不在这里**分叉：old 侧由 runGen 从这同一串派生（toOldVariant 是纯文本变换）。
             // 这是 A/B 有效性的关键——pickMainCompositionsDetailed 会打乱池子、pickSellPointCandidates 也是随机的，
@@ -293,8 +313,10 @@ public final class PromptLab {
             String dir = (String) staticCall("kaipinViewHint",
                     new Class<?>[]{int.class, int.class}, i, args.n());
             // 走生产同一条路：填进占位符，而不是追加到末尾（08.05 段序修复）
-            String prompt = enforceNoIntersection(
-                    (String) staticCall("fillDirection", new Class<?>[]{String.class, String.class}, base, dir));
+            // 开品走 generateImageMultiLowQuality，08.06 起该路径**不追加**反穿模段（纯白底单产品，
+            // 没有多物体重叠问题），故此处也不加——否则离线台又会和生产漂移。
+            String prompt = (String) staticCall("fillDirection",
+                    new Class<?>[]{String.class, String.class}, base, dir);
             System.out.printf("%n[第 %d/%d 张]%n", i + 1, args.n());
             dump(prompt, null, clamped.isEmpty() ? null : clamped);
             out.add(prompt);

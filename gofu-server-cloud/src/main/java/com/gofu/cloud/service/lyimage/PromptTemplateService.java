@@ -352,8 +352,15 @@ public class PromptTemplateService {
     }
 
     // 分级格式固定任务开头(原每行 xlsx"任务"列都是同一句,收口成常量,不再逐行存)。
-    private static final String COMP_TASK =
-            "制作一张1:1正方形电商作图参考图，严格复刻参考版式比例、主体数量、镜头角度、人物动作、信息模块位置和视觉动势。产品仅作为可替换占位主体，不描述其具体内部结构，不分析或复刻背景内容。";
+    // 08.06 删除整句(-91字/张)：三层信息全是别处已说过或由参数保证的——
+    //   · "严格复刻参考版式比例/主体数量/镜头角度/信息模块位置" + "产品仅作为可替换占位主体，
+    //     不描述其具体内部结构" + "不分析或复刻背景内容" ← 正是围栏 LIB_FENCE 那段话的逐条重说
+    //     （"只用来定版式：视角俯仰、主体位置与占比、信息栏分区…产品名称/材质/部件形状一律与本次无关"）。
+    //     围栏在它上方 450 字处、且带【】标题，是更强的位置；这里再说一遍只是稀释。
+    //   · "1:1正方形" ← 画幅由 API 参数保证(GptImageAgent.pickSize→size 字段 + buildSizeHint 追加
+    //     英文方向句)，且主图路径 aspect 走 resolveAutoAspect 按白底图吸附，可能是 3:4/9:16——
+    //     此处硬写"1:1"反而与真实请求参数矛盾，是在制造冲突而非约束。
+    private static final String COMP_TASK = "";
 
     /** 分级构图拼装:任务开头 + merge(_template, row) 按固定字段序拼句。禁止不在此(交 ec-catalog negative,消重复)。 */
     private String assembleComposition(Map<String, Object> template, Map<String, Object> row) {
@@ -363,15 +370,36 @@ public class PromptTemplateService {
             merged.put(e.getKey(), e.getValue());   // 行覆盖模板
         }
         // 字段拼接序(与旧 baked prompt 一致,禁止/id 排除;视觉记忆点接在风格前)
-        String[] order = {"构图", "核心主体", "人物元素", "文字", "放大模块", "对比模块", "视觉记忆点", "风格与画质"};
+        // 08.06 只取**版式**字段，删掉三个字段（-201字，且删的正是污染源）：
+        //   · 核心主体：它就是"别款商品的产品描述"本体（"承托锅盖与砧板的关系、接水盘位置、
+        //     不绑定原产品的动物外形"），本款结构该由白底图定，这段是筷子筒被画成杯架那类错图的源头。
+        //   · 视觉记忆点："保持白底图真实配色不得改变"——subjectLock 已说，重复。
+        //   · 风格与画质：写实电商/高清质感属通用要求（模板正文已有），且它夹带别款细节
+        //     （"支架、锅盖、砧板的前后关系准确，红色部件有光泽"）。
+        //   保留的都是与产品无关的版式信息：构图位置/人物有无/文字块位置/放大与对比模块。
+        //
+        // 08.06 第二轮再砍（构图库段 342→约110字/张）。逐字段统计了全库 63 行(见下)，只留真带独有信息的：
+        //   · 删「文字」(-78字/张)：实测 63 行里 62 行零新增信息——它的内容 = 「构图」字段的尾句
+        //     原样重抄一遍(均23字) + 54字固定样板句"只复刻文字块的位置/行数/字号层级…不生成或识别
+        //     原图具体文字、数字、品牌名与商标"。那句样板还与下游【文字渲染要求】正面冲突（一个要求
+        //     不生成文字、一个要求把主副标题渲染成中文），删掉同时消掉这处自相矛盾。
+        //     文字块的位置信息不会丢：它本来就在「构图」里（如"标题位于左上"），本方法仍取该字段。
+        //     唯一有独有内容的一行(吸盘#4"在画面边缘保留必要标题与说明区")属兜底泛述，不值 78 字/张。
+        //   · 「人物元素」「放大模块」「对比模块」改为**仅取行覆盖值**，不再回落 _template 默认
+        //     (-103字/张)：全库 156 处默认值都是三句同一措辞的负向兜底("画面不出现完整人物"/
+        //     "无独立放大框"/"无明确优劣对比模块")，说的是"本条版式没有这个模块"——即缺省态，
+        //     不写自然就没有，无需逐张花百来字声明。真正有信息的是被行覆盖的少数(14/13/6 处，
+        //     如"出现一只从右侧按压吸盘的手""平台宽度用橙色覆盖面+双向箭头做尺寸放大")，仍原样保留。
+        String[] order = {"构图", "人物元素", "放大模块", "对比模块"};
         StringBuilder sb = new StringBuilder(COMP_TASK);
         for (String k : order) {
-            Object v = merged.get(k);
+            // 三个模块字段只认行覆盖：_template 里的默认值是"本条没有该模块"的负向兜底，不进 prompt。
+            Object v = "构图".equals(k) ? merged.get(k) : row.get(k);
             if (v == null) continue;
             String s = String.valueOf(v).trim();
-            if (!s.isBlank()) sb.append(' ').append(s);
+            if (!s.isBlank()) sb.append(sb.length() > 0 ? " " : "").append(s);
         }
-        return sb.toString();
+        return sb.toString().trim();
     }
 
     /**
@@ -544,7 +572,7 @@ public class PromptTemplateService {
 
     /**
      * 按 category 路径从叶子向根**冒泡**查找品类字段（subjectLock/negative），仿羽刃 ecCatalogResolveUp。
-     * 如 "家装主材>厨房>厨房挂件>锅盖架" 依次试完整路径→去尾段→…→"家装主材"→ __default__ 全局默认。
+     * 如 "家装主材>厨房>厨房挂件>锅盖架" 依次试完整路径→去尾段→…→"家装主材"→ 末段匹配 → __default__ 全局默认。
      */
     private String ecResolveUp(String category, String field) {
         Map<String, Object> cat = ecCatalog();
@@ -558,6 +586,31 @@ public class PromptTemplateService {
             int gt = c.lastIndexOf('>');
             if (gt < 0) break;
             c = c.substring(0, gt).trim();
+        }
+        // 08.06 补末段匹配：上面的冒泡只认**全路径**（靠 lastIndexOf('>') 逐级往上截），
+        //   传裸叶子"锅盖架"时第一次 get 就 miss、没有 '>' 直接 break → 静默落 __default__ 兜底
+        //   （318/419字的泛化约束，而真条目是 162/233），出图约束完全不对却无任何日志。
+        //   而构图库那套查找(pickMainCompositionsDetailed:237-242)是先取末段再比 key，裸叶子能命中——
+        //   于是"[LIB] 构图库命中 N 套"照常打印，掩盖了 ec-catalog 早已失配。两套解析不一致本身是隐患：
+        //   生产前端传的是级联全路径所以没踩到，但离线台 --cat 锅盖架 一直在测兜底值，将来别处传裸叶子同样中招。
+        //   故这里对齐构图库：全路径冒泡全 miss 后，再按末段匹配一次。
+        //   实测 ec-catalog 22 个条目的叶子名 0 重名，无歧义；仍按"先全路径后末段"排序，更具体的路径优先。
+        String leaf = category == null ? "" : category.replace('＞', '>').replace('›', '>').trim();
+        leaf = leaf.contains(">") ? leaf.substring(leaf.lastIndexOf('>') + 1).trim() : leaf;
+        if (!leaf.isBlank()) {
+            for (Map.Entry<String, Object> e : cat.entrySet()) {
+                String k = e.getKey();
+                if ("__default__".equals(k)) continue;
+                String kLeaf = k.contains(">") ? k.substring(k.lastIndexOf('>') + 1).trim() : k.trim();
+                if (!kLeaf.equals(leaf)) continue;
+                if (e.getValue() instanceof Map<?, ?> m) {
+                    Object v = m.get(field);
+                    if (v != null && !String.valueOf(v).isBlank()) {
+                        log.debug("ecResolveUp 末段命中: category={} → key={} field={}", category, k, field);
+                        return String.valueOf(v);
+                    }
+                }
+            }
         }
         // 回退全局默认 __default__
         Object def = cat.get("__default__");
