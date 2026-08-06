@@ -879,7 +879,12 @@ public class ImageGenerationService {
     public boolean generateImageMultiLowQuality(String prompt, List<String> refImagePaths,
                                                  String whiteBgPath, String outputPath, String aspect) {
         ImageGeneratorAgent agent = resolveAgent(null);
-        String enforcedPrompt = enforceNoIntersectionPrompt(prompt);
+        // 08.06：开品**不追加**那 441 字的反穿模段。开品画的是纯白底、单个产品、无场景无道具，
+        //   压根没有"多物体重叠谁在前"的问题（那段整段在讲收纳物与杆件/手部/透明件的遮挡关系）。
+        //   1500 字是精度上限，开品原本 1636 字已超——把这段白扔进去，等于用四分之一的额度
+        //   换一条与本图无关的约束，还挤掉了"结构清晰可辨、能判断打样"那些真要紧的话。
+        //   开品自己的物理约束在 KAIPIN_WHITE_BG_TAIL 的【主体】段里（结构分件/接缝/连接方式清晰可辨）。
+        String enforcedPrompt = prompt == null ? "" : prompt.trim();
         log.info("[开品生图] 使用智能体 [{}] refs={} quality=low", agent.getId(), refImagePaths == null ? 0 : refImagePaths.size());
         if (agent instanceof com.gofu.cloud.service.agent.GptImageAgent gpt) {
             return gpt.generateMulti(enforcedPrompt, refImagePaths, whiteBgPath, outputPath, aspect, "low");
