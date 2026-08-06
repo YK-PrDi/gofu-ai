@@ -1,6 +1,8 @@
 package com.gofu.cloud.service.lyimage;
 
 import com.gofu.cloud.config.LyImageProperties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import javax.imageio.ImageIO;
@@ -20,6 +22,8 @@ import java.util.List;
  */
 @Component
 public class ShowerCompositor {
+
+    private static final Logger log = LoggerFactory.getLogger(ShowerCompositor.class);
 
     private final LyImageProperties appProperties;
 
@@ -232,6 +236,12 @@ public class ShowerCompositor {
         if (base == null) throw new RuntimeException("主件框合成读底图失败");
         BufferedImage prod = whiteToTransparent(ImageIO.read(mainImg));
         if (prod == null) return baseImg;
+        // 08.06：裁到产品真实内容 bbox。白底图四周普遍留大片白边，不裁的话下面的
+        //   横长/竖长判断看的是**图片**长宽而非**产品**长宽 —— 方形白底图(1024×1024)里
+        //   一个竖高的锅盖架会被判成"横长"，选到 cols=1/rows=N 的竖排版式，
+        //   每格被压成 150×36 的扁条，竖高产品塞进去必然认不出（用户 08.06 反馈
+        //   「×3 角标内图标模糊乱码」，实为版式选错导致的过度压缩，不是渲染失真）。
+        prod = cropToContent(prod);
 
         int W = base.getWidth(), H = base.getHeight();
         Graphics2D g = base.createGraphics();
@@ -259,7 +269,12 @@ public class ShowerCompositor {
         int areaW = (int)(cardW * 0.84), areaH = (int)(cardH * 0.84);
         // 按数量选网格：够就排一行(横长产品)/一列，多则近似方阵；放不下自然缩小(格内 fit)。
         int n = Math.min(mainQty, 9);   // 上限 9，超过靠角标表达，避免糊成一团
-        boolean landscape = prod.getWidth() >= prod.getHeight();
+        // 08.06：bbox 近正方(0.9~1.1)时按**竖长**处理。满幅方图（架体撑满整幅、四周无白边可裁，
+        //   如 assets/base/ 下的合成底图 2560×2560）过不了 cropToContent，会落回"横长"选到
+        //   cols=1/rows=N 的扁条版式，实测缩放比高达 51:1。架类产品几乎都是竖高的，
+        //   平局判竖长是更安全的默认；真实快麦白底图普遍带白边，走 bbox 已经正确、不受此分支影响。
+        double ar = (double) prod.getWidth() / Math.max(1, prod.getHeight());
+        boolean landscape = ar > 1.1;
         int cols, rows;
         if (n <= 3) {
             // 1~3 个：横长产品排一列(上下叠)、竖长产品排一行——让单个产品尽量大
@@ -269,6 +284,12 @@ public class ShowerCompositor {
             rows = (int)Math.ceil((double) n / cols);
         }
         int cellW = areaW / cols, cellH = areaH / rows;
+        // 08.06：把网格选择落日志。① 现场诊断"角标里认不出是什么"只能靠这行分辨是
+        //   版式选错还是缩放失真；② 验证台不必再抄一份同样的计算（抄必漂移，见 PromptLab 教训）。
+        log.info("×{} 主件卡: 产品bbox {}×{}({}) → 网格 {}列×{}行, 格内 {}×{}, 缩放比 {}:1",
+                mainQty, prod.getWidth(), prod.getHeight(), landscape ? "横长" : "竖长",
+                cols, rows, (int)(cellW * 0.88), (int)(cellH * 0.88),
+                String.format("%.1f", (double) prod.getWidth() / Math.max(1, (int)(cellW * 0.88))));
         for (int i = 0; i < n; i++) {
             int r = i / cols, c = i % cols;
             // 格内留 6% 间距，fit 保持比例；格不够大时自动缩小(即"放不下就叠放/缩排")
@@ -536,9 +557,37 @@ public class ShowerCompositor {
     private void drawImageFit(Graphics2D g, BufferedImage img, int x, int y, int w, int h) {
         int iw = img.getWidth(), ih = img.getHeight();
         double scale = Math.min((double) w / iw, (double) h / ih);
-        int nw = (int)(iw * scale), nh = (int)(ih * scale);
+        int nw = Math.max(1, (int)(iw * scale)), nh = Math.max(1, (int)(ih * scale));
         int nx = x + (w - nw) / 2, ny = y + (h - nh) / 2;
-        g.drawImage(img, nx, ny, nw, nh, null);
+        g.drawImage(downscaleStepwise(img, nw, nh), nx, ny, nw, nh, null);
+    }
+
+    /**
+     * 逐级折半降采样（08.06 修「×N 角标内产品图模糊扭曲」）。
+     *
+     * <p>为什么必须分级：单步把 1024px 白底图直接缩到卡内小格（实测 ×2 时每格约 151×56，缩放比 7~18:1），
+     * bilinear 每个目标像素只采样源图 2×2 邻域，**其余源像素完全不参与计算**——细节随机取样成噪点，
+     * 呈"模糊扭曲的抽象贴图"。这正是出图评估报告二.3 / 三.1 那两条，属图像处理缺陷，改 prompt 无用。
+     * 每次至多折半地缩，等效于面积平均，全部源像素都对结果有贡献。
+     *
+     * <p>放大、或缩小不到 2 倍时原样返回（这些情形单步 bilinear 本来就够）。
+     */
+    static BufferedImage downscaleStepwise(BufferedImage src, int tw, int th) {
+        int w = src.getWidth(), h = src.getHeight();
+        if (tw <= 0 || th <= 0 || w <= tw * 2 || h <= th * 2) return src;
+        BufferedImage cur = src;
+        while (w > tw * 2 && h > th * 2) {
+            w = Math.max(tw, w / 2);
+            h = Math.max(th, h / 2);
+            BufferedImage next = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+            Graphics2D gg = next.createGraphics();
+            gg.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            gg.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+            gg.drawImage(cur, 0, 0, w, h, null);
+            gg.dispose();
+            cur = next;
+        }
+        return cur;
     }
 
     /** 白底转透明：RGB 三通道均 >238 的像素 alpha 置 0（去掉白底图的白背景）。 */
