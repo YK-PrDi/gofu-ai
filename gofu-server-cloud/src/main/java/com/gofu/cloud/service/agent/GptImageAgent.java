@@ -146,7 +146,13 @@ public class GptImageAgent implements ImageGeneratorAgent {
     @Override
     public boolean generateMulti(String prompt, List<String> refImagePaths,
                                  String whiteBgPath, String outputPath, String aspect) {
-        return generateMulti(prompt, refImagePaths, whiteBgPath, outputPath, aspect, "medium");
+        // 08.07：medium → high。Arena 榜首那 1337 分是 **GPT Image 2 (high)**，档次是分开计分的，
+        //   而这条默认路径（主图 genAllMains / 产品替换 genReplaceMains 都落它）一直跑 medium，
+        //   等于没用满已有模型。而架类 SKU 走的另一套客户端 AiImageClient:307 早就硬编码 high——
+        //   两条路径档次不一致属历史遗留、非有意设计。四轮治不好的"结构失真/细节保真"恰是档位最相关项，
+        //   故在考虑换模型（Nano Banana 2 仅 1261，比 GPT Image 2 high 低 76 分，换过去可能是降级）
+        //   之前，先把现有模型用满。代价：high 比 medium 慢，注意是否重新触发上游读超时。
+        return generateMulti(prompt, refImagePaths, whiteBgPath, outputPath, aspect, "high");
     }
 
     /** quality 可传 "low"/"medium"/"high"，开品模式传 "low" 加快响应。 */
@@ -245,7 +251,7 @@ public class GptImageAgent implements ImageGeneratorAgent {
 
     private boolean generateWithImages(String prompt, List<File> imageFiles, String outputPath,
                                        String apiKey, String baseUrl, String size) {
-        return generateWithImages(prompt, imageFiles, outputPath, apiKey, baseUrl, size, "medium", false);
+        return generateWithImages(prompt, imageFiles, outputPath, apiKey, baseUrl, size, "high", false);
     }
 
     private boolean generateWithImages(String prompt, List<File> imageFiles, String outputPath,
@@ -287,7 +293,8 @@ public class GptImageAgent implements ImageGeneratorAgent {
                 writeField(os, boundary, "model", "gpt-image-2");
                 writeField(os, boundary, "prompt", finalPrompt);
                 writeField(os, boundary, "size", size);
-                writeField(os, boundary, "quality", quality != null ? quality : "medium");
+                // 08.07：兜底档也从 medium 提到 high（显式传 low 的开品模式不受影响，它走 quality 参数）
+                writeField(os, boundary, "quality", quality != null ? quality : "high");
                 writeField(os, boundary, "output_format", "jpeg");
                 for (File f : preparedFiles) {
                     writeFile(os, boundary, "image[]", f);
@@ -439,7 +446,7 @@ public class GptImageAgent implements ImageGeneratorAgent {
                 writeField(os, boundary, "model", "gpt-image-2");
                 writeField(os, boundary, "prompt", prompt != null ? prompt : "");
                 writeField(os, boundary, "size", size);
-                writeField(os, boundary, "quality", "medium");
+                writeField(os, boundary, "quality", "high");   // 08.07 局部重绘同步提档
                 writeField(os, boundary, "output_format", "jpeg");
                 writeFile(os, boundary, "image", imageFile);
                 writeFile(os, boundary, "mask", maskFile);
@@ -483,7 +490,7 @@ public class GptImageAgent implements ImageGeneratorAgent {
                     "model", "gpt-image-2",
                     "prompt", prompt != null ? prompt : "product photo",
                     "size", size,
-                    "quality", "medium",
+                    "quality", "high",   // 08.07 纯文生图同步提档
                     "output_format", "jpeg"
             );
 

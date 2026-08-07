@@ -865,7 +865,7 @@ public class ImageGenerationService {
         log.info("[详情图生图] 使用智能体 [{}] refs={} fitContain=true", agent.getId(),
                 refImagePaths == null ? 0 : refImagePaths.size());
         if (agent instanceof com.gofu.cloud.service.agent.GptImageAgent gpt) {
-            return gpt.generateMulti(enforcedPrompt, refImagePaths, whiteBgPath, outputPath, aspect, "medium", true);
+            return gpt.generateMulti(enforcedPrompt, refImagePaths, whiteBgPath, outputPath, aspect, "high", true);   // 08.07 详情图同步提档
         }
         return agent.generateMulti(enforcedPrompt, refImagePaths, whiteBgPath, outputPath, aspect, null);
     }
